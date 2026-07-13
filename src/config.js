@@ -175,7 +175,7 @@ const config = {
     //   v3.17.20: 用户明确不要"监控超时退出"（不要 6 小时到期退出），保持 0
     maxWatchDurationMs: parseInt(process.env.MAX_WATCH_DURATION_MS || '0', 10),
     // v3.17.20: FDV 下限（USD），低于此值自动移除监控（默认开启 $20,000）
-    //   Birdeye fdv 字段是 USD 计价。15 秒巡检一次（见 TokenWatchdog）
+    //   Birdeye fdv 字段是 USD 计价。15 分钟巡检一次（见 TokenWatchdog）
     minFdVUsd: parseFloat(process.env.MIN_FDV_USD || '30000'),
     // v3.17.20: LP 下限（SOL），低于此值自动移除监控（默认开启 5000 SOL）
     //   用链上池子 quote vault 的实际 SOL 余额，不依赖 Birdeye（新币数据不准）

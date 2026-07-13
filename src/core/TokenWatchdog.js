@@ -19,7 +19,7 @@ const { getMonitor } = require('../monitor/HealthMonitor');
 const { fetchTokenMarketOnly, fetchTokenFullInfo } = require('../utils/tokenMeta');
 
 const monitor = getMonitor();
-monitor.registerModule('TokenWatchdog', { staleMs: 600_000, label: 'Token Watchdog' });
+monitor.registerModule('TokenWatchdog', { staleMs: 1_800_000, label: 'Token Watchdog' });
 
 class TokenWatchdog {
   /**
@@ -52,8 +52,8 @@ class TokenWatchdog {
       ? parseFloat(process.env.MIN_LP_SOL)
       : config.strategy.minLpSol;
 
-    // v3.29: 代币年龄过滤 — creation_time 超过此值的代币自动移除监控（减少 watchlist 压力）
-    this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '86400000', 10); // 默认 24h
+    // 代币年龄过滤默认关闭；如需恢复，可显式设置 MAX_TOKEN_AGE_MS。
+    this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '0', 10);
 
     this._pendingExitMints = new Set();
     this._checkInterval = null;
@@ -89,7 +89,7 @@ class TokenWatchdog {
         monitor.recordError('TokenWatchdog', err, { phase: 'check' });
         console.error(`[TokenWatchdog] check error: ${err.message}`);
       });
-    }, parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '15000', 10));
+    }, parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '900000', 10));
 
     // 首次检查延迟 10 秒
     setTimeout(() => {
