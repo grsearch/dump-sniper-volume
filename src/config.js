@@ -194,7 +194,7 @@ const config = {
     confirmWindowMs: parseInt(process.env.ORDER_FLOW_CONFIRM_WINDOW_MS || '4000', 10),
     buyGraceMs: parseInt(process.env.ORDER_FLOW_BUY_GRACE_MS || '700', 10),
     minSellSol: parseFloat(process.env.ORDER_FLOW_MIN_SELL_SOL || process.env.MIN_SELL_SOL || '20'),
-    minDropPct: parseFloat(process.env.ORDER_FLOW_MIN_DROP_PCT || '6'),
+    minDropPct: parseFloat(process.env.ORDER_FLOW_MIN_DROP_PCT || '12'),
     maxDropPct: parseFloat(process.env.ORDER_FLOW_MAX_DROP_PCT || process.env.MAX_PRICE_IMPACT_PCT || '30'),
     minSellCount: parseInt(process.env.ORDER_FLOW_MIN_SELL_COUNT || process.env.MIN_TRIGGER_SELL_COUNT || '2', 10),
     minUniqueSellers: parseInt(process.env.ORDER_FLOW_MIN_UNIQUE_SELLERS || '2', 10),
