@@ -838,6 +838,7 @@ async function main() {
       postExitTracker.shutdown();
       positionManager.stop();
       tokenWatchdog.stop();
+      dumpDetector.shutdown && dumpDetector.shutdown();
       alertChecker.stop();
       monitor.stop();
       executor.stop && executor.stop();

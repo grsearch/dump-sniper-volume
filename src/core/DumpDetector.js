@@ -75,15 +75,32 @@ class DumpDetector extends EventEmitter {
     this._recentSells = new Map();
     this._recentSellWindowMs = 10_000; // 追踪最近 10 秒
 
+    // v3.18: 多 LaserStream region 会重复推同一笔 tx，按 signature 去重。
+    this._processedSigs = new Map(); // signature -> expireAt
+    this._sigDedupMs = parseInt(process.env.DUMP_DETECTOR_SIG_DEDUP_MS || '60000', 10);
+
     // 定期清理过期记录
     this._recentSellCleanup = setInterval(() => {
-      const cutoff = Date.now() - this._recentSellWindowMs;
+      const now = Date.now();
+      const cutoff = now - this._recentSellWindowMs;
       for (const [mint, sells] of this._recentSells) {
         while (sells.length > 0 && sells[0].ts < cutoff) sells.shift();
         if (sells.length === 0) this._recentSells.delete(mint);
       }
+      for (const [sig, expireAt] of this._processedSigs) {
+        if (expireAt <= now) this._processedSigs.delete(sig);
+      }
     }, 5_000);
     if (this._recentSellCleanup.unref) this._recentSellCleanup.unref();
+  }
+
+  shutdown() {
+    if (this._recentSellCleanup) {
+      clearInterval(this._recentSellCleanup);
+      this._recentSellCleanup = null;
+    }
+    this._recentSells.clear();
+    this._processedSigs.clear();
   }
 
   setPoolStateCache(cache) {
