@@ -5,9 +5,9 @@
   "main": "src/index-flow.js",
   "scripts": {
     "start": "node src/index-flow.js",
-    "start:legacy": "node src/index.js",
+    "start:legacy": "node src/index-legacy.js",
     "dev": "node --trace-warnings src/index-flow.js",
-    "dev:legacy": "node --trace-warnings src/index.js",
+    "dev:legacy": "node --trace-warnings src/index-legacy.js",
     "health": "node scripts/health.js",
     "health:json": "node scripts/health.js --json",
     "diagnose": "node scripts/diagnose.js",
