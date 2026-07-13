@@ -38,7 +38,8 @@ class OrderFlowTracker extends EventEmitter {
       opts.replaceDumpSignal ?? flowConfig.replaceDumpSignal ?? boolEnv('ORDER_FLOW_REPLACE_DUMP_SIGNAL', true);
     this.windowMs = opts.windowMs ?? flowConfig.windowMs ?? numEnv('ORDER_FLOW_WINDOW_MS', 10_000);
     this.confirmWindowMs =
-      opts.confirmWindowMs ?? flowConfig.confirmWindowMs ?? numEnv('ORDER_FLOW_CONFIRM_WINDOW_MS', 3_000);
+      opts.confirmWindowMs ?? flowConfig.confirmWindowMs ?? numEnv('ORDER_FLOW_CONFIRM_WINDOW_MS', 4_000);
+    this.buyGraceMs = opts.buyGraceMs ?? flowConfig.buyGraceMs ?? numEnv('ORDER_FLOW_BUY_GRACE_MS', 700);
     this.minSellSol =
       opts.minSellSol ?? flowConfig.minSellSol ?? numEnv('ORDER_FLOW_MIN_SELL_SOL', config.strategy.minSellSol || 20);
     this.minDropPct =
@@ -56,6 +57,8 @@ class OrderFlowTracker extends EventEmitter {
     this.minUniqueSellers =
       opts.minUniqueSellers ?? flowConfig.minUniqueSellers ?? numEnv('ORDER_FLOW_MIN_UNIQUE_SELLERS', 2);
     this.minBuySol = opts.minBuySol ?? flowConfig.minBuySol ?? numEnv('ORDER_FLOW_MIN_BUY_SOL', 3);
+    this.minAbsorbRatio =
+      opts.minAbsorbRatio ?? flowConfig.minAbsorbRatio ?? numEnv('ORDER_FLOW_MIN_ABSORB_RATIO', 0.25);
     this.minBuySellRatio =
       opts.minBuySellRatio ?? flowConfig.minBuySellRatio ?? numEnv('ORDER_FLOW_MIN_BUY_SELL_RATIO', 1.25);
     this.minImbalance =
@@ -65,7 +68,7 @@ class OrderFlowTracker extends EventEmitter {
     this.minReboundPct =
       opts.minReboundPct ?? flowConfig.minReboundPct ?? numEnv('ORDER_FLOW_MIN_REBOUND_PCT', 1.5);
     this.maxReboundPct =
-      opts.maxReboundPct ?? flowConfig.maxReboundPct ?? numEnv('ORDER_FLOW_MAX_REBOUND_PCT', 10);
+      opts.maxReboundPct ?? flowConfig.maxReboundPct ?? numEnv('ORDER_FLOW_MAX_REBOUND_PCT', 8);
     this.minLowAgeMs = opts.minLowAgeMs ?? flowConfig.minLowAgeMs ?? numEnv('ORDER_FLOW_MIN_LOW_AGE_MS', 300);
     this.maxCandidateAgeMs =
       opts.maxCandidateAgeMs ?? flowConfig.maxCandidateAgeMs ?? numEnv('ORDER_FLOW_MAX_CANDIDATE_AGE_MS', 8_000);
@@ -212,7 +215,14 @@ class OrderFlowTracker extends EventEmitter {
       return;
     }
 
-    const confirmStart = Math.max(candidate.lowTs, ev.ts - this.confirmWindowMs);
+    if (ev.ts - candidate.lowTs > this.confirmWindowMs) {
+      state.candidate = null;
+      return;
+    }
+
+    const confirmStart = candidate.lowTs + this.buyGraceMs;
+    if (ev.ts < confirmStart) return;
+
     const confirmEvents = state.events.filter((x) => x.ts >= confirmStart && x.ts <= ev.ts);
     const buys = confirmEvents.filter((x) => x.side === 'BUY');
     const sells = confirmEvents.filter((x) => x.side === 'SELL');
@@ -221,9 +231,11 @@ class OrderFlowTracker extends EventEmitter {
     const uniqueBuyers = uniqueCount(buys, 'signer');
     const buySellRatio = buySol / Math.max(sellSol, 0.001);
     const imbalance = (buySol - sellSol) / Math.max(buySol + sellSol, 0.001);
+    const absorbRatio = buySol / Math.max(candidate.sellSol, 0.001);
     const reboundPct = ((ev.price - candidate.lowPrice) / candidate.lowPrice) * 100;
 
     if (buySol < this.minBuySol) return;
+    if (absorbRatio < this.minAbsorbRatio) return;
     if (uniqueBuyers < this.minUniqueBuyers) return;
     if (buySellRatio < this.minBuySellRatio) return;
     if (imbalance < this.minImbalance) return;
@@ -235,12 +247,14 @@ class OrderFlowTracker extends EventEmitter {
       confirmSellSol: +sellSol.toFixed(4),
       buySellRatio: +buySellRatio.toFixed(3),
       imbalance: +imbalance.toFixed(3),
+      absorbRatio: +absorbRatio.toFixed(3),
       dropPct: +candidate.dropPct.toFixed(3),
       reboundPct: +reboundPct.toFixed(3),
       sellCount: candidate.sellCount,
       uniqueSellers: candidate.uniqueSellers,
       uniqueBuyers,
       lowAgeMs,
+      buyGraceMs: this.buyGraceMs,
       confirmWindowMs: ev.ts - confirmStart,
     };
 
@@ -271,7 +285,7 @@ class OrderFlowTracker extends EventEmitter {
       `[OrderFlow] BUY_CONFIRM ${signal.symbol || ev.mint.slice(0, 6)} ` +
         `drop=${flow.dropPct.toFixed(1)}% rebound=${flow.reboundPct.toFixed(1)}% ` +
         `sell=${flow.sellSol.toFixed(1)}SOL buy=${flow.buySol.toFixed(1)}SOL ` +
-        `ratio=${flow.buySellRatio.toFixed(2)} imbalance=${flow.imbalance.toFixed(2)} ` +
+        `absorb=${flow.absorbRatio.toFixed(2)} ratio=${flow.buySellRatio.toFixed(2)} imbalance=${flow.imbalance.toFixed(2)} ` +
         `buyers=${flow.uniqueBuyers} sellers=${flow.uniqueSellers}`,
     );
 
