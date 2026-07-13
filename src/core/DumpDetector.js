@@ -198,6 +198,7 @@ class DumpDetector extends EventEmitter {
         slot: parsed.slot,
         signature: parsed.signature,
         poolAddress: parsed.poolAddress,
+        poolQuoteAfter: parsed.poolQuoteAfter,
       });
 
       // 仅卖单进入下游判定

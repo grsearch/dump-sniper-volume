@@ -369,7 +369,7 @@ class SignalEngine extends EventEmitter {
     // v3.17.36: 连环抛过滤
     const minSellCount = config.strategy.minTriggerSellCount;
     const sellCount10s = signal._sellCount10s || 1;
-    if (minSellCount > 0 && sellCount10s < minSellCount) {
+    if (!signal._activityFlow && minSellCount > 0 && sellCount10s < minSellCount) {
       monitor.inc('SignalEngine.rejectedLowSellCount', 1, 'SignalEngine');
       this._logReject(signal, 'recent 10s sell count ' + sellCount10s + ' < ' + minSellCount);
       return;
@@ -720,12 +720,18 @@ class SignalEngine extends EventEmitter {
     // v3.17.7: 日志带上 slot 和 slot gap（用于事后分析延迟分布）
     const latestSlot = this.tickStream ? (this.tickStream.latestSlot || 0) : 0;
     const slotGap = (slot && latestSlot) ? (latestSlot - slot) : null;
+    const flow = signal._flow || null;
+    const activityReason = signal._activityFlow && flow
+      ? `activity_flow: 5s ${flow.s5.tradeCount}tx/${flow.s5.volumeSol.toFixed(2)}SOL ` +
+        `r=${flow.s5.buySellRatio.toFixed(2)}, 15s ${flow.s15.tradeCount}tx/${flow.s15.volumeSol.toFixed(2)}SOL ` +
+        `r=${flow.s15.buySellRatio.toFixed(2)}, 60s ${flow.s60.tradeCount}tx/${flow.s60.volumeSol.toFixed(2)}SOL`
+      : null;
 
     // v3.10: 先 emit buyOrder（让 Executor 立即开始工作），再异步写 DB
     // SQLite WAL 模式下写入也要 1-3ms，省下来给关键路径
     this.emit('buyOrder', {
       ...signal,
-      reason: `dump: sell ${sellSol.toFixed(2)} SOL, impact -${priceImpactPct.toFixed(2)}%`,
+      reason: activityReason || `dump: sell ${sellSol.toFixed(2)} SOL, impact -${priceImpactPct.toFixed(2)}%`,
       sizeSol: config.strategy.positionSizeSol,
       _signalReceivedAt,
       rsiPreDump: signal._rsiPreDump,
@@ -742,13 +748,20 @@ class SignalEngine extends EventEmitter {
       console.warn(`[SignalEngine] ⚠️ slow path: ${inSignalEngineMs}ms in handleDumpSignal for ${symbol || mint.slice(0,6)}`);
     }
 
-    console.log(
-      `[SignalEngine] ✅ BUY_SIGNAL ${symbol || mint.slice(0, 6)}: sell=${sellSol.toFixed(
-        2,
-      )} SOL, impact=-${priceImpactPct.toFixed(2)}%, seller=${seller ? seller.slice(0, 6) + '..' : 'n/a'}, ` +
-        `seller_tx=${signature ? signature.slice(0, 8) + '..' : 'n/a'}` +
-        (slotGap !== null ? `, slot_gap=${slotGap}` : ''),
-    );
+    if (activityReason) {
+      console.log(
+        `[SignalEngine] BUY_SIGNAL ${symbol || mint.slice(0, 6)}: ${activityReason}` +
+          (slotGap !== null ? `, slot_gap=${slotGap}` : ''),
+      );
+    } else {
+      console.log(
+        `[SignalEngine] ✅ BUY_SIGNAL ${symbol || mint.slice(0, 6)}: sell=${sellSol.toFixed(
+          2,
+        )} SOL, impact=-${priceImpactPct.toFixed(2)}%, seller=${seller ? seller.slice(0, 6) + '..' : 'n/a'}, ` +
+          `seller_tx=${signature ? signature.slice(0, 8) + '..' : 'n/a'}` +
+          (slotGap !== null ? `, slot_gap=${slotGap}` : ''),
+      );
+    }
 
     // 异步写 DB（不阻塞 BUY 路径）
     // 写入时 accepted=1 + seller_tx，启动时 _restoreSellerTxsFromDb 就靠这个恢复
@@ -763,7 +776,7 @@ class SignalEngine extends EventEmitter {
           priceImpactPct,
           seller,
           sellerTx: signature,
-          notes: `accepted; sellSol=${sellSol.toFixed(2)}, impact=${priceImpactPct.toFixed(2)}%` +
+          notes: (activityReason || `accepted; sellSol=${sellSol.toFixed(2)}, impact=${priceImpactPct.toFixed(2)}%`) +
                  (slotGap !== null ? `, slot_gap=${slotGap}` : ''),
           accepted: true,
         });
@@ -920,7 +933,7 @@ class SignalEngine extends EventEmitter {
       ts: signal.ts,
       mint: signal.mint,
       symbol: signal.symbol,
-      kind: 'DUMP_DETECTED',
+      kind: signal._activityFlow ? 'ACTIVITY_FLOW' : 'DUMP_DETECTED',
       sellSol: signal.sellSol,
       priceImpactPct: signal.priceImpactPct,
       seller: signal.seller,

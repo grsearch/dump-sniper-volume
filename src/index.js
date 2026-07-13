@@ -18,7 +18,7 @@ const { getMonitor } = require('./monitor/HealthMonitor');
 const AlertChecker = require('./monitor/AlertChecker');
 const TokenWatchdog = require('./core/TokenWatchdog');
 const CompetitorTracker = require('./core/CompetitorTracker');
-const OrderFlowTracker = require('./core/OrderFlowTracker');
+const ActivityFlowTracker = require('./core/OrderFlowTracker');
 
 const monitor = getMonitor();
 
@@ -30,15 +30,14 @@ async function main() {
   console.log(`TP: +${config.strategy.takeProfitPct}% (immediate, no confirm)`);
   console.log(`Trailing: arm at +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% (priority: TP > trailing)`);
   console.log(
-    `Entry: ORDER_FLOW reversal ` +
-      `(sell>=${config.orderFlow.minSellSol} SOL/${config.orderFlow.windowMs}ms, ` +
-      `drop ${config.orderFlow.minDropPct}-${config.orderFlow.maxDropPct}%, ` +
-      `ignore first ${config.orderFlow.buyGraceMs}ms, ` +
-      `absorb>=${config.orderFlow.minAbsorbRatio}, buy/sell>=${config.orderFlow.minBuySellRatio}, ` +
-      `rebound ${config.orderFlow.minReboundPct}-${config.orderFlow.maxReboundPct}%)`,
+    `Entry: ACTIVITY_FLOW ` +
+      `(60s>=${config.activityFlow.minTrades60s}tx/${config.activityFlow.minVolume60sSol}SOL, ` +
+      `30s>=${config.activityFlow.minTrades30s}tx/${config.activityFlow.minVolume30sSol}SOL, ` +
+      `15s buy/sell>=${config.activityFlow.minRatio15s}, ` +
+      `5s buy/sell>=${config.activityFlow.minRatio5s})`,
   );
-  console.log(`Legacy dumpSignal: ${config.orderFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
-  console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15s check)`);
+  console.log(`Legacy dumpSignal: ${config.activityFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
+  console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15min check)`);
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct}%`);
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);
   console.log(`Add-on: disabled (one position per mint)`);
@@ -181,19 +180,19 @@ async function main() {
     followSellMinWinRate: parseFloat(process.env.COMPETITOR_FOLLOW_SELL_MIN_WINRATE || '60'),
     followSellMinClosed: parseInt(process.env.COMPETITOR_FOLLOW_SELL_MIN_CLOSED || '10', 10),
   });
-  const orderFlowTracker = new OrderFlowTracker();
+  const activityFlowTracker = new ActivityFlowTracker();
   console.log(
-    `[main] OrderFlow ${orderFlowTracker.enabled ? 'enabled' : 'disabled'}: ` +
-      `window=${orderFlowTracker.windowMs}ms confirm=${orderFlowTracker.confirmWindowMs}ms ` +
-      `minSell=${orderFlowTracker.minSellSol}SOL minDrop=${orderFlowTracker.minDropPct}% ` +
-      `grace=${orderFlowTracker.buyGraceMs}ms absorb>=${orderFlowTracker.minAbsorbRatio} ` +
-      `buy/sell>=${orderFlowTracker.minBuySellRatio} rebound=${orderFlowTracker.minReboundPct}-${orderFlowTracker.maxReboundPct}% ` +
-      `replaceDump=${orderFlowTracker.replaceDumpSignal}`,
+    `[main] ActivityFlow ${activityFlowTracker.enabled ? 'enabled' : 'disabled'}: ` +
+      `60s>=${activityFlowTracker.minTrades60s}tx/${activityFlowTracker.minVolume60sSol}SOL/${activityFlowTracker.minUniqueTraders60s}traders ` +
+      `30s>=${activityFlowTracker.minTrades30s}tx/${activityFlowTracker.minVolume30sSol}SOL ratio>=${activityFlowTracker.minRatio30s} ` +
+      `15s>=${activityFlowTracker.minTrades15s}tx/${activityFlowTracker.minVolume15sSol}SOL ratio>=${activityFlowTracker.minRatio15s} ` +
+      `5s>=${activityFlowTracker.minTrades5s}tx/${activityFlowTracker.minVolume5sSol}SOL ratio>=${activityFlowTracker.minRatio5s} ` +
+      `replaceDump=${activityFlowTracker.replaceDumpSignal}`,
   );
   dumpDetector.on("swapParsed", (swap) => {
     try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
-    try { orderFlowTracker.handleSwap(swap); } catch (err) {
-      console.warn(`[OrderFlow] handleSwap failed: ${err.message}`);
+    try { activityFlowTracker.handleSwap(swap); } catch (err) {
+      console.warn(`[ActivityFlow] handleSwap failed: ${err.message}`);
     }
   });
 
@@ -233,9 +232,9 @@ async function main() {
   });
   // v3.17.41: PositionManager blacklist needs signalEngine reference
   positionManager.signalEngine = signalEngine;
-  orderFlowTracker.on('flowReversalSignal', (signal) => {
+  activityFlowTracker.on('flowReversalSignal', (signal) => {
     Promise.resolve(signalEngine.handleDumpSignal(signal)).catch((err) => {
-      console.error(`[OrderFlow] SignalEngine error: ${err.message}`);
+      console.error(`[ActivityFlow] SignalEngine error: ${err.message}`);
     });
   });
 
@@ -629,8 +628,8 @@ async function main() {
     //   refreshOne 的 RPC(30-100ms)永远追不上当次 BUY,对当前信号无意义。
     //   PoolStateCache 后台滚动刷新(POOL_STATE_REFRESH_MS=5000)已经保证 cache 新鲜。
     //   如果希望砸盘瞬间池子状态更新,把 POOL_STATE_REFRESH_MS 调到 2000-3000。
-    if (orderFlowTracker.enabled && orderFlowTracker.replaceDumpSignal) {
-      orderFlowTracker.noteSuppressedDumpSignal(signal);
+    if (activityFlowTracker.enabled && activityFlowTracker.replaceDumpSignal) {
+      activityFlowTracker.noteSuppressedDumpSignal(signal);
       return;
     }
     signalEngine.handleDumpSignal(signal);

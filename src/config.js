@@ -2,8 +2,8 @@
 
 require('dotenv').config({ override: true });
 
-const orderFlowForceDisabled = ['true', '1', 'yes'].includes(
-  String(process.env.ORDER_FLOW_FORCE_DISABLED || '').toLowerCase(),
+const activityFlowForceDisabled = ['true', '1', 'yes'].includes(
+  String(process.env.ACTIVITY_FLOW_FORCE_DISABLED || process.env.ORDER_FLOW_FORCE_DISABLED || '').toLowerCase(),
 );
 
 const config = {
@@ -184,32 +184,45 @@ const config = {
     maxFdVUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
   },
 
-  // ============ Order-flow reversal entry ============
-  orderFlow: {
-    // Default entry path: dump creates a setup; buy volume confirmation creates the buy signal.
-    enabled: !orderFlowForceDisabled && (process.env.ORDER_FLOW_ENABLED ?? 'true').toLowerCase() === 'true',
+  // ============ Activity-flow entry ============
+  activityFlow: {
+    // 60s/30s decide whether the token is active enough; 15s confirms direction; 5s is the trigger.
+    enabled:
+      !activityFlowForceDisabled &&
+      (process.env.ACTIVITY_FLOW_ENABLED ?? process.env.ORDER_FLOW_ENABLED ?? 'true').toLowerCase() === 'true',
     replaceDumpSignal:
-      !orderFlowForceDisabled && (process.env.ORDER_FLOW_REPLACE_DUMP_SIGNAL ?? 'true').toLowerCase() === 'true',
-    windowMs: parseInt(process.env.ORDER_FLOW_WINDOW_MS || '10000', 10),
-    confirmWindowMs: parseInt(process.env.ORDER_FLOW_CONFIRM_WINDOW_MS || '4000', 10),
-    buyGraceMs: parseInt(process.env.ORDER_FLOW_BUY_GRACE_MS || '700', 10),
-    minSellSol: parseFloat(process.env.ORDER_FLOW_MIN_SELL_SOL || process.env.MIN_SELL_SOL || '20'),
-    minDropPct: parseFloat(process.env.ORDER_FLOW_MIN_DROP_PCT || '12'),
-    maxDropPct: parseFloat(process.env.ORDER_FLOW_MAX_DROP_PCT || process.env.MAX_PRICE_IMPACT_PCT || '30'),
-    minSellCount: parseInt(process.env.ORDER_FLOW_MIN_SELL_COUNT || process.env.MIN_TRIGGER_SELL_COUNT || '2', 10),
-    minUniqueSellers: parseInt(process.env.ORDER_FLOW_MIN_UNIQUE_SELLERS || '2', 10),
-    minBuySol: parseFloat(process.env.ORDER_FLOW_MIN_BUY_SOL || '3'),
-    minAbsorbRatio: parseFloat(process.env.ORDER_FLOW_MIN_ABSORB_RATIO || '0.25'),
-    minBuySellRatio: parseFloat(process.env.ORDER_FLOW_MIN_BUY_SELL_RATIO || '1.25'),
-    minImbalance: parseFloat(process.env.ORDER_FLOW_MIN_IMBALANCE || '0.15'),
-    minUniqueBuyers: parseInt(process.env.ORDER_FLOW_MIN_UNIQUE_BUYERS || '2', 10),
-    minReboundPct: parseFloat(process.env.ORDER_FLOW_MIN_REBOUND_PCT || '1.5'),
-    maxReboundPct: parseFloat(process.env.ORDER_FLOW_MAX_REBOUND_PCT || '8'),
-    minLowAgeMs: parseInt(process.env.ORDER_FLOW_MIN_LOW_AGE_MS || '300', 10),
-    maxCandidateAgeMs: parseInt(process.env.ORDER_FLOW_MAX_CANDIDATE_AGE_MS || '8000', 10),
-    cooldownMs: parseInt(process.env.ORDER_FLOW_COOLDOWN_MS || process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),
-    maxEventsPerMint: parseInt(process.env.ORDER_FLOW_MAX_EVENTS_PER_MINT || '180', 10),
-    debug: (process.env.ORDER_FLOW_DEBUG ?? 'false').toLowerCase() === 'true',
+      !activityFlowForceDisabled &&
+      (process.env.ACTIVITY_FLOW_REPLACE_DUMP_SIGNAL ?? process.env.ORDER_FLOW_REPLACE_DUMP_SIGNAL ?? 'true')
+        .toLowerCase() === 'true',
+    window5Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_5S_MS || '5000', 10),
+    window15Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_15S_MS || '15000', 10),
+    window30Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_30S_MS || '30000', 10),
+    window60Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_60S_MS || '60000', 10),
+    minTrades60s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_60S || '24', 10),
+    minVolume60sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_60S_SOL || '12'),
+    minUniqueTraders60s: parseInt(process.env.ACTIVITY_FLOW_MIN_UNIQUE_TRADERS_60S || '10', 10),
+    minTrades30s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_30S || '12', 10),
+    minVolume30sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_30S_SOL || '6'),
+    minRatio30s: parseFloat(process.env.ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_30S || '0.85'),
+    minTrades15s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_15S || '8', 10),
+    minVolume15sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_15S_SOL || '4'),
+    minRatio15s: parseFloat(process.env.ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_15S || '1.25'),
+    minImbalance15s: parseFloat(process.env.ACTIVITY_FLOW_MIN_IMBALANCE_15S || '0.12'),
+    minUniqueBuyers15s: parseInt(process.env.ACTIVITY_FLOW_MIN_UNIQUE_BUYERS_15S || '3', 10),
+    minPriceChange15sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_15S_PCT || '-3'),
+    minTrades5s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_5S || '3', 10),
+    minVolume5sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_5S_SOL || '1.5'),
+    minRatio5s: parseFloat(process.env.ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_5S || '1.35'),
+    minImbalance5s: parseFloat(process.env.ACTIVITY_FLOW_MIN_IMBALANCE_5S || '0.20'),
+    minUniqueBuyers5s: parseInt(process.env.ACTIVITY_FLOW_MIN_UNIQUE_BUYERS_5S || '2', 10),
+    minPriceChange5sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_5S_PCT || '0.2'),
+    maxPriceChange5sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_5S_PCT || '8'),
+    maxPriceChange30sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_30S_PCT || '30'),
+    maxPriceChange60sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_60S_PCT || '60'),
+    cooldownMs: parseInt(process.env.ACTIVITY_FLOW_COOLDOWN_MS || process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),
+    maxSignalAgeMs: parseInt(process.env.ACTIVITY_FLOW_MAX_SIGNAL_AGE_MS || process.env.MAX_PUSH_LAG_MS || '5000', 10),
+    maxEventsPerMint: parseInt(process.env.ACTIVITY_FLOW_MAX_EVENTS_PER_MINT || '600', 10),
+    debug: (process.env.ACTIVITY_FLOW_DEBUG ?? 'false').toLowerCase() === 'true',
   },
 
   // ============ Price anomaly filter ============

@@ -1,7 +1,7 @@
 {
   "name": "dump-sniper",
   "version": "4.0.0-clean",
-  "description": "Solana Pump.fun dump-rebound sniper with order-flow reversal entry.",
+  "description": "Solana Pump.fun short-window trader with activity-flow entry.",
   "main": "src/index-flow.js",
   "scripts": {
     "start": "node src/index-flow.js",
