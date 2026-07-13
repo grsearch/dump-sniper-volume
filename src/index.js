@@ -33,7 +33,9 @@ async function main() {
     `Entry: ORDER_FLOW reversal ` +
       `(sell>=${config.orderFlow.minSellSol} SOL/${config.orderFlow.windowMs}ms, ` +
       `drop ${config.orderFlow.minDropPct}-${config.orderFlow.maxDropPct}%, ` +
-      `buy/sell>=${config.orderFlow.minBuySellRatio}, rebound ${config.orderFlow.minReboundPct}-${config.orderFlow.maxReboundPct}%)`,
+      `ignore first ${config.orderFlow.buyGraceMs}ms, ` +
+      `absorb>=${config.orderFlow.minAbsorbRatio}, buy/sell>=${config.orderFlow.minBuySellRatio}, ` +
+      `rebound ${config.orderFlow.minReboundPct}-${config.orderFlow.maxReboundPct}%)`,
   );
   console.log(`Legacy dumpSignal: ${config.orderFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
   console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15s check)`);
@@ -184,6 +186,7 @@ async function main() {
     `[main] OrderFlow ${orderFlowTracker.enabled ? 'enabled' : 'disabled'}: ` +
       `window=${orderFlowTracker.windowMs}ms confirm=${orderFlowTracker.confirmWindowMs}ms ` +
       `minSell=${orderFlowTracker.minSellSol}SOL minDrop=${orderFlowTracker.minDropPct}% ` +
+      `grace=${orderFlowTracker.buyGraceMs}ms absorb>=${orderFlowTracker.minAbsorbRatio} ` +
       `buy/sell>=${orderFlowTracker.minBuySellRatio} rebound=${orderFlowTracker.minReboundPct}-${orderFlowTracker.maxReboundPct}% ` +
       `replaceDump=${orderFlowTracker.replaceDumpSignal}`,
   );
