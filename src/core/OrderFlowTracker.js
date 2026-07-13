@@ -45,7 +45,7 @@ class OrderFlowTracker extends EventEmitter {
     this.minDropPct =
       opts.minDropPct ??
       flowConfig.minDropPct ??
-      numEnv('ORDER_FLOW_MIN_DROP_PCT', Math.max(6, Math.min(config.strategy.minPriceImpactPct || 10, 10)));
+      numEnv('ORDER_FLOW_MIN_DROP_PCT', Math.max(12, Math.min(config.strategy.minPriceImpactPct || 10, 10)));
     this.maxDropPct =
       opts.maxDropPct ??
       flowConfig.maxDropPct ??
