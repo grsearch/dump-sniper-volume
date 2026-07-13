@@ -14,7 +14,7 @@ WorkingDirectory=/opt/dump-sniper
 EnvironmentFile=/opt/dump-sniper/.env
 
 # 用绝对路径，systemd 启动时不会有 PATH
-ExecStart=/usr/bin/node /opt/dump-sniper/src/index.js
+ExecStart=/usr/bin/node /opt/dump-sniper/src/index-flow.js
 
 # 重启策略
 Restart=always
