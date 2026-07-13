@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Dump Sniper - 每日报告</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel-2: #1a1f2e;
+    --border: #2a2f3e;
+    --text: #d1d4dc;
+    --text-dim: #787b86;
+    --green: #26a69a;
+    --red: #ef5350;
+    --yellow: #f5b041;
+    --blue: #2962ff;
+    --accent: #4fc3f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.5px; }
+  .header h1 .v { color: var(--text-dim); font-weight: 400; margin-left: 8px; font-size: 12px; }
+  .nav-links { display: flex; gap: 16px; align-items: center; }
+  .nav-links a { color: var(--accent); text-decoration: none; font-size: 12px; font-weight: 500; }
+  .nav-links a:hover { text-decoration: underline; }
+  .nav-links a.current { color: var(--text); cursor: default; text-decoration: none; }
+
+  .container { padding: 16px 20px; max-width: 1200px; margin: 0 auto; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 16px;
+  }
+  .panel-head {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--panel-2);
+  }
+  .panel-head h2 { font-size: 13px; font-weight: 600; }
+  .panel-body { padding: 12px 14px; }
+
+  .btn {
+    padding: 6px 14px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--blue);
+    color: white;
+  }
+  .btn:hover { opacity: 0.9; }
+  .btn-secondary { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
+
+  .report-layout { display: flex; gap: 16px; }
+  .report-sidebar { min-width: 160px; max-width: 200px; flex-shrink: 0; }
+  .report-sidebar h3 { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+  .report-sidebar ul { list-style: none; padding: 0; font-size: 12px; }
+  .report-sidebar li { padding: 4px 8px; cursor: pointer; border-radius: 3px; }
+  .report-sidebar li:hover { background: var(--panel-2); }
+  .report-sidebar li.active { background: var(--accent); color: var(--bg); }
+  .report-content { flex: 1; min-width: 0; }
+  .report-toolbar { display: none; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .report-toolbar .date { color: var(--text-dim); font-size: 12px; }
+
+  /* Markdown */
+  .markdown-body h1 { font-size: 18px; margin: 16px 0 8px; color: var(--accent); }
+  .markdown-body h2 { font-size: 15px; margin: 14px 0 6px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  .markdown-body h3 { font-size: 13px; margin: 10px 0 4px; color: var(--text); }
+  .markdown-body p { margin: 4px 0; }
+  .markdown-body table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0; }
+  .markdown-body th { background: var(--panel-2); padding: 4px 8px; text-align: left; border: 1px solid var(--border); color: var(--text-dim); }
+  .markdown-body td { padding: 4px 8px; border: 1px solid var(--border); }
+  .markdown-body details { margin: 8px 0; }
+  .markdown-body summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  .markdown-body code { background: rgba(255,255,255,0.05); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+  .markdown-body strong { color: var(--text); }
+  .markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+  .toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 14px; font-size: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); transition: opacity 0.3s; z-index: 1000;
+  }
+  .toast.error { border-color: var(--red); }
+  .toast.ok { border-color: var(--green); }
+</style>
+<script src="/marked.min.js"></script>
+</head>
+<body>
+
+<div class="header">
+  <h1>📅 每日报告</h1>
+  <div class="nav-links">
+    <a href="/dashboard.html">← Dashboard</a>
+  </div>
+</div>
+
+<div class="container">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>📅 每日报告</h2>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button class="btn btn-secondary" onclick="generateReport()">立即生成昨日报告</button>
+        <span id="reportResult" style="color:var(--text-dim);font-size:12px;"></span>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="report-layout">
+        <div class="report-sidebar">
+          <h3>历史日报</h3>
+          <ul id="reportsList"></ul>
+        </div>
+        <div class="report-content">
+          <div class="report-toolbar" id="reportToolbar">
+            <span class="date" id="reportDate"></span>
+            <button class="btn btn-secondary" onclick="downloadReport()" style="font-size:11px;padding:3px 10px;">⬇ 下载 Markdown</button>
+          </div>
+          <div id="reportContent" class="markdown-body" style="font-size:13px;line-height:1.6;padding:8px;">
+            <p style="color:var(--text-dim);font-size:12px;">点击左侧日期查看报告</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" style="display:none;"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+const _DASHBOARD_TOKEN = (() => {
+  try { return new URLSearchParams(location.search).get('token') || ''; } catch(_) { return ''; }
+})();
+
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (_DASHBOARD_TOKEN) headers['X-Dashboard-Token'] = _DASHBOARD_TOKEN;
+  const r = await fetch(path, { ...opts, headers });
+  return r.json();
+}
+
+let _activeReportDate = null;
+
+async function loadReportsList() {
+  const r = await api('/api/reports');
+  if (!r.ok) return;
+  const ul = $('reportsList');
+  ul.innerHTML = '';
+  for (const rep of r.reports) {
+    const li = document.createElement('li');
+    li.textContent = rep.date;
+    li.dataset.date = rep.date;
+    if (rep.date === _activeReportDate) li.classList.add('active');
+    li.onclick = () => loadReport(rep.date);
+    ul.appendChild(li);
+  }
+  if (r.reports.length === 0) {
+    ul.innerHTML = '<li style="color:var(--text-dim)">暂无报告</li>';
+  } else if (!_activeReportDate) {
+    loadReport(r.reports[0].date);
+  }
+}
+
+async function loadReport(date) {
+  _activeReportDate = date;
+  document.querySelectorAll('#reportsList li').forEach(li => {
+    li.classList.toggle('active', li.dataset.date === date);
+  });
+  const r = await api(`/api/reports/${date}`);
+  if (r.ok && r.content) {
+    $('reportContent').innerHTML = marked.parse(r.content);
+    $('reportDate').textContent = date;
+    $('reportToolbar').style.display = 'flex';
+  } else {
+    $('reportContent').innerHTML = `<p style="color:var(--red)">加载失败: ${r.error || 'unknown'}</p>`;
+  }
+}
+
+async function generateReport() {
+  $('reportResult').textContent = '生成中...';
+  const r = await api('/api/reports/generate', { method: 'POST', body: '{}' });
+  if (r.ok) {
+    $('reportResult').textContent = `已生成: ${r.filepath}`;
+    await loadReportsList();
+    const match = r.filepath && r.filepath.match(/(\d{4}-\d{2}-\d{2})\.md$/);
+    if (match) loadReport(match[1]);
+  } else {
+    $('reportResult').textContent = `失败: ${r.error}`;
+  }
+}
+
+function downloadReport() {
+  if (!_activeReportDate) return;
+  const a = document.createElement('a');
+  a.href = `/api/reports/${_activeReportDate}/download`;
+  if (_DASHBOARD_TOKEN) a.href += `?token=${encodeURIComponent(_DASHBOARD_TOKEN)}`;
+  a.download = `${_activeReportDate}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function showToast(msg, kind = 'info') {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast ' + (kind === 'error' ? 'error' : kind === 'ok' ? 'ok' : '');
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.style.display = 'none', 3000);
+}
+
+loadReportsList();
+</script>
+</body>
+</html>

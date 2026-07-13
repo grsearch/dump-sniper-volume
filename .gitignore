@@ -1,0 +1,19 @@
+# secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# runtime data
+node_modules/
+data/*.db
+data/*.db-*
+data/*.sqlite*
+logs/*.log
+logs/*.log.*
+reports/*.md
+*.tar.gz
+
+# os
+.DS_Store
+*.bak
+*.bak.*

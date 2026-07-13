@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><meta http-equiv="Pragma" content="no-cache"><meta http-equiv="Expires" content="0">
+<meta charset="UTF-8">
+<title>Dump Sniper Dashboard v3.20</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel-2: #1a1f2e;
+    --border: #2a2f3e;
+    --text: #d1d4dc;
+    --text-dim: #787b86;
+    --green: #26a69a;
+    --red: #ef5350;
+    --yellow: #f5b041;
+    --blue: #2962ff;
+    --accent: #4fc3f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .header h1 .v { color: var(--text-dim); font-weight: 400; margin-left: 8px; font-size: 12px; }
+  .badges { display: flex; gap: 10px; align-items: center; }
+  .badge {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .badge.dry { background: rgba(245, 176, 65, 0.15); color: var(--yellow); border-color: var(--yellow); }
+  .badge.live { background: rgba(38, 166, 154, 0.15); color: var(--green); border-color: var(--green); }
+  .badge.ws { font-size: 10px; }
+  .badge.ws.connected { color: var(--green); }
+  .badge.ws.disconnected { color: var(--red); }
+
+  .container {
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .panel-head {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--panel-2);
+  }
+  .panel-head h2 { font-size: 13px; font-weight: 600; }
+  .panel-head .meta { color: var(--text-dim); font-size: 11px; }
+  .panel-body { padding: 12px 14px; }
+
+  /* Status grid */
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+  }
+  .status-item {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+  }
+  .status-item .label { color: var(--text-dim); font-size: 11px; margin-bottom: 2px; }
+  .status-item .value { font-size: 14px; font-weight: 600; font-family: "SF Mono", Consolas, monospace; }
+
+  /* Forms */
+  .add-form { display: flex; gap: 8px; align-items: center; }
+  .add-form input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: "SF Mono", Consolas, monospace;
+  }
+  .add-form input:focus { outline: none; border-color: var(--accent); }
+  .btn {
+    padding: 6px 14px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--blue);
+    color: white;
+  }
+  .btn:hover { opacity: 0.9; }
+  .btn-sm { padding: 3px 8px; font-size: 11px; }
+  .btn-danger { background: var(--red); }
+  .btn-secondary { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td {
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th { color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; background: var(--panel-2); position: sticky; top: 0; }
+  td.mono { font-family: "SF Mono", Consolas, monospace; }
+  tr:hover { background: rgba(255,255,255,0.02); }
+  .table-wrap { max-height: 360px; overflow-y: auto; }
+  .ca-link { color: var(--accent); text-decoration: none; font-family: "SF Mono", Consolas, monospace; }
+  .ca-link:hover { text-decoration: underline; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .neutral { color: var(--text-dim); }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); }
+  .tab {
+    padding: 8px 16px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-dim);
+    border-bottom: 2px solid transparent;
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--text); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* Pills */
+  .pill {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .pill.buy { background: rgba(38, 166, 154, 0.2); color: var(--green); }
+  .pill.sell { background: rgba(239, 83, 80, 0.2); color: var(--red); }
+  .pill.dry { background: rgba(245, 176, 65, 0.2); color: var(--yellow); }
+  .pill.live { background: rgba(38, 166, 154, 0.2); color: var(--green); }
+  .pill.success { background: rgba(38, 166, 154, 0.2); color: var(--green); }
+  .pill.fail { background: rgba(239, 83, 80, 0.2); color: var(--red); }
+
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-size: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    transition: opacity 0.3s;
+    z-index: 1000;
+  }
+  .toast.error { border-color: var(--red); }
+  .toast.ok { border-color: var(--green); }
+
+  .empty { text-align: center; color: var(--text-dim); padding: 30px; font-size: 12px; }
+
+  /* Health */
+  .alert-banner {
+    padding: 10px 12px;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    border-left: 3px solid;
+  }
+  .alert-banner.critical { background: rgba(239,83,80,0.15); border-color: var(--red); color: #ffb3b0; }
+  .alert-banner.error    { background: rgba(239,83,80,0.10); border-color: var(--red); color: #ffb3b0; }
+  .alert-banner.warn     { background: rgba(245,176,65,0.10); border-color: var(--yellow); color: #ffd699; }
+  .alert-banner .name { font-weight: 600; margin-right: 6px; }
+  .alert-banner .ctx { color: var(--text-dim); font-size: 11px; margin-top: 4px; font-family: "SF Mono", Consolas, monospace; }
+
+  .heartbeat-card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: 4px;
+    padding: 8px 10px;
+  }
+  .heartbeat-card.stale { border-left-color: var(--red); }
+  .heartbeat-card.never { border-left-color: var(--yellow); }
+  .heartbeat-card .label { font-weight: 600; font-size: 12px; }
+  .heartbeat-card .meta { color: var(--text-dim); font-size: 10px; font-family: "SF Mono", Consolas, monospace; }
+
+  .counter-row { display: flex; justify-content: space-between; padding: 3px 8px; font-size: 11px; font-family: "SF Mono", Consolas, monospace; }
+  .counter-row:nth-child(even) { background: var(--panel-2); }
+  .counter-row .key { color: var(--text-dim); }
+  .counter-row .val { font-weight: 600; }
+  .counter-row .val.err { color: var(--red); }
+
+  .error-block { background: var(--panel-2); border-left: 2px solid var(--red); padding: 6px 10px; margin-bottom: 4px; font-size: 11px; }
+  .error-block .msg { color: #ffb3b0; }
+  .error-block .ctx { color: var(--text-dim); font-family: "SF Mono", Consolas, monospace; font-size: 10px; margin-top: 2px; word-break: break-all; }
+  .error-block .ago { color: var(--text-dim); font-size: 10px; }
+
+  /* Markdown report rendering */
+  .markdown-body h1 { font-size: 18px; margin: 16px 0 8px; color: var(--accent); }
+  .markdown-body h2 { font-size: 15px; margin: 14px 0 6px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  .markdown-body h3 { font-size: 13px; margin: 10px 0 4px; color: var(--text); }
+  .markdown-body p { margin: 4px 0; }
+  .markdown-body table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0; }
+  .markdown-body th { background: var(--panel-2); padding: 4px 8px; text-align: left; border: 1px solid var(--border); color: var(--text-dim); }
+  .markdown-body td { padding: 4px 8px; border: 1px solid var(--border); }
+  .markdown-body details { margin: 8px 0; }
+  .markdown-body summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  .markdown-body code { background: rgba(255,255,255,0.05); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+  .markdown-body strong { color: var(--text); }
+  .markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+  #reportsList li { padding: 4px 8px; cursor: pointer; border-radius: 3px; }
+  #reportsList li:hover { background: var(--panel-2); }
+  #reportsList li.active { background: var(--accent); color: var(--bg); }
+  /* Pagination */
+  .pagination { display: flex; gap: 4px; align-items: center; margin-top: 8px; justify-content: center; }
+  .pagination button { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+  .pagination button:hover { border-color: var(--accent); }
+  .pagination button.active { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+  .pagination button:disabled { opacity: 0.3; cursor: default; }
+  .pagination .info { color: var(--text-dim); font-size: 11px; margin: 0 8px; }
+
+</style>
+<script src="/marked.min.js"></script>
+</head>
+<body>
+
+<div class="header">
+  <h1>🎯 Dump Sniper <span class="v">v3.16</span></h1>
+  <div class="badges">
+    <a href="/reports.html" style="color:var(--accent);text-decoration:none;font-size:12px;font-weight:500;margin-right:8px;">📅 报告</a>
+    <span id="modeBadge" class="badge dry">DRY_RUN</span>
+    <span id="wsBadge" class="badge ws disconnected">● WS</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Status -->
+  <div class="panel">
+    <div class="panel-head"><h2>📊 状态</h2><span class="meta" id="statusMeta">-</span></div>
+    <div class="panel-body">
+      <div class="status-grid">
+        <div class="status-item"><div class="label">监控代币</div><div class="value" id="stat-watched">-</div></div>
+        <div class="status-item"><div class="label">当前持仓</div><div class="value" id="stat-open">-</div></div>
+        <div class="status-item"><div class="label">触发卖单SOL</div><div class="value" id="stat-minSell">-</div></div>
+        <div class="status-item"><div class="label">触发跌幅</div><div class="value" id="stat-impact">-</div></div>
+        <div class="status-item"><div class="label">每笔仓位</div><div class="value" id="stat-size">-</div></div>
+        <div class="status-item"><div class="label">止盈</div><div class="value" id="stat-tp">-</div></div>
+        <div class="status-item"><div class="label">最大持仓</div><div class="value" id="stat-hold">-</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Token list -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>📋 监控列表</h2>
+      <span class="meta" id="tokenCountMeta">0 tokens</span>
+    </div>
+    <div class="panel-body">
+      <div class="add-form" style="margin-bottom: 12px;">
+        <input id="addCa" type="text" placeholder="粘贴代币 CA (mint address)" />
+        <input id="addSymbol" type="text" placeholder="symbol (可选，自动识别)" style="max-width: 180px;" />
+        <button class="btn" onclick="addToken()">添加</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <label style="font-size:11px;color:var(--text-dim);">AGE 过滤:</label>
+        <select id="ageFilter" onchange="renderTokenPage()" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:11px;">
+          <option value="0" selected>全部</option>
+          <option value="1">≤ 1h</option>
+          <option value="6">≤ 6h</option>
+          <option value="12">≤ 12h</option>
+          <option value="24">≤ 24h</option>
+          <option value="72">≤ 3d</option>
+          <option value="168">≤ 7d</option>
+        </select>
+        <span id="ageFilterCount" style="font-size:11px;color:var(--text-dim);"></span>
+      </div>
+      <div class="table-wrap">
+        <table id="tokenTable">
+          <thead>
+            <tr>
+              <th>Symbol</th><th>CA</th><th>FDV</th><th>LP</th><th>Price</th><th>24h Vol</th><th>添加时间</th><th>AGE</th><th>来源</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="tokenTbody"><tr><td colspan="10" class="empty">尚未添加任何代币</td></tr></tbody>
+        </table>
+      </div>
+      <div id="tokenPagination" class="pagination" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="panel">
+    <div class="panel-head"><h2>📜 实时日志</h2></div>
+    <div class="tabs">
+      <div class="tab active" data-tab="positions">持仓 / 平仓</div>
+      <div class="tab" data-tab="signals">信号</div>
+      <div class="tab" data-tab="trades">交易</div>
+    </div>
+    <div class="panel-body">
+      <!-- Positions -->
+      <div class="tab-pane active" id="pane-positions">
+        <h3 style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">当前开仓</h3>
+        <div class="table-wrap" style="max-height:200px;">
+          <table>
+            <thead><tr><th>开仓时间</th><th>Symbol</th><th>CA</th><th>入场价</th><th>当前价</th><th>持有时间</th><th>未实现PnL%</th><th>模式</th><th>操作</th></tr></thead>
+            <tbody id="openTbody"><tr><td colspan="10" class="empty">无</td></tr></tbody>
+          </table>
+        </div>
+        <!-- v3.3: STUCK positions warning -->
+        <div id="stuckBox" style="display:none; margin-top:12px;">
+          <h3 style="font-size:12px;color:#ffb3b0;margin-bottom:6px;">
+            ⚠️ <span id="stuckCount">0</span> 个 STUCK position（卖出失败、token 留在钱包，需人工处理）
+          </h3>
+          <div class="table-wrap" style="max-height:160px;">
+            <table>
+              <thead><tr><th>开仓时间</th><th>Symbol</th><th>CA</th><th>入场SOL</th><th>token 数</th><th>重试次数</th><th>错误</th><th>命令</th></tr></thead>
+              <tbody id="stuckTbody"></tbody>
+            </table>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:6px;">
+            处理方式（在服务器跑）:
+            <code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:3px;">npm run stuck</code>
+            列出全部，
+            <code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:3px;">npm run stuck retry-all</code>
+            重试全部，
+            <code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:3px;">npm run stuck close &lt;id&gt;</code>
+            认亏关闭单个
+          </div>
+        </div>
+        <h3 style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">最近平仓</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>Symbol</th><th>CA</th><th>SLOT</th><th>持仓</th><th>入场SOL</th><th>出场SOL</th><th>PnL SOL</th><th>PnL %</th><th>退出</th><th>模式</th></tr></thead>
+            <tbody id="closedTbody"><tr><td colspan="11" class="empty">尚无平仓记录</td></tr></tbody>
+          </table>
+        </div>
+        <div id="closedPagination" class="pagination" style="display:none;"></div>
+      </div>
+      <!-- Signals -->
+      <div class="tab-pane" id="pane-signals">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>Symbol</th><th>CA</th><th>类型</th><th>卖出SOL</th><th>跌幅%</th><th>状态</th><th>原因/备注</th></tr></thead>
+            <tbody id="signalsTbody"><tr><td colspan="8" class="empty">尚无信号</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- Trades -->
+      <div class="tab-pane" id="pane-trades">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>Symbol</th><th>CA</th><th>方向</th><th>SOL</th><th>数量</th><th>价格</th><th>结果</th><th>模式</th><th>延迟</th><th>签名</th></tr></thead>
+            <tbody id="tradesTbody"><tr><td colspan="11" class="empty">尚无交易</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Health Monitor -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>🩺 健康监控</h2>
+      <span class="meta" id="healthStatus">-</span>
+    </div>
+    <div class="panel-body">
+      <div id="alertsBox" style="display:none; margin-bottom:12px;"></div>
+      <h3 style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">心跳</h3>
+      <div id="heartbeatsBox" class="status-grid"></div>
+      <h3 style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">模块计数器</h3>
+      <div id="countersBox"></div>
+      <h3 style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">最近错误</h3>
+      <div id="errorsBox"></div>
+    </div>
+  </div>
+
+
+<div id="toast" class="toast" style="display:none;"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null;
+
+// 从 URL 的 ?token= 读取，dashboard token 透传
+const _DASHBOARD_TOKEN = (() => {
+  try {
+    const t = new URLSearchParams(location.search).get('token');
+    return t || '';
+  } catch (_) { return ''; }
+})();
+
+// ============ WebSocket ============
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const tokenParam = _DASHBOARD_TOKEN ? `?token=${encodeURIComponent(_DASHBOARD_TOKEN)}` : '';
+  ws = new WebSocket(`${proto}//${location.host}/ws${tokenParam}`);
+  ws.onopen = () => { $('wsBadge').textContent = '● WS'; $('wsBadge').className = 'badge ws connected'; };
+  ws.onclose = () => {
+    $('wsBadge').textContent = '○ WS'; $('wsBadge').className = 'badge ws disconnected';
+    setTimeout(connectWs, 2000);
+  };
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleWs(msg);
+    } catch (_) {}
+  };
+}
+function handleWs(msg) {
+  if (msg.type === 'tokenAdded' || msg.type === 'tokenRemoved') {
+    refreshTokens();
+  } else if (msg.type === 'signal' || msg.type === 'trade' || msg.type === 'positionOpened' || msg.type === 'positionClosed') {
+    refreshAll();
+  } else if (msg.type === 'alert') {
+    showToast(`🔔 ${msg.alert.severity.toUpperCase()}: ${msg.alert.message}`, 'error');
+    refreshHealth();
+  } else if (msg.type === 'alertCleared') {
+    showToast(`✓ 告警解除: ${msg.alert.name}`, 'ok');
+    refreshHealth();
+  }
+}
+
+// ============ API ============
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (_DASHBOARD_TOKEN) headers['X-Dashboard-Token'] = _DASHBOARD_TOKEN;
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 401) {
+    showToast('未授权：请检查 URL 中的 ?token=xxx 是否正确', 'error');
+  }
+  return r.json();
+}
+
+async function refreshStatus() {
+  const r = await api('/api/status');
+  if (!r.ok) return;
+  $('modeBadge').textContent = r.dryRun ? 'DRY_RUN' : 'LIVE';
+  $('modeBadge').className = 'badge ' + (r.dryRun ? 'dry' : 'live');
+  $('stat-watched').textContent = r.watchedTokens;
+  $('stat-open').textContent = r.openPositions;
+  $('stat-minSell').textContent = r.config.minSellSol + ' SOL';
+  $('stat-impact').textContent = '-' + r.config.minPriceImpactPct + '%';
+  $('stat-size').textContent = r.config.positionSizeSol + ' SOL';
+  $('stat-tp').textContent = '+' + r.config.takeProfitPct + '%';
+  $('stat-hold').textContent = r.config.maxHoldMs / 1000 + 's';
+  $('statusMeta').textContent = new Date().toLocaleTimeString();
+}
+
+let _allTokens = [];
+let _tokenPage = 1;
+const _tokenPageSize = 50;
+
+async function refreshTokens() {
+  const r = await api('/api/tokens');
+  if (!r.ok) return;
+  _allTokens = r.tokens || [];
+  const activeCount = _allTokens.filter(t => t.is_active).length;
+  const ageFilterHours = parseInt($('ageFilter')?.value || '0');
+  if (ageFilterHours > 0) {
+    const cutoff = Date.now() - ageFilterHours * 3600000;
+    const filteredCount = _allTokens.filter(t => t.is_active && t.creation_time && t.creation_time >= cutoff).length;
+    $('tokenCountMeta').textContent = filteredCount + ' new24h / ' + activeCount + ' active / ' + _allTokens.length + ' total';
+  } else {
+    $('tokenCountMeta').textContent = activeCount + ' active / ' + _allTokens.length + ' total';
+  }
+  renderTokenPage();
+}
+
+function renderTokenPage() {
+  const tbody = $('tokenTbody');
+  const ageFilterHours = parseInt($('ageFilter')?.value || '0');
+  let tokens = _allTokens;
+  if (ageFilterHours > 0) {
+    const cutoff = Date.now() - ageFilterHours * 3600000;
+    tokens = tokens.filter(t => t.is_active && t.creation_time && t.creation_time >= cutoff);
+  }
+  // Update filter count
+  const fc = $('ageFilterCount');
+  if (fc) fc.textContent = ageFilterHours > 0 ? tokens.length + ' 条' : '';
+  if (tokens.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">尚未添加任何代币</td></tr>';
+    $('tokenPagination').style.display = 'none';
+    return;
+  }
+  const totalPages = Math.ceil(tokens.length / _tokenPageSize);
+  if (_tokenPage > totalPages) _tokenPage = totalPages;
+  const start = (_tokenPage - 1) * _tokenPageSize;
+  const page = tokens.slice(start, start + _tokenPageSize);
+  tbody.innerHTML = page.map(t => `
+    <tr style="${t.is_active ? '' : 'opacity:0.4'}">
+      <td><b>${escapeHtml(t.symbol || 'UNKNOWN')}</b></td>
+      <td><a class="ca-link" href="https://gmgn.ai/sol/token/${t.mint}" target="_blank" rel="noopener">${t.mint.slice(0,4)}...${t.mint.slice(-4)}</a></td>
+      <td class="mono">${fmtMoney(t.fdv)}</td>
+      <td class="mono">${fmtMoney(t.liquidity)}</td>
+      <td class="mono">${t.price ? Number(t.price).toExponential(3) : '-'}</td>
+      <td class="mono">${fmtMoney(t.meta_json ? (JSON.parse(t.meta_json).volume24h || null) : null)}</td>
+      <td class="mono" style="font-size:11px;">${fmtTime(t.added_at)}</td>
+      <td class="mono" style="font-size:11px;">${fmtAge(t.creation_time)}</td>
+      <td><span class="pill ${t.source === 'webhook' ? 'live' : 'dry'}">${t.source || 'manual'}</span></td>
+      <td>${t.is_active ? `<button class="btn btn-sm btn-danger" onclick="removeToken('${t.mint}')">移除</button>` : '<span class="neutral">已移除</span>'}</td>
+    </tr>`).join('');
+  renderPagination('tokenPagination', _tokenPage, totalPages, (p) => { _tokenPage = p; renderTokenPage(); });
+}
+
+function caCell(mint) {
+  if (!mint) return '<td>-</td>';
+  return `<td><a class="ca-link" href="https://gmgn.ai/sol/token/${mint}" target="_blank" rel="noopener">${mint.slice(0,4)}...${mint.slice(-4)}</a></td>`;
+}
+
+async function manualSell(positionId, symbol) {
+    if (!confirm(`确认卖出 ${symbol || positionId.slice(0,8)}？`)) return;
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = '卖出中...';
+    try {
+      const r = await api(`/api/positions/${positionId}/sell`, { method: 'POST' });
+      if (r.ok) {
+        btn.textContent = '已提交';
+        btn.style.background = 'var(--green)';
+        setTimeout(() => refreshPositions(), 2000);
+      } else {
+        btn.textContent = r.error || '失败';
+        btn.style.background = 'var(--red)';
+        setTimeout(() => { btn.textContent = '卖出'; btn.disabled = false; btn.style.background = 'var(--red)'; }, 3000);
+      }
+    } catch (e) {
+      btn.textContent = '错误';
+      setTimeout(() => { btn.textContent = '卖出'; btn.disabled = false; }, 3000);
+    }
+  }
+
+let _allClosed = [];
+let _closedPage = 1;
+const _closedPageSize = 20;
+
+async function refreshPositions() {
+  const r = await api('/api/positions');
+  if (!r.ok) return;
+  const openTbody = $('openTbody');
+
+  // v3.20: 波动率标签
+  function volBadge(tier, val) {
+    if (!tier || tier === 'unknown') return '';
+    const labels = { low: '🟢低波', mid: '🟡中波', high: '🔴高波' };
+    const colors = { low: '#22c55e', mid: '#eab308', high: '#ef4444' };
+    const v = val != null ? val.toFixed(1) + '%' : '?';
+    return ` <span style="font-size:10px;color:${colors[tier]};background:${colors[tier]}18;padding:1px 4px;border-radius:3px" title="pre_vol_5m=${v}">${labels[tier]}</span>`;
+  }
+  if (r.open.length === 0) openTbody.innerHTML = '<tr><td colspan="10" class="empty">无</td></tr>';
+  else openTbody.innerHTML = r.open.map(p => {
+    const age = Math.floor((Date.now() - p.openedAt) / 1000);
+    const ageStr = age < 60 ? `${age}s` : age < 3600 ? `${Math.floor(age/60)}m${age%60}s` : `${Math.floor(age/3600)}h${Math.floor((age%3600)/60)}m`;
+    const curPrice = p.currentPrice > 0 ? Number(p.currentPrice).toExponential(3) : '<span style="color:var(--text-dim)">-</span>';
+    let pnlHtml = '<span style="color:var(--text-dim)">-</span>';
+    if (p.unrealizedPnlPct !== null) {
+      const v = p.unrealizedPnlPct;
+      const cls = v >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+      const sign = v >= 0 ? '+' : '';
+      pnlHtml = `<span class="mono" style="${cls};font-weight:600">${sign}${v.toFixed(2)}%</span>`;
+    }
+    const sellBtn = p.exiting
+      ? '<span style="color:var(--yellow);font-size:11px">卖出中...</span>'
+      : `<button onclick="manualSell('${p.positionId}','${escapeHtml(p.symbol || '')}')" style="background:var(--red);color:#fff;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;font-size:11px">卖出</button>`;
+    return `<tr>
+      <td class="mono">${fmtTime(p.openedAt)}</td>
+      <td><b>${escapeHtml(p.symbol || p.mint.slice(0,6))}</b>${volBadge(p.volTier, p.preVol5m)}</td>
+      ${caCell(p.mint)}
+      <td class="mono">${Number(p.entryPrice).toExponential(3)}</td>
+      <td class="mono">${curPrice}</td>
+      <td class="mono">${ageStr}</td>
+      <td>${pnlHtml}</td>
+      <td><span class="pill ${p.dryRun ? 'dry' : 'live'}">${p.dryRun ? 'DRY' : 'LIVE'}</span></td>
+      <td>${sellBtn}</td>
+    </tr>`;
+  }).join('');
+
+  _allClosed = r.recent.filter(p => p.closed_at);
+  renderClosedPage();
+  // v3.20: closed position vol badge
+  function volBadgeClosed(p) {
+    const val = p.pre_vol_5m_pct;
+    if (val == null || val < 0) return '';
+    const low = parseFloat(/*VOL_LOW*/'10'), high = parseFloat(/*VOL_HIGH*/'15');
+    const tier = val < low ? 'low' : val >= high ? 'high' : 'mid';
+    const labels = { low: '🟢低波', mid: '🟡中波', high: '🔴高波' };
+    const colors = { low: '#22c55e', mid: '#eab308', high: '#ef4444' };
+    return ` <span style="font-size:10px;color:${colors[tier]};background:${colors[tier]}18;padding:1px 4px;border-radius:3px" title="pre_vol_5m=${val.toFixed(1)}%">${labels[tier]}</span>`;
+  }
+
+function renderClosedPage() {
+  const closedTbody = $('closedTbody');
+  const closed = _allClosed;
+  if (closed.length === 0) {
+    closedTbody.innerHTML = '<tr><td colspan="11" class="empty">尚无平仓记录</td></tr>';
+    $('closedPagination').style.display = 'none';
+    return;
+  }
+  const totalPages = Math.ceil(closed.length / _closedPageSize);
+  if (_closedPage > totalPages) _closedPage = totalPages;
+  const start = (_closedPage - 1) * _closedPageSize;
+  const page = closed.slice(start, start + _closedPageSize);
+  closedTbody.innerHTML = page.map(p => {
+    const pnlCls = (p.pnl_sol || 0) > 0 ? 'pos' : (p.pnl_sol || 0) < 0 ? 'neg' : 'neutral';
+    let slotCell = '<span style="color:var(--text-dim)">-</span>';
+    if (p.buy_slot > 0 && p.dump_slot > 0) {
+      const lag = p.buy_slot - p.dump_slot;
+      let color, label;
+      if (lag === 0)      { color = '#22c55e'; label = '0 ⚡'; }
+      else if (lag === 1) { color = '#84cc16'; label = '1'; }
+      else if (lag === 2) { color = '#eab308'; label = '2'; }
+      else if (lag <= 5)  { color = '#f97316'; label = String(lag); }
+      else                { color = '#ef4444'; label = String(lag); }
+      slotCell = `<span class="mono" style="color:${color};font-weight:600" title="dump_slot=${p.dump_slot}, buy_slot=${p.buy_slot}">${label}</span>`;
+    }
+    let holdCell = '<span style="color:var(--text-dim)">-</span>';
+    if (p.opened_at && p.closed_at) {
+      const holdSec = Math.round((p.closed_at - p.opened_at) / 1000);
+      let color = '#9ca3af';
+      if (holdSec < 10) color = '#22c55e';
+      else if (holdSec >= 30) color = '#f97316';
+      const display = holdSec < 60 ? `${holdSec}s` : `${(holdSec/60).toFixed(1)}m`;
+      holdCell = `<span class="mono" style="color:${color}">${display}</span>`;
+    }
+    return `<tr>
+      <td class="mono">${fmtTime(p.opened_at)}</td>
+      <td><b>${escapeHtml(p.symbol || (p.mint || '').slice(0,6))}</b>${volBadgeClosed(p)}</td>
+      ${caCell(p.mint)}
+      <td>${slotCell}</td>
+      <td>${holdCell}</td>
+      <td class="mono">${(p.entry_sol || 0).toFixed(4)}</td>
+      <td class="mono">${(p.exit_sol || 0).toFixed(4)}</td>
+      <td class="mono ${pnlCls}">${(p.pnl_sol || 0).toFixed(4)}</td>
+      <td class="mono ${pnlCls}">${(p.pnl_pct || 0).toFixed(2)}%</td>
+      <td>${p.exit_reason || '-'}</td>
+      <td><span class="pill ${p.dry_run ? 'dry' : 'live'}">${p.dry_run ? 'DRY' : 'LIVE'}</span></td>
+    </tr>`;
+  }).join('');
+  renderPagination('closedPagination', _closedPage, totalPages, (p) => { _closedPage = p; renderClosedPage(); });
+}
+
+  // v3.3: stuck positions warning panel
+  const stuck = r.stuck || [];
+  const stuckBox = $('stuckBox');
+  if (stuck.length === 0) {
+    stuckBox.style.display = 'none';
+  } else {
+    stuckBox.style.display = 'block';
+    $('stuckCount').textContent = stuck.length;
+    $('stuckTbody').innerHTML = stuck.map(p => `<tr>
+      <td class="mono">${fmtTime(p.opened_at)}</td>
+      <td><b>${escapeHtml(p.symbol || (p.mint || '').slice(0,6))}</b></td>
+      ${caCell(p.mint)}
+      <td class="mono">${(p.entry_sol || 0).toFixed(4)}</td>
+      <td class="mono">${(p.token_amount || 0).toFixed(2)}</td>
+      <td class="mono neg">${p.sell_attempts || 0}</td>
+      <td style="color:var(--text-dim);font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(p.last_error || '')}">${escapeHtml((p.last_error || '').slice(0, 40))}${(p.last_error || '').length > 40 ? '...' : ''}</td>
+      <td class="mono" style="font-size:10px;">${(p.position_id || '').slice(0, 8)}..</td>
+    </tr>`).join('');
+  }
+}
+
+function _signalNote(s) {
+    if (!s.accepted) {
+      const reason = s.reject_reason || s.notes || '';
+      if (!reason || reason === 'detected but rejected') return '<span style="color:var(--text-dim)">-</span>';
+      return '<span style="color:#ff6b6b;font-size:11px">' + escapeHtml(reason) + '</span>';
+    }
+    return '<span style="color:var(--green);font-size:11px">' + escapeHtml(s.notes || '✓') + '</span>';
+  }
+
+async function refreshSignals() {
+  const r = await api('/api/signals?limit=200');
+  if (!r.ok) return;
+  const tbody = $('signalsTbody');
+  if (r.signals.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="empty">尚无信号</td></tr>'; return; }
+  tbody.innerHTML = r.signals.map(s => `
+    <tr>
+      <td class="mono">${fmtTime(s.ts)}</td>
+      <td><b>${escapeHtml(s.symbol || (s.mint || '').slice(0,6))}</b></td>
+      ${caCell(s.mint)}
+      <td>${s.kind}</td>
+      <td class="mono">${(s.sell_sol || 0).toFixed(2)}</td>
+      <td class="mono ${(s.price_impact_pct||0) > 0 ? 'neg' : ''}">${(s.price_impact_pct||0).toFixed(2)}</td>
+      <td><span class="pill ${s.accepted ? 'success' : 'fail'}">${s.accepted ? '接受' : '拒绝'}</span></td>
+      <td style="white-space:normal;word-break:break-word;max-width:280px;" title="${escapeHtml((s.accepted ? s.notes : (s.reject_reason || s.notes)) || '')}">${_signalNote(s)}</td>
+    </tr>`).join('');
+}
+
+async function refreshTrades() {
+  const r = await api('/api/trades?limit=200');
+  if (!r.ok) return;
+  const tbody = $('tradesTbody');
+  if (r.trades.length === 0) { tbody.innerHTML = '<tr><td colspan="11" class="empty">尚无交易</td></tr>'; return; }
+  tbody.innerHTML = r.trades.map(t => `
+    <tr>
+      <td class="mono">${fmtTime(t.ts)}</td>
+      <td><b>${escapeHtml(t.symbol || (t.mint || '').slice(0,6))}</b></td>
+      ${caCell(t.mint)}
+      <td><span class="pill ${t.side === 'BUY' ? 'buy' : 'sell'}">${t.side}</span></td>
+      <td class="mono">${(t.sol_amount || 0).toFixed(4)}</td>
+      <td class="mono">${(t.token_amount || 0).toFixed(2)}</td>
+      <td class="mono">${t.price ? Number(t.price).toExponential(3) : '-'}</td>
+      <td><span class="pill ${t.success ? 'success' : 'fail'}">${t.success ? 'OK' : 'FAIL'}</span></td>
+      <td><span class="pill ${t.dry_run ? 'dry' : 'live'}">${t.dry_run ? 'DRY' : 'LIVE'}</span></td>
+      <td class="mono">${t.latency_ms || '-'}ms</td>
+      <td class="mono" style="font-size:10px;">${t.signature ? t.signature.slice(0,8) + '...' : '-'}</td>
+    </tr>`).join('');
+}
+
+async function refreshHealth() {
+  try {
+    const r = await api('/api/health');
+    if (!r.ok) return;
+    const rep = r.report;
+
+    // status meta
+    const statusEl = $('healthStatus');
+    if (rep.status === 'OK') {
+      statusEl.textContent = `OK · uptime ${formatUptime(rep.uptime_s)} · ${rep.mem_mb}MB`;
+      statusEl.style.color = 'var(--green)';
+    } else {
+      statusEl.textContent = `${rep.status} · ${rep.active_alerts.length} alert(s)`;
+      statusEl.style.color = 'var(--red)';
+    }
+
+    // alerts
+    const alertsBox = $('alertsBox');
+    if (rep.active_alerts.length === 0) {
+      alertsBox.style.display = 'none';
+      alertsBox.innerHTML = '';
+    } else {
+      alertsBox.style.display = 'block';
+      alertsBox.innerHTML = rep.active_alerts.map(a => {
+        const ago = Math.round((Date.now() - a.since) / 1000);
+        const ctxStr = a.context && Object.keys(a.context).length > 0
+          ? `<div class="ctx">${escapeHtml(JSON.stringify(a.context))}</div>` : '';
+        return `<div class="alert-banner ${a.severity}">
+          <span class="name">[${a.severity.toUpperCase()}] ${escapeHtml(a.name)}</span>
+          ${escapeHtml(a.message)}
+          <span style="color:var(--text-dim);font-size:11px;margin-left:8px;">${ago}s ago</span>
+          ${ctxStr}
+        </div>`;
+      }).join('');
+    }
+
+    // heartbeats
+    const hbBox = $('heartbeatsBox');
+    hbBox.innerHTML = Object.entries(rep.heartbeats).map(([name, h]) => {
+      const cls = h.status === 'OK' ? '' : (h.status === 'STALE' ? 'stale' : 'never');
+      const elapsed = h.elapsed_ms != null ? `${Math.round(h.elapsed_ms / 1000)}s ago` : 'never';
+      const icon = h.status === 'OK' ? '✅' : (h.status === 'STALE' ? '❌' : '⏳');
+      return `<div class="heartbeat-card ${cls}">
+        <div class="label">${icon} ${escapeHtml(name)}</div>
+        <div class="meta">${h.status} · ${elapsed}</div>
+        ${h.last_context ? `<div class="meta" style="color:var(--accent);">${escapeHtml(h.last_context)}</div>` : ''}
+      </div>`;
+    }).join('');
+
+    // counters by module
+    const cBox = $('countersBox');
+
+    // 信号漏斗概览（一眼看清楚转化）
+    const tt = rep.counters_total || {};
+    const txReceived = tt['TickStream.txReceived'] || 0;
+    const txParsed = tt['DumpDetector.txParsed'] || 0;
+    const priceTicks = tt['DumpDetector.priceTicks'] || 0;
+    const dumpSignals = tt['DumpDetector.dumpSignals'] || 0;
+    const accepted = tt['SignalEngine.signalsAccepted'] || 0;
+    const buyOk = tt['Executor.buySuccess'] || 0;
+    const sellOk = tt['Executor.sellSuccess'] || 0;
+    const winners = tt['PositionManager.winners'] || 0;
+    const losers = tt['PositionManager.losers'] || 0;
+
+    const funnelHtml = `
+      <div style="background:var(--panel-2);border:1px solid var(--border);border-radius:4px;padding:10px 12px;margin-bottom:10px;">
+        <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:6px;">📡 信号漏斗</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:6px;font-size:11px;font-family:'SF Mono',Consolas,monospace;">
+          <div><div style="color:var(--text-dim);">TX 收到</div><div style="font-weight:600;">${txReceived}</div></div>
+          <div><div style="color:var(--text-dim);">价格更新</div><div style="font-weight:600;">${priceTicks}</div></div>
+          <div><div style="color:var(--text-dim);">砸盘信号</div><div style="font-weight:600;color:${dumpSignals > 0 ? 'var(--yellow)' : 'var(--text)'};">${dumpSignals}</div></div>
+          <div><div style="color:var(--text-dim);">通过过滤</div><div style="font-weight:600;color:${accepted > 0 ? 'var(--accent)' : 'var(--text)'};">${accepted}</div></div>
+          <div><div style="color:var(--text-dim);">买入成功</div><div style="font-weight:600;">${buyOk}</div></div>
+          <div><div style="color:var(--text-dim);">卖出成功</div><div style="font-weight:600;">${sellOk}</div></div>
+          <div><div style="color:var(--text-dim);">盈利</div><div style="font-weight:600;color:var(--green);">${winners}</div></div>
+          <div><div style="color:var(--text-dim);">亏损</div><div style="font-weight:600;color:var(--red);">${losers}</div></div>
+        </div>
+      </div>`;
+
+    cBox.innerHTML = funnelHtml + Object.entries(rep.modules).map(([moduleName, counters]) => {
+      const rows = Object.entries(counters).sort().map(([k, v]) => {
+        const short = k.replace(`${moduleName}.`, '');
+        const isErr = /(error|fail|reject|stuck)/i.test(short) && v > 0;
+        return `<div class="counter-row"><span class="key">${escapeHtml(short)}</span><span class="val ${isErr ? 'err' : ''}">${v}</span></div>`;
+      }).join('');
+      return `<div style="margin-bottom:10px;">
+        <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:4px;">[${escapeHtml(moduleName)}]</div>
+        ${rows || '<div class="counter-row"><span class="key">-</span></div>'}
+      </div>`;
+    }).join('');
+
+    // errors
+    const errBox = $('errorsBox');
+    const errModules = Object.entries(rep.errors).filter(([_, e]) => e.length > 0);
+    if (errModules.length === 0) {
+      errBox.innerHTML = '<div class="empty" style="padding:10px;">无近期错误</div>';
+    } else {
+      errBox.innerHTML = errModules.map(([moduleName, errs]) => {
+        const blocks = errs.slice(0, 3).map(e => {
+          const ago = Math.round((Date.now() - e.ts) / 1000);
+          const ctxStr = e.context && Object.keys(e.context).length > 0
+            ? `<div class="ctx">${escapeHtml(JSON.stringify(e.context).slice(0, 200))}</div>` : '';
+          return `<div class="error-block">
+            <div class="msg">${escapeHtml(e.message || '')}</div>
+            <div class="ago">${ago}s ago</div>
+            ${ctxStr}
+          </div>`;
+        }).join('');
+        return `<div style="margin-bottom:8px;">
+          <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:4px;">[${escapeHtml(moduleName)}]</div>
+          ${blocks}
+        </div>`;
+      }).join('');
+    }
+  } catch (err) {
+    console.error('refreshHealth failed:', err);
+  }
+}
+
+function formatUptime(s) {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
+// ============ Pagination Helper ============
+function renderPagination(containerId, currentPage, totalPages, onPageChange) {
+  const container = $(containerId);
+  if (totalPages <= 1) { container.style.display = 'none'; return; }
+  container.style.display = 'flex';
+  let html = '';
+  html += `<button ${currentPage === 1 ? 'disabled' : ''}>«</button>`;
+  const maxButtons = 7;
+  let startPage = Math.max(1, currentPage - 3);
+  let endPage = Math.min(totalPages, startPage + maxButtons - 1);
+  if (endPage - startPage < maxButtons - 1) startPage = Math.max(1, endPage - maxButtons + 1);
+  if (startPage > 1) html += `<button>1</button>`;
+  if (startPage > 2) html += `<span class="info">...</span>`;
+  for (let i = startPage; i <= endPage; i++) {
+    html += `<button class="${i === currentPage ? 'active' : ''}">${i}</button>`;
+  }
+  if (endPage < totalPages - 1) html += `<span class="info">...</span>`;
+  if (endPage < totalPages) html += `<button>${totalPages}</button>`;
+  html += `<button ${currentPage === totalPages ? 'disabled' : ''}>»</button>`;
+  html += `<span class="info">${currentPage}/${totalPages}</span>`;
+  container.innerHTML = html;
+  container.querySelectorAll('button').forEach(btn => {
+    btn.onclick = () => {
+      const txt = btn.textContent;
+      let p = currentPage;
+      if (txt === '«') p = currentPage - 1;
+      else if (txt === '»') p = currentPage + 1;
+      else p = parseInt(txt);
+      if (!isNaN(p) && p >= 1 && p <= totalPages && p !== currentPage) onPageChange(p);
+    };
+  });
+}
+
+async function refreshAll() {
+  await Promise.all([refreshStatus(), refreshTokens(), refreshPositions(), refreshSignals(), refreshTrades(), refreshHealth()]);
+}
+
+// ============ Actions ============
+async function addToken() {
+  const ca = $('addCa').value.trim();
+  const sym = $('addSymbol').value.trim();
+  if (!ca) { showToast('请输入 CA', 'error'); return; }
+  showToast('添加中...', 'info');
+  const r = await api('/api/tokens', { method: 'POST', body: JSON.stringify({ address: ca, symbol: sym }) });
+  if (r.ok) {
+    $('addCa').value = ''; $('addSymbol').value = '';
+    showToast(`已添加 ${r.token.symbol}`, 'ok');
+    refreshTokens();
+  } else {
+    showToast('添加失败: ' + r.error, 'error');
+  }
+}
+
+async function removeToken(mint) {
+  if (!confirm('确认移除该代币？')) return;
+  const r = await api('/api/tokens/' + mint, { method: 'DELETE' });
+  if (r.ok) { showToast('已移除', 'ok'); refreshTokens(); }
+  else showToast('移除失败: ' + r.error, 'error');
+}
+
+
+// ============ Helpers ============
+function fmtTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+function fmtMoney(n) {
+  if (n === null || n === undefined) return '-';
+  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return '$' + (n / 1e3).toFixed(2) + 'K';
+  return '$' + Number(n).toFixed(2);
+}
+function fmtAge(creationTime) {
+    if (!creationTime) return '<span style="color:var(--text-dim)">-</span>';
+    const ageMs = Date.now() - creationTime;
+    if (ageMs < 0) return '-';
+    const ageMin = Math.floor(ageMs / 60000);
+    if (ageMin < 60) return ageMin + 'm';
+    const ageH = Math.floor(ageMin / 60);
+    const ageM = ageMin % 60;
+    if (ageH < 24) return ageH + 'h' + ageM + 'm';
+    const ageD = Math.floor(ageH / 24);
+    const ageHr = ageH % 24;
+    if (ageD < 30) return ageD + 'd' + ageHr + 'h';
+    return Math.floor(ageD / 30) + 'mo';
+  }
+  function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function showToast(msg, kind = 'info') {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast ' + (kind === 'error' ? 'error' : kind === 'ok' ? 'ok' : '');
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.style.display = 'none', 3000);
+}
+
+// Tabs
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    $('pane-' + t.dataset.tab).classList.add('active');
+  };
+});
+
+// Boot
+connectWs();
+refreshAll();
+setInterval(refreshAll, 3000);
+</script>
+<script>
+// v3.20: 波动率标签 — MutationObserver方式，不依赖主页面缓存
+(function() {
+  const L = 10, H = 15;
+  const labels = { low: '🟢低波', mid: '🟡中波', high: '🔴高波' };
+  const colors = { low: '#22c55e', mid: '#eab308', high: '#ef4444' };
+
+  function tier(v) { return v == null || v < 0 ? 'unknown' : v < L ? 'low' : v >= H ? 'high' : 'mid'; }
+  function badgeHTML(t, v) {
+    if (!t || t === 'unknown') return '';
+    const s = v != null ? v.toFixed(1)+'%' : '?';
+    return ' <span style="font-size:10px;color:'+colors[t]+';background:'+colors[t]+'18;padding:1px 4px;border-radius:3px" title="pre_vol_5m='+s+'">'+labels[t]+'</span>';
+  }
+
+  // Cache API data
+  let openData = [];
+  let closedData = [];
+
+  function fetchData() {
+    fetch('/api/positions').then(r => r.json()).then(d => {
+      openData = d.open || [];
+      closedData = d.recent || [];
+      injectOpen();
+      injectClosed();
+    }).catch(() => {});
+  }
+
+  function injectOpen() {
+    const tbody = document.getElementById('openTbody');
+    if (!tbody) return;
+    const rows = tbody.querySelectorAll('tr');
+    openData.forEach((pos, i) => {
+      if (!rows[i]) return;
+      const cell = rows[i].querySelectorAll('td')[1];
+      if (!cell) return;
+      if (cell.querySelector('[title*="pre_vol"]')) return;
+      const t = tier(pos.preVol5m);
+      if (t === 'unknown') return;
+      cell.insertAdjacentHTML('beforeend', badgeHTML(t, pos.preVol5m));
+    });
+  }
+
+  function injectClosed() {
+    const tbody = document.getElementById('closedTbody');
+    if (!tbody) return;
+    const rows = tbody.querySelectorAll('tr');
+    rows.forEach(row => {
+      const cells = row.querySelectorAll('td');
+      if (cells.length < 2) return;
+      if (cells[1].querySelector('[title*="pre_vol"]')) return;
+      const sym = cells[1]?.textContent?.trim()?.replace(/[🟢🟡🔴低高中波]/g, '').trim();
+      const match = closedData.find(p => (p.symbol||'').trim() === sym);
+      if (!match || match.pre_vol_5m_pct == null || match.pre_vol_5m_pct < 0) return;
+      const t = tier(match.pre_vol_5m_pct);
+      if (t === 'unknown') return;
+      cells[1].insertAdjacentHTML('beforeend', badgeHTML(t, match.pre_vol_5m_pct));
+    });
+  }
+
+  // Observe DOM mutations to re-inject when tables update
+  const observer = new MutationObserver(() => {
+    injectOpen();
+    injectClosed();
+  });
+
+  function start() {
+    const openTbody = document.getElementById('openTbody');
+    const closedTbody = document.getElementById('closedTbody');
+    if (openTbody) observer.observe(openTbody, { childList: true, subtree: true });
+    if (closedTbody) observer.observe(closedTbody, { childList: true, subtree: true });
+    fetchData();
+    // Also refresh every 3s (sync with main refreshAll)
+    setInterval(fetchData, 3500);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
+
+</script>
+</body>
+</html>
