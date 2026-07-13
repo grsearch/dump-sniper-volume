@@ -376,8 +376,8 @@ class SignalEngine extends EventEmitter {
     }
 
     // v3.18: 本地 FDV 估算 — 零 RPC
-    const maxFdvUsd = parseFloat(process.env.SIGNAL_MAX_FDV_USD ?? process.env.MAX_FDV_USD ?? '0');
-    const minFdvUsd = parseFloat(process.env.SIGNAL_MIN_FDV_USD ?? process.env.MIN_FDV_USD ?? '0');
+    const maxFdvUsd = parseFloat(process.env.SIGNAL_MAX_FDV_USD ?? '0');
+    const minFdvUsd = parseFloat(process.env.SIGNAL_MIN_FDV_USD ?? '0');
     if ((maxFdvUsd > 0 || minFdvUsd > 0) && signal.priceAfter > 0 && signal.baseDecimals > 0) {
       const solPriceUsd = parseFloat(process.env.SOL_PRICE_USD || '170');
       // FDV = totalSupply * priceInSol * solPriceUsd
@@ -530,7 +530,7 @@ class SignalEngine extends EventEmitter {
     //   RSI 35-40 = 最佳反弹区间
     //   Pump.fun币RSI低不是"超卖反弹"，而是"还在跌"
     {
-      const rsi30sMin = parseFloat(process.env.RSI_30S_MIN || '35');
+      const rsi30sMin = parseFloat(process.env.RSI_30S_MIN || '0');
       if (rsi30sMin > 0 && this.rsiCalculator) {
         const snap = this.rsiCalculator.snapshot(mint, 20);
         // v3.17.42: debug — 记录RSI过滤判断
@@ -558,7 +558,7 @@ class SignalEngine extends EventEmitter {
     // 砸盘深度 = (砸单前5min均价 - 买入价) / 均价 * 100
     // 数据支撑(7天回测): >50%深度 avgPnL -10%, 17笔深亏; 10-25%深度 WR 60-68%
     {
-      const maxDumpDepthPct = parseFloat(process.env.MAX_DUMP_DEPTH_PCT || '50');
+      const maxDumpDepthPct = parseFloat(process.env.MAX_DUMP_DEPTH_PCT || '0');
       const minDumpDepthPct = parseFloat(process.env.MIN_DUMP_DEPTH_PCT || '0');
       if (maxDumpDepthPct > 0 || minDumpDepthPct > 0) {
         const samples = this._longPriceSamples.get(mint);
@@ -600,7 +600,7 @@ class SignalEngine extends EventEmitter {
     //   过滤后总PnL: -71.89→-35.70 SOL (+36.19 SOL改善)
     //   新币PnL: -35.84→-9.07 SOL (+26.77 SOL改善)
     {
-      const maxPreVol5m = parseFloat(process.env.MAX_PRE_VOL_5M_PCT || '15');
+      const maxPreVol5m = parseFloat(process.env.MAX_PRE_VOL_5M_PCT || '0');
       if (maxPreVol5m > 0) {
         const samples = this._longPriceSamples.get(mint);
         if (samples && samples.length >= 3) {
@@ -679,7 +679,7 @@ class SignalEngine extends EventEmitter {
     // 竞对数据: 老币 pool>=100 + impact>=5% PF=7.93, 是最优策略
     // 我们的池子太小(30 SOL)的老币亏损严重, peak才3-4%涨不动
     {
-      const oldCoinMinPoolSol = parseFloat(process.env.OLD_COIN_MIN_POOL_SOL || '100');
+      const oldCoinMinPoolSol = parseFloat(process.env.OLD_COIN_MIN_POOL_SOL || '0');
       if (oldCoinMinPoolSol > 0 && this.tokenRegistry) {
         const tokenInfo = this.tokenRegistry.getToken(mint);
         if (tokenInfo && tokenInfo.added_at) {

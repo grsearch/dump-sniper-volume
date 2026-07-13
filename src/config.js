@@ -2,6 +2,10 @@
 
 require('dotenv').config({ override: true });
 
+const orderFlowForceDisabled = ['true', '1', 'yes'].includes(
+  String(process.env.ORDER_FLOW_FORCE_DISABLED || '').toLowerCase(),
+);
+
 const config = {
   // ============ Mode ============
   DRY_RUN: (process.env.DRY_RUN ?? 'true').toLowerCase() === 'true',
@@ -178,6 +182,32 @@ const config = {
     minLpSol: parseFloat(process.env.MIN_LP_SOL || '0'),
     // v3.17.20: FDV 上限（USD），设 0 禁用（不因 FDV 过大移除监控）
     maxFdVUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
+  },
+
+  // ============ Order-flow reversal entry ============
+  orderFlow: {
+    // Default entry path: dump creates a setup; buy volume confirmation creates the buy signal.
+    enabled: !orderFlowForceDisabled && (process.env.ORDER_FLOW_ENABLED ?? 'true').toLowerCase() === 'true',
+    replaceDumpSignal:
+      !orderFlowForceDisabled && (process.env.ORDER_FLOW_REPLACE_DUMP_SIGNAL ?? 'true').toLowerCase() === 'true',
+    windowMs: parseInt(process.env.ORDER_FLOW_WINDOW_MS || '10000', 10),
+    confirmWindowMs: parseInt(process.env.ORDER_FLOW_CONFIRM_WINDOW_MS || '3000', 10),
+    minSellSol: parseFloat(process.env.ORDER_FLOW_MIN_SELL_SOL || process.env.MIN_SELL_SOL || '20'),
+    minDropPct: parseFloat(process.env.ORDER_FLOW_MIN_DROP_PCT || '6'),
+    maxDropPct: parseFloat(process.env.ORDER_FLOW_MAX_DROP_PCT || process.env.MAX_PRICE_IMPACT_PCT || '30'),
+    minSellCount: parseInt(process.env.ORDER_FLOW_MIN_SELL_COUNT || process.env.MIN_TRIGGER_SELL_COUNT || '2', 10),
+    minUniqueSellers: parseInt(process.env.ORDER_FLOW_MIN_UNIQUE_SELLERS || '2', 10),
+    minBuySol: parseFloat(process.env.ORDER_FLOW_MIN_BUY_SOL || '3'),
+    minBuySellRatio: parseFloat(process.env.ORDER_FLOW_MIN_BUY_SELL_RATIO || '1.25'),
+    minImbalance: parseFloat(process.env.ORDER_FLOW_MIN_IMBALANCE || '0.15'),
+    minUniqueBuyers: parseInt(process.env.ORDER_FLOW_MIN_UNIQUE_BUYERS || '2', 10),
+    minReboundPct: parseFloat(process.env.ORDER_FLOW_MIN_REBOUND_PCT || '1.5'),
+    maxReboundPct: parseFloat(process.env.ORDER_FLOW_MAX_REBOUND_PCT || '10'),
+    minLowAgeMs: parseInt(process.env.ORDER_FLOW_MIN_LOW_AGE_MS || '300', 10),
+    maxCandidateAgeMs: parseInt(process.env.ORDER_FLOW_MAX_CANDIDATE_AGE_MS || '8000', 10),
+    cooldownMs: parseInt(process.env.ORDER_FLOW_COOLDOWN_MS || process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),
+    maxEventsPerMint: parseInt(process.env.ORDER_FLOW_MAX_EVENTS_PER_MINT || '180', 10),
+    debug: (process.env.ORDER_FLOW_DEBUG ?? 'false').toLowerCase() === 'true',
   },
 
   // ============ Price anomaly filter ============

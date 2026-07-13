@@ -32,25 +32,50 @@ function sumVolume(items) {
 class OrderFlowTracker extends EventEmitter {
   constructor(opts = {}) {
     super();
-    this.enabled = opts.enabled ?? boolEnv('ORDER_FLOW_ENABLED', true);
-    this.windowMs = opts.windowMs ?? numEnv('ORDER_FLOW_WINDOW_MS', 10_000);
-    this.confirmWindowMs = opts.confirmWindowMs ?? numEnv('ORDER_FLOW_CONFIRM_WINDOW_MS', 3_000);
-    this.minSellSol = opts.minSellSol ?? numEnv('ORDER_FLOW_MIN_SELL_SOL', config.strategy.minSellSol || 20);
-    this.minDropPct = opts.minDropPct ?? numEnv('ORDER_FLOW_MIN_DROP_PCT', Math.max(6, Math.min(config.strategy.minPriceImpactPct || 10, 10)));
-    this.maxDropPct = opts.maxDropPct ?? numEnv('ORDER_FLOW_MAX_DROP_PCT', config.strategy.maxPriceImpactPct || 30);
-    this.minSellCount = opts.minSellCount ?? numEnv('ORDER_FLOW_MIN_SELL_COUNT', config.strategy.minTriggerSellCount || 2);
-    this.minUniqueSellers = opts.minUniqueSellers ?? numEnv('ORDER_FLOW_MIN_UNIQUE_SELLERS', 2);
-    this.minBuySol = opts.minBuySol ?? numEnv('ORDER_FLOW_MIN_BUY_SOL', 3);
-    this.minBuySellRatio = opts.minBuySellRatio ?? numEnv('ORDER_FLOW_MIN_BUY_SELL_RATIO', 1.25);
-    this.minImbalance = opts.minImbalance ?? numEnv('ORDER_FLOW_MIN_IMBALANCE', 0.15);
-    this.minUniqueBuyers = opts.minUniqueBuyers ?? numEnv('ORDER_FLOW_MIN_UNIQUE_BUYERS', 2);
-    this.minReboundPct = opts.minReboundPct ?? numEnv('ORDER_FLOW_MIN_REBOUND_PCT', 1.5);
-    this.maxReboundPct = opts.maxReboundPct ?? numEnv('ORDER_FLOW_MAX_REBOUND_PCT', 10);
-    this.minLowAgeMs = opts.minLowAgeMs ?? numEnv('ORDER_FLOW_MIN_LOW_AGE_MS', 300);
-    this.maxCandidateAgeMs = opts.maxCandidateAgeMs ?? numEnv('ORDER_FLOW_MAX_CANDIDATE_AGE_MS', 8_000);
-    this.cooldownMs = opts.cooldownMs ?? numEnv('ORDER_FLOW_COOLDOWN_MS', config.strategy.cooldownMsPerToken || 60_000);
-    this.maxEventsPerMint = opts.maxEventsPerMint ?? numEnv('ORDER_FLOW_MAX_EVENTS_PER_MINT', 180);
-    this.debug = opts.debug ?? boolEnv('ORDER_FLOW_DEBUG', false);
+    const flowConfig = config.orderFlow || {};
+    this.enabled = opts.enabled ?? flowConfig.enabled ?? boolEnv('ORDER_FLOW_ENABLED', true);
+    this.replaceDumpSignal =
+      opts.replaceDumpSignal ?? flowConfig.replaceDumpSignal ?? boolEnv('ORDER_FLOW_REPLACE_DUMP_SIGNAL', true);
+    this.windowMs = opts.windowMs ?? flowConfig.windowMs ?? numEnv('ORDER_FLOW_WINDOW_MS', 10_000);
+    this.confirmWindowMs =
+      opts.confirmWindowMs ?? flowConfig.confirmWindowMs ?? numEnv('ORDER_FLOW_CONFIRM_WINDOW_MS', 3_000);
+    this.minSellSol =
+      opts.minSellSol ?? flowConfig.minSellSol ?? numEnv('ORDER_FLOW_MIN_SELL_SOL', config.strategy.minSellSol || 20);
+    this.minDropPct =
+      opts.minDropPct ??
+      flowConfig.minDropPct ??
+      numEnv('ORDER_FLOW_MIN_DROP_PCT', Math.max(6, Math.min(config.strategy.minPriceImpactPct || 10, 10)));
+    this.maxDropPct =
+      opts.maxDropPct ??
+      flowConfig.maxDropPct ??
+      numEnv('ORDER_FLOW_MAX_DROP_PCT', config.strategy.maxPriceImpactPct || 30);
+    this.minSellCount =
+      opts.minSellCount ??
+      flowConfig.minSellCount ??
+      numEnv('ORDER_FLOW_MIN_SELL_COUNT', config.strategy.minTriggerSellCount || 2);
+    this.minUniqueSellers =
+      opts.minUniqueSellers ?? flowConfig.minUniqueSellers ?? numEnv('ORDER_FLOW_MIN_UNIQUE_SELLERS', 2);
+    this.minBuySol = opts.minBuySol ?? flowConfig.minBuySol ?? numEnv('ORDER_FLOW_MIN_BUY_SOL', 3);
+    this.minBuySellRatio =
+      opts.minBuySellRatio ?? flowConfig.minBuySellRatio ?? numEnv('ORDER_FLOW_MIN_BUY_SELL_RATIO', 1.25);
+    this.minImbalance =
+      opts.minImbalance ?? flowConfig.minImbalance ?? numEnv('ORDER_FLOW_MIN_IMBALANCE', 0.15);
+    this.minUniqueBuyers =
+      opts.minUniqueBuyers ?? flowConfig.minUniqueBuyers ?? numEnv('ORDER_FLOW_MIN_UNIQUE_BUYERS', 2);
+    this.minReboundPct =
+      opts.minReboundPct ?? flowConfig.minReboundPct ?? numEnv('ORDER_FLOW_MIN_REBOUND_PCT', 1.5);
+    this.maxReboundPct =
+      opts.maxReboundPct ?? flowConfig.maxReboundPct ?? numEnv('ORDER_FLOW_MAX_REBOUND_PCT', 10);
+    this.minLowAgeMs = opts.minLowAgeMs ?? flowConfig.minLowAgeMs ?? numEnv('ORDER_FLOW_MIN_LOW_AGE_MS', 300);
+    this.maxCandidateAgeMs =
+      opts.maxCandidateAgeMs ?? flowConfig.maxCandidateAgeMs ?? numEnv('ORDER_FLOW_MAX_CANDIDATE_AGE_MS', 8_000);
+    this.cooldownMs =
+      opts.cooldownMs ??
+      flowConfig.cooldownMs ??
+      numEnv('ORDER_FLOW_COOLDOWN_MS', config.strategy.cooldownMsPerToken || 60_000);
+    this.maxEventsPerMint =
+      opts.maxEventsPerMint ?? flowConfig.maxEventsPerMint ?? numEnv('ORDER_FLOW_MAX_EVENTS_PER_MINT', 180);
+    this.debug = opts.debug ?? flowConfig.debug ?? boolEnv('ORDER_FLOW_DEBUG', false);
 
     this.states = new Map();
     this.cooldowns = new Map();
