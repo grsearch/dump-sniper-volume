@@ -1,11 +1,13 @@
 {
   "name": "dump-sniper",
   "version": "4.0.0-clean",
-  "description": "Solana Pump.fun dump-rebound sniper — clean baseline. Buy: sell>=20 SOL, impact>=10%, >=2 sellers/10s. Exit: fast 5% / trail(arm 10%, draw 35%) / TP 20% / SL -25%. Watchlist: FDV 30k-1M, age<24h, vol24h>=5k.",
-  "main": "src/index.js",
+  "description": "Solana Pump.fun dump-rebound sniper with order-flow reversal entry.",
+  "main": "src/index-flow.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --trace-warnings src/index.js",
+    "start": "node src/index-flow.js",
+    "start:legacy": "node src/index.js",
+    "dev": "node --trace-warnings src/index-flow.js",
+    "dev:legacy": "node --trace-warnings src/index.js",
     "health": "node scripts/health.js",
     "health:json": "node scripts/health.js --json",
     "diagnose": "node scripts/diagnose.js",
@@ -30,7 +32,7 @@
     "bs58": "^6.0.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
-    "node-cron": "^3.0.3",
+    "node-cron": "^3.0.0",
     "shredstream": "^2.0.0",
     "ws": "^8.18.0"
   },
