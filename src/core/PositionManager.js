@@ -177,6 +177,7 @@ class PositionManager extends EventEmitter {
 
     const s = config.strategy;
     const maxWindowMs = Math.max(
+      s.flowReversalExitWindowMs || 60_000,
       s.flowReversalExitWindow5Ms || 5_000,
       s.flowReversalExitWindow15Ms || 15_000,
     ) + 1_000;
@@ -224,6 +225,26 @@ class PositionManager extends EventEmitter {
 
     const holdStart = pos.reconciledAt || pos.openedAt || now;
     if (now - holdStart < s.flowReversalExitMinHoldMs) return;
+
+    if (s.flowReversalExitMode === 'VOLUME_RATIO_1M') {
+      const windowMs = s.flowReversalExitWindowMs || 60_000;
+      const st1m = this._flowExitStats(pos.mint, now, windowMs);
+      if (st1m.volumeSol < s.flowReversalExitMinVolume1mSol) return;
+      if (st1m.sellSol <= st1m.buySol) return;
+      if (st1m.sellBuyRatio < s.flowReversalExitSellBuyRatio1m) return;
+      if (st1m.lastSide !== 'SELL') return;
+
+      const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
+      console.log(
+        `[PositionManager] FLOW_REVERSAL_EXIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
+          `mode=VOLUME_RATIO_1M pnl=${pnlPct.toFixed(2)}% ` +
+          `1m sell/buy=${st1m.sellSol.toFixed(2)}/${st1m.buySol.toFixed(2)}SOL ` +
+          `r=${st1m.sellBuyRatio.toFixed(2)} volume=${st1m.volumeSol.toFixed(2)}SOL`,
+      );
+      monitor.inc('PositionManager.flowReversalExit', 1, 'PositionManager');
+      this._exit(pos, price, 'FLOW_REVERSAL_EXIT');
+      return;
+    }
 
     const st5 = this._flowExitStats(pos.mint, now, s.flowReversalExitWindow5Ms);
     if (st5.tradeCount < s.flowReversalExitMinTrades5s) return;

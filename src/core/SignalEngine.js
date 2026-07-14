@@ -722,9 +722,9 @@ class SignalEngine extends EventEmitter {
     const slotGap = (slot && latestSlot) ? (latestSlot - slot) : null;
     const flow = signal._flow || null;
     const activityReason = signal._activityFlow && flow
-      ? `activity_flow: 5s ${flow.s5.tradeCount}tx/${flow.s5.volumeSol.toFixed(2)}SOL ` +
-        `r=${flow.s5.buySellRatio.toFixed(2)}, 15s ${flow.s15.tradeCount}tx/${flow.s15.volumeSol.toFixed(2)}SOL ` +
-        `r=${flow.s15.buySellRatio.toFixed(2)}, 60s ${flow.s60.tradeCount}tx/${flow.s60.volumeSol.toFixed(2)}SOL`
+      ? `activity_flow_1m: ${flow.s60.tradeCount}tx/${flow.s60.volumeSol.toFixed(2)}SOL ` +
+        `buy=${flow.s60.buySol.toFixed(2)} sell=${flow.s60.sellSol.toFixed(2)} ` +
+        `r=${flow.s60.buySellRatio.toFixed(2)}`
       : null;
 
     // v3.10: 先 emit buyOrder（让 Executor 立即开始工作），再异步写 DB

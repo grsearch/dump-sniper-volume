@@ -31,10 +31,12 @@ async function main() {
   console.log(`Trailing: arm at +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% (priority: TP > trailing)`);
   console.log(
     `Entry: ACTIVITY_FLOW ` +
-      `(60s>=${config.activityFlow.minTrades60s}tx/${config.activityFlow.minVolume60sSol}SOL, ` +
-      `30s>=${config.activityFlow.minTrades30s}tx/${config.activityFlow.minVolume30sSol}SOL, ` +
-      `15s buy/sell>=${config.activityFlow.minRatio15s}, ` +
-      `5s buy/sell>=${config.activityFlow.minRatio5s})`,
+      `(${config.activityFlow.entryMode}: 1m volume>=${config.activityFlow.minVolume1mSol.toFixed(2)}SOL ` +
+      `(~$${Math.round(config.activityFlow.minVolume1mUsd)}), buy/sell>=${config.activityFlow.minRatio1m})`,
+  );
+  console.log(
+    `Flow exit: ${config.strategy.flowReversalExitMode} ` +
+      `(sell>buy in ${config.strategy.flowReversalExitWindowMs}ms window)`,
   );
   console.log(`Legacy dumpSignal: ${config.activityFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
   console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15min check)`);
@@ -183,11 +185,9 @@ async function main() {
   const activityFlowTracker = new ActivityFlowTracker({ tokenRegistry });
   console.log(
     `[main] ActivityFlow ${activityFlowTracker.enabled ? 'enabled' : 'disabled'}: ` +
-      `60s>=${activityFlowTracker.minTrades60s}tx/${activityFlowTracker.minVolume60sSol}SOL/${activityFlowTracker.minUniqueTraders60s}traders ` +
-      `30s>=${activityFlowTracker.minTrades30s}tx/${activityFlowTracker.minVolume30sSol}SOL ratio>=${activityFlowTracker.minRatio30s} ` +
-      `15s>=${activityFlowTracker.minTrades15s}tx/${activityFlowTracker.minVolume15sSol}SOL ratio>=${activityFlowTracker.minRatio15s} ` +
-      `5s>=${activityFlowTracker.minTrades5s}tx/${activityFlowTracker.minVolume5sSol}SOL ratio>=${activityFlowTracker.minRatio5s} ` +
-      `maxChg=${activityFlowTracker.maxPriceChange5sPct}/${activityFlowTracker.maxPriceChange30sPct}/${activityFlowTracker.maxPriceChange60sPct}% ` +
+      `mode=${activityFlowTracker.entryMode} ` +
+      `1m>=${activityFlowTracker.minVolume1mSol.toFixed(2)}SOL(~$${Math.round(activityFlowTracker.minVolume1mUsd)}) ` +
+      `buy/sell>=${activityFlowTracker.minRatio1m} ` +
       `pool>=${activityFlowTracker.minPoolQuoteSol}SOL ` +
       `replaceDump=${activityFlowTracker.replaceDumpSignal}`,
   );

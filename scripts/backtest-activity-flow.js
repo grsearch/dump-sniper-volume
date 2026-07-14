@@ -58,6 +58,14 @@ function windowStats(events, idx, windowMs) {
 
 function passesEntry(cfg, s5, s15, s30, s60, poolQuoteAfter) {
   if (poolQuoteAfter && cfg.minPoolQuoteSol > 0 && poolQuoteAfter < cfg.minPoolQuoteSol) return false;
+  if (cfg.entryMode === 'VOLUME_RATIO_1M') {
+    if (cfg.minTrades1m > 0 && s60.tradeCount < cfg.minTrades1m) return false;
+    if (s60.volumeSol < cfg.minVolume1mSol) return false;
+    if (s60.buySellRatio < cfg.minRatio1m) return false;
+    if (s60.lastSide !== 'BUY') return false;
+    return true;
+  }
+
   if (s60.tradeCount < cfg.minTrades60s) return false;
   if (s60.volumeSol < cfg.minVolume60sSol) return false;
   if (s60.uniqueTraders < cfg.minUniqueTraders60s) return false;
@@ -85,6 +93,25 @@ function passesEntry(cfg, s5, s15, s30, s60, poolQuoteAfter) {
   return true;
 }
 
+function postEntryWindowStats(events, entryIdx, idx, windowMs) {
+  const now = events[idx].ts;
+  const rows = [];
+  for (let i = idx; i > entryIdx; i--) {
+    if (now - events[i].ts > windowMs) break;
+    rows.push(events[i]);
+  }
+  const buys = rows.filter((x) => x.side === 'BUY');
+  const sells = rows.filter((x) => x.side === 'SELL');
+  const buySol = sum(buys, 'solVolume');
+  const sellSol = sum(sells, 'solVolume');
+  return {
+    buySol,
+    sellSol,
+    volumeSol: buySol + sellSol,
+    sellBuyRatio: sellSol / Math.max(buySol, 0.001),
+  };
+}
+
 function simulateExit(events, entryIdx, model) {
   const entry = events[entryIdx];
   const entryPrice = entry.price;
@@ -101,6 +128,17 @@ function simulateExit(events, entryIdx, model) {
     if (ev.price > hwm) hwm = ev.price;
 
     const pnlPct = ((ev.price - entryPrice) / entryPrice) * 100;
+    if (model.flowExitEnabled && ev.side === 'SELL') {
+      const st = postEntryWindowStats(events, entryIdx, i, model.flowExitWindowMs);
+      if (
+        st.volumeSol >= model.flowExitMinVolumeSol &&
+        st.sellSol > st.buySol &&
+        st.sellBuyRatio >= model.flowExitSellBuyRatio
+      ) {
+        return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'FLOW_REVERSAL_EXIT' };
+      }
+    }
+
     if (pnlPct >= model.takeProfitPct) {
       return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'TAKE_PROFIT' };
     }
@@ -124,6 +162,10 @@ function simulateExit(events, entryIdx, model) {
 
 function makeConfigs() {
   const base = {
+    entryMode: config.activityFlow.entryMode || 'VOLUME_RATIO_1M',
+    minVolume1mSol: config.activityFlow.minVolume1mSol,
+    minRatio1m: config.activityFlow.minRatio1m,
+    minTrades1m: config.activityFlow.minTrades1m,
     minTrades60s: config.activityFlow.minTrades60s,
     minVolume60sSol: config.activityFlow.minVolume60sSol,
     minUniqueTraders60s: config.activityFlow.minUniqueTraders60s,
@@ -142,6 +184,28 @@ function makeConfigs() {
     maxPriceChange60sPct: config.activityFlow.maxPriceChange60sPct,
     minPoolQuoteSol: config.activityFlow.minPoolQuoteSol,
   };
+
+  if (base.entryMode === 'VOLUME_RATIO_1M') {
+    const grids = {
+      minVolume1mSol: numList('BT_MIN_VOLUME_1M_SOL', [
+        Math.max(1, base.minVolume1mSol * 0.75),
+        base.minVolume1mSol,
+        base.minVolume1mSol * 1.25,
+        base.minVolume1mSol * 1.5,
+      ]),
+      minRatio1m: numList('BT_MIN_RATIO_1M', [1.1, 1.2, 1.35]),
+    };
+
+    let configs = [base];
+    for (const [key, values] of Object.entries(grids)) {
+      const next = [];
+      for (const cfg of configs) {
+        for (const value of values) next.push({ ...cfg, [key]: value });
+      }
+      configs = next;
+    }
+    return configs;
+  }
 
   const grids = {
     minRatio30s: numList('BT_MIN_RATIO_30S', [1.0, 1.05, 1.15]),
@@ -246,6 +310,10 @@ function main() {
     maxHoldMs: Number(process.env.BT_MAX_HOLD_MS || 3 * 60 * 1000),
     cooldownMs: Number(process.env.BT_COOLDOWN_MS || config.activityFlow.cooldownMs || 60_000),
     positionSol: Number(process.env.BT_POSITION_SOL || config.strategy.positionSizeSol || 1),
+    flowExitEnabled: String(process.env.BT_FLOW_EXIT_ENABLED ?? config.strategy.flowReversalExitEnabled ?? 'true').toLowerCase() !== 'false',
+    flowExitWindowMs: Number(process.env.BT_FLOW_EXIT_WINDOW_MS || config.strategy.flowReversalExitWindowMs || 60_000),
+    flowExitSellBuyRatio: Number(process.env.BT_FLOW_EXIT_SELL_BUY_RATIO || config.strategy.flowReversalExitSellBuyRatio1m || 1.0),
+    flowExitMinVolumeSol: Number(process.env.BT_FLOW_EXIT_MIN_VOLUME_SOL || config.strategy.flowReversalExitMinVolume1mSol || 0),
   };
 
   const results = makeConfigs()
@@ -258,6 +326,9 @@ function main() {
       winRate: `${result.winRate.toFixed(1)}%`,
       approxSol: +result.approxSol.toFixed(4),
       avgPct: +result.avgPnlPct.toFixed(2),
+      mode: cfg.entryMode,
+      vol1m: cfg.minVolume1mSol ? +cfg.minVolume1mSol.toFixed(2) : undefined,
+      r1m: cfg.minRatio1m,
       r30: cfg.minRatio30s,
       r15: cfg.minRatio15s,
       imb15: cfg.minImbalance15s,

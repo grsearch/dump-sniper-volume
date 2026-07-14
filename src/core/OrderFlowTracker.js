@@ -48,6 +48,20 @@ class OrderFlowTracker extends EventEmitter {
       flowConfig.replaceDumpSignal ??
       boolEnv('ACTIVITY_FLOW_REPLACE_DUMP_SIGNAL', boolEnv('ORDER_FLOW_REPLACE_DUMP_SIGNAL', true));
 
+    this.entryMode =
+      String(
+        (opts.entryMode ?? flowConfig.entryMode ?? process.env.ACTIVITY_FLOW_ENTRY_MODE ?? 'VOLUME_RATIO_1M') ||
+          'VOLUME_RATIO_1M',
+      ).toUpperCase();
+    this.minVolume1mUsd =
+      opts.minVolume1mUsd ?? flowConfig.minVolume1mUsd ?? numEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 2000);
+    this.minVolume1mSol =
+      opts.minVolume1mSol ?? flowConfig.minVolume1mSol ?? numEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_SOL', 25);
+    this.minRatio1m =
+      opts.minRatio1m ?? flowConfig.minRatio1m ?? numEnv('ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO', 1.2);
+    this.minTrades1m =
+      opts.minTrades1m ?? flowConfig.minTrades1m ?? numEnv('ACTIVITY_FLOW_1M_MIN_TRADES', 0);
+
     this.window5Ms = opts.window5Ms ?? flowConfig.window5Ms ?? numEnv('ACTIVITY_FLOW_WINDOW_5S_MS', 5_000);
     this.window15Ms = opts.window15Ms ?? flowConfig.window15Ms ?? numEnv('ACTIVITY_FLOW_WINDOW_15S_MS', 15_000);
     this.window30Ms = opts.window30Ms ?? flowConfig.window30Ms ?? numEnv('ACTIVITY_FLOW_WINDOW_30S_MS', 30_000);
@@ -282,12 +296,13 @@ class OrderFlowTracker extends EventEmitter {
       s30: this._compactStats(s30),
       s60: this._compactStats(s60),
     };
+    const entryStats = this.entryMode === 'VOLUME_RATIO_1M' ? s60 : s15;
 
     const signal = {
       mint: ev.mint,
       symbol: state.symbol || ev.symbol,
-      sellSol: round(s15.sellSol, 4),
-      priceImpactPct: round(Math.max(0, -s15.priceChangePct), 3),
+      sellSol: round(entryStats.sellSol, 4),
+      priceImpactPct: round(Math.max(0, -entryStats.priceChangePct), 3),
       poolQuoteAfter: poolQuoteSol,
       poolQuoteSol,
       seller: null,
@@ -296,18 +311,19 @@ class OrderFlowTracker extends EventEmitter {
       slot: ev.slot || 0,
       poolAddress: ev.poolAddress || state.poolAddress,
       priceAfter: ev.price,
-      priceBefore: s15.firstPrice || s30.firstPrice || s60.firstPrice || ev.price,
+      priceBefore: entryStats.firstPrice || ev.price,
       _aggregated: true,
       _activityFlow: true,
-      _sellCount: s15.sellCount,
-      _sellCount10s: s15.sellCount,
-      _totalSellSol10s: round(s15.sellSol, 4),
-      _sellers: [...new Set(s15.events.filter((x) => x.side === 'SELL').map((x) => x.signer).filter(Boolean))],
+      _sellCount: entryStats.sellCount,
+      _sellCount10s: entryStats.sellCount,
+      _totalSellSol10s: round(entryStats.sellSol, 4),
+      _sellers: [...new Set(entryStats.events.filter((x) => x.side === 'SELL').map((x) => x.signer).filter(Boolean))],
       _flow: flow,
     };
 
     console.log(
       `[ActivityFlow] BUY_CONFIRM ${signal.symbol || ev.mint.slice(0, 6)} ` +
+        `mode=${this.entryMode} ` +
         `5s=${flow.s5.tradeCount}tx/${flow.s5.volumeSol.toFixed(1)}SOL ` +
         `r=${flow.s5.buySellRatio.toFixed(2)} imb=${flow.s5.imbalance.toFixed(2)} chg=${flow.s5.priceChangePct.toFixed(1)}% ` +
         `| 15s=${flow.s15.tradeCount}tx/${flow.s15.volumeSol.toFixed(1)}SOL ` +
@@ -323,6 +339,20 @@ class OrderFlowTracker extends EventEmitter {
     if (this.minPoolQuoteSol > 0 && (!poolQuoteSol || poolQuoteSol < this.minPoolQuoteSol)) {
       return `pool ${poolQuoteSol ? poolQuoteSol.toFixed(1) : 'unknown'}SOL<${this.minPoolQuoteSol}`;
     }
+    if (this.entryMode === 'VOLUME_RATIO_1M') {
+      if (this.minTrades1m > 0 && s60.tradeCount < this.minTrades1m) {
+        return `1m trades ${s60.tradeCount}<${this.minTrades1m}`;
+      }
+      if (s60.volumeSol < this.minVolume1mSol) {
+        return `1m volume ${s60.volumeSol.toFixed(2)}<${this.minVolume1mSol.toFixed(2)}SOL`;
+      }
+      if (s60.buySellRatio < this.minRatio1m) {
+        return `1m buy/sell ${s60.buySellRatio.toFixed(2)}<${this.minRatio1m}`;
+      }
+      if (s60.lastSide !== 'BUY') return 'last side is not BUY';
+      return null;
+    }
+
     if (s60.tradeCount < this.minTrades60s) return `60s trades ${s60.tradeCount}<${this.minTrades60s}`;
     if (s60.volumeSol < this.minVolume60sSol) return `60s volume ${s60.volumeSol.toFixed(2)}<${this.minVolume60sSol}`;
     if (s60.uniqueTraders < this.minUniqueTraders60s) {

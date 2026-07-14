@@ -6,6 +6,17 @@ const activityFlowForceDisabled = ['true', '1', 'yes'].includes(
   String(process.env.ACTIVITY_FLOW_FORCE_DISABLED || process.env.ORDER_FLOW_FORCE_DISABLED || '').toLowerCase(),
 );
 
+function numberEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+const solPriceUsdForConfig = numberEnv('SOL_PRICE_USD', 72);
+const activityFlow1mMinVolumeUsdDefault = numberEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 2000);
+const activityFlow1mMinVolumeSolDefault = activityFlow1mMinVolumeUsdDefault / Math.max(solPriceUsdForConfig, 0.001);
+
 const config = {
   // ============ Mode ============
   DRY_RUN: (process.env.DRY_RUN ?? 'true').toLowerCase() === 'true',
@@ -51,7 +62,7 @@ const config = {
     // v3.17.20 用户策略改造：固定止盈 10%，到 10% 立即卖，不等双确认。
     //   优先级高于移动止盈（_checkExit 里先检查 TP 再检查 trailing）。
     //   tpConfirmCount/tpConfirmMinGapMs 保留字段但已不在固定止盈路径使用。
-    takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || '20'),
+    takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || '80'),
     tpConfirmCount: parseInt(process.env.TP_CONFIRM_COUNT || '2', 10),
     tpConfirmMinGapMs: parseInt(process.env.TP_CONFIRM_MIN_GAP_MS || '300', 10),
 
@@ -60,8 +71,8 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.TRAILING_ACTIVATE_PCT || '10'),
-    trailingDrawdownPct: parseFloat(process.env.TRAILING_DRAWDOWN_PCT || '3'),
+    trailingActivatePct: parseFloat(process.env.TRAILING_ACTIVATE_PCT || '20'),
+    trailingDrawdownPct: parseFloat(process.env.TRAILING_DRAWDOWN_PCT || '5'),
     trailingMinHwmAgeMs: parseInt(process.env.TRAILING_MIN_HWM_AGE_MS || '2000', 10),
 
     // v3.17.6: Stabilization 期 —— reconcile 完成后等价格稳定，再开始 trailing 追踪
@@ -114,6 +125,10 @@ const config = {
     lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '1800000', 10),  // v3.17.40c: peakPnl<trailingActivate 超时割肉, 默认30min
     // FLOW_REVERSAL_EXIT: 持仓后如果短窗口买盘反转为卖盘，则主动退出。
     flowReversalExitEnabled: (process.env.FLOW_REVERSAL_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    flowReversalExitMode: String(process.env.FLOW_REVERSAL_EXIT_MODE || 'VOLUME_RATIO_1M').toUpperCase(),
+    flowReversalExitWindowMs: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_MS || '60000', 10),
+    flowReversalExitSellBuyRatio1m: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M || '1.0'),
+    flowReversalExitMinVolume1mSol: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_VOLUME_1M_SOL || '0'),
     flowReversalExitMinHoldMs: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_HOLD_MS || '0', 10),
     flowReversalExitWindow5Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_5S_MS || '5000', 10),
     flowReversalExitWindow15Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_15S_MS || '15000', 10),
@@ -195,7 +210,7 @@ const config = {
 
   // ============ Activity-flow entry ============
   activityFlow: {
-    // 60s/30s decide whether the token is active enough; 15s confirms direction; 5s is the trigger.
+    // Default entry: 1-minute volume + buy/sell ratio. Legacy multi-window fields remain available.
     enabled:
       !activityFlowForceDisabled &&
       (process.env.ACTIVITY_FLOW_ENABLED ?? process.env.ORDER_FLOW_ENABLED ?? 'true').toLowerCase() === 'true',
@@ -203,6 +218,13 @@ const config = {
       !activityFlowForceDisabled &&
       (process.env.ACTIVITY_FLOW_REPLACE_DUMP_SIGNAL ?? process.env.ORDER_FLOW_REPLACE_DUMP_SIGNAL ?? 'true')
         .toLowerCase() === 'true',
+    entryMode: String(process.env.ACTIVITY_FLOW_ENTRY_MODE || 'VOLUME_RATIO_1M').toUpperCase(),
+    minVolume1mUsd: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_USD || '2000'),
+    minVolume1mSol: parseFloat(
+      process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_SOL || String(activityFlow1mMinVolumeSolDefault),
+    ),
+    minRatio1m: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO || '1.2'),
+    minTrades1m: parseInt(process.env.ACTIVITY_FLOW_1M_MIN_TRADES || '0', 10),
     window5Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_5S_MS || '5000', 10),
     window15Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_15S_MS || '15000', 10),
     window30Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_30S_MS || '30000', 10),
