@@ -276,21 +276,19 @@ class TokenWatchdog {
       const symbol = token.symbol || token.mint.slice(0, 8);
       const reasonStr = reasons.join(', ');
 
-      // v3.20: WATCHDOG_EXIT 已禁用 — FDV跌破阈值不再强制卖出
-      // 竞对数据证明低FDV币也能弹回赚钱，watchdog卖出反而亏更多
-      // FDV < MIN_FDV_USD 时只移除监控（不再交易新信号），不卖出已有持仓
+      // WATCHDOG_EXIT is disabled. If this mint has an open position, keep it
+      // subscribed so swap-driven exits (FLOW_REVERSAL_EXIT) can still fire.
+      // Tokens with no open position may be removed from monitoring normally.
       const hasOpenPos = this.positionManager.hasOpenPosition(token.mint);
       if (hasOpenPos) {
-        // v3.20: 有持仓 → 只移除监控，不触发卖出
-        // 让 EMERGENCY_STOP / trailing / timeout 自然处理退出
         console.log(
-          `[TokenWatchdog] ⏸  ${symbol} ${reasonStr} — has open position, skip exit (v3.20: watchdog exit disabled)`
+          `[TokenWatchdog] ⏸ KEEP ${symbol}: ${reasonStr} — has open position, keep monitoring until exit`
         );
-        // 继续执行 removeToken（停止监控新信号），但跳过卖出
-        // 注意：不设置 _pendingExitMints，因为没有触发卖出
+        monitor.inc('TokenWatchdog.tokensRetainedForPosition', 1, 'TokenWatchdog');
+        continue;
       }
 
-      console.log(`[TokenWatchdog] 🗑️ REMOVE ${symbol}: ${reasonStr}${hasOpenPos ? ' (position exit triggered)' : ''}`);
+      console.log(`[TokenWatchdog] 🗑️ REMOVE ${symbol}: ${reasonStr}`);
       this.tokenRegistry.removeToken(token.mint);
       this._pendingExitMints.delete(token.mint);
       removed++;
