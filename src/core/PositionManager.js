@@ -1184,11 +1184,12 @@ class PositionManager extends EventEmitter {
   getTrailingDrawdownPct(peakPnlPct, preVol5m, mint) {
     const newCoinTrailingDrawdown = parseFloat(process.env.NEW_COIN_TRAILING_DRAWDOWN_PCT || '5');
     const oldCoinTrailingDrawdown = parseFloat(process.env.OLD_COIN_TRAILING_DRAWDOWN_PCT || '5');
-    const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
+    const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
+    if (newCoinThresholdMs <= 0) return config.strategy.trailingDrawdownPct;
 
     if (mint) {
       const tokenInfo = this.tokenRegistry?.getToken(mint);
-      if (tokenInfo && tokenInfo.added_at) {
+      if (newCoinThresholdMs > 0 && tokenInfo && tokenInfo.added_at) {
         const tokenAgeMs = Date.now() - tokenInfo.added_at;
         if (tokenAgeMs >= newCoinThresholdMs) {
           return oldCoinTrailingDrawdown;
@@ -1207,11 +1208,12 @@ class PositionManager extends EventEmitter {
     // v3.27: 新老币差异化
     const newCoinTrailingActivate = parseFloat(process.env.NEW_COIN_TRAILING_ACTIVATE_PCT || '10');
     const oldCoinTrailingActivate = parseFloat(process.env.OLD_COIN_TRAILING_ACTIVATE_PCT || '15');
-    const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
+    const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
+    if (newCoinThresholdMs <= 0) return config.strategy.trailingActivatePct;
 
     if (mint) {
       const tokenInfo = this.tokenRegistry?.getToken(mint);
-      if (tokenInfo && tokenInfo.added_at) {
+      if (newCoinThresholdMs > 0 && tokenInfo && tokenInfo.added_at) {
         const tokenAgeMs = Date.now() - tokenInfo.added_at;
         if (tokenAgeMs >= newCoinThresholdMs) {
           return oldCoinTrailingActivate;
@@ -1230,11 +1232,12 @@ class PositionManager extends EventEmitter {
     // v3.27: 新老币差异化
     const newCoinTakeProfit = parseFloat(process.env.NEW_COIN_TAKE_PROFIT_PCT || '15');
     const oldCoinTakeProfit = parseFloat(process.env.OLD_COIN_TAKE_PROFIT_PCT || '25');
-    const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
+    const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
+    if (newCoinThresholdMs <= 0) return config.strategy.takeProfitPct;
 
     if (mint) {
       const tokenInfo = this.tokenRegistry?.getToken(mint);
-      if (tokenInfo && tokenInfo.added_at) {
+      if (newCoinThresholdMs > 0 && tokenInfo && tokenInfo.added_at) {
         const tokenAgeMs = Date.now() - tokenInfo.added_at;
         if (tokenAgeMs >= newCoinThresholdMs) {
           return oldCoinTakeProfit;
@@ -1268,12 +1271,13 @@ class PositionManager extends EventEmitter {
   getPeakAwareTimeoutMs(peakPnlPct, preVol5m, mint) {
     // v3.27: 老币关闭超时(竞对avg hold 398min, 我们TIMEOUT是最大亏损源)
     // 新币保持波动率感知超时
-    const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
+    const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
     const oldCoinTimeoutMs = parseInt(process.env.OLD_COIN_TIMEOUT_MS || '0'); // 0=不超时
+    if (newCoinThresholdMs <= 0) return config.strategy.maxHoldMs;
 
     if (mint) {
       const tokenInfo = this.tokenRegistry?.getToken(mint);
-      if (tokenInfo && tokenInfo.added_at) {
+      if (newCoinThresholdMs > 0 && tokenInfo && tokenInfo.added_at) {
         const tokenAgeMs = Date.now() - tokenInfo.added_at;
         if (tokenAgeMs >= newCoinThresholdMs) {
           // 老币: 用 OLD_COIN_TIMEOUT_MS
@@ -1681,13 +1685,13 @@ class PositionManager extends EventEmitter {
       // 老币: 放宽止损(竞对avg hold 398min,peak 21%只拿到8%说明我们杀得太早)
       const newCoinSmartStopPct = parseFloat(process.env.NEW_COIN_SMART_STOP_PCT || '0');
       const oldCoinSmartStopPct = parseFloat(process.env.OLD_COIN_SMART_STOP_PCT || '0');
-      const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
+      const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
 
       if (volStopPct < 0 && newCoinSmartStopPct < 0) {
         const tokenInfo = this.tokenRegistry?.getToken(pos.mint);
         if (tokenInfo && tokenInfo.added_at) {
           const tokenAgeMs = Date.now() - tokenInfo.added_at;
-          if (tokenAgeMs < newCoinThresholdMs) {
+          if (newCoinThresholdMs > 0 && tokenAgeMs < newCoinThresholdMs) {
             // 新币
             if (volStopPct < newCoinSmartStopPct) {
               volStopPct = newCoinSmartStopPct;
@@ -1709,8 +1713,8 @@ class PositionManager extends EventEmitter {
         const tokenInfo = this.tokenRegistry?.getToken(pos.mint);
         if (tokenInfo && tokenInfo.added_at) {
           const tokenAgeMs = Date.now() - tokenInfo.added_at;
-          const newCoinThresholdMs2 = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
-          if (tokenAgeMs < newCoinThresholdMs2) {
+          const newCoinThresholdMs2 = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
+          if (newCoinThresholdMs2 > 0 && tokenAgeMs < newCoinThresholdMs2) {
             effectiveGraceMs = newCoinSmartStopGraceMs;
           }
         }
@@ -2101,11 +2105,11 @@ class PositionManager extends EventEmitter {
           `[PositionManager] 🔒 SMART_STOP cooldown ${pos.symbol || pos.mint.slice(0, 6)} for ${Math.round(rebuyCooldownMs / 3600000)}h (no rebuy until cooldown expires)`,
         );
         // v3.27: 老币SMART_STOP后从监控列表移除24h
-        const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
+        const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
         const tokenInfo = this.tokenRegistry?.getToken(pos.mint);
         if (tokenInfo && tokenInfo.added_at) {
           const tokenAgeMs = Date.now() - tokenInfo.added_at;
-          if (tokenAgeMs >= newCoinThresholdMs) {
+          if (newCoinThresholdMs > 0 && tokenAgeMs >= newCoinThresholdMs) {
             // 老币: 移除监控，24h后Watchdog不会再检查回来(因为已被移除)
             // 设置定时器24h后恢复
             const oldCoinSmartStopRemoveMs = parseInt(process.env.OLD_COIN_SMART_STOP_REMOVE_MS || '86400000');

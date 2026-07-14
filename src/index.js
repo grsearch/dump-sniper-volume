@@ -319,19 +319,19 @@ async function main() {
     }
   }, 3600_000);
 
-  // ============ v3.35: 自动移除超过24h的老币 ============
-  // 只监控24小时内的新币，超过自动从监控移除（is_active=0）
-  const TOKEN_MAX_AGE_MS = parseInt(process.env.TOKEN_MAX_AGE_MS || '86400000', 10); // 默认24h
-  setInterval(() => {
-    const removed = tokenRegistry.removeStaleByAge(TOKEN_MAX_AGE_MS);
-    if (removed > 0) {
-      // 通知 TickStream 和 PoolStateCache 更新
-      if (tickStream && tickStream.watchedMints) {
+  // Optional token age cleanup. Disabled by default; set TOKEN_MAX_AGE_MS > 0 to enable.
+  const TOKEN_MAX_AGE_MS = parseInt(process.env.TOKEN_MAX_AGE_MS || '0', 10);
+  if (TOKEN_MAX_AGE_MS > 0) {
+    setInterval(() => {
+      const removed = tokenRegistry.removeStaleByAge(TOKEN_MAX_AGE_MS);
+      if (removed > 0 && tickStream && tickStream.watchedMints) {
         const activeMints = tokenRegistry.listActive().map(t => t.mint);
-        // TickStream 会在下次 tick 时自动重建
+        void activeMints;
       }
-    }
-  }, 300_000); // 每5分钟检查一次
+    }, 300_000);
+  } else {
+    console.log('[main] token age cleanup disabled (TOKEN_MAX_AGE_MS=0)');
+  }
 
   // ============ 定期补缺 pool 信息（每 60 秒扫描一次） ============
   // 防止 onTokenAdded 时 PoolFinder 失败导致代币永远没有 pool

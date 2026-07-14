@@ -286,7 +286,8 @@ class TokenRegistry {
    * v3.35: 移除创建时间超过 maxAgeMs 的活跃代币。
    * 返回被移除的数量。
    */
-  removeStaleByAge(maxAgeMs = 86400000) {
+  removeStaleByAge(maxAgeMs = 0) {
+    if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) return 0;
     const cutoff = Date.now() - maxAgeMs;
     const info = this.stmts.removeStaleByAge.run(Date.now(), cutoff);
     const removed = info.changes;

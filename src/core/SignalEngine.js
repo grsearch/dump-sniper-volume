@@ -684,8 +684,8 @@ class SignalEngine extends EventEmitter {
         const tokenInfo = this.tokenRegistry.getToken(mint);
         if (tokenInfo && tokenInfo.added_at) {
           const tokenAgeMs = Date.now() - tokenInfo.added_at;
-          const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
-          if (tokenAgeMs >= newCoinThresholdMs) {
+          const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
+          if (newCoinThresholdMs > 0 && tokenAgeMs >= newCoinThresholdMs) {
             // 老币: pool 太小的不买
             const poolSol = signal.poolQuoteSol || 0;
             if (poolSol > 0 && poolSol < oldCoinMinPoolSol) {

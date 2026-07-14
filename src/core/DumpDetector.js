@@ -279,7 +279,7 @@ class DumpDetector extends EventEmitter {
         const _ti = this.tokenRegistry?.getToken(parsed.baseMint);
         if (_ti && _ti.added_at) {
           const _age = Date.now() - _ti.added_at;
-          const _threshold = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
+          const _threshold = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
           if (_age < _threshold) {
             effectiveMinImpact = newCoinMinImpact;
           }
@@ -489,7 +489,7 @@ class DumpDetector extends EventEmitter {
     if (newCoinMinImpact >= 0 && newCoinMinImpact < effectiveAggMinImpact) {
       const aggTokenInfo = this.tokenRegistry?.getToken(lastSell.mint);
       const aggTokenAgeMs = Date.now() - (aggTokenInfo?.added_at || 0);
-      const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
+      const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '0');
       if (aggTokenInfo && aggTokenInfo.added_at && aggTokenAgeMs < newCoinThresholdMs) {
         effectiveAggMinImpact = newCoinMinImpact;
       }
