@@ -23,8 +23,8 @@ Legacy dumpSignal: suppressed
 ## 当前卖出策略
 
 - 反转卖出：持仓期间最近 1 分钟窗口内 `卖量 > 买量`，且最新一笔是 SELL，立即触发 `FLOW_REVERSAL_EXIT`。
-- 移动止盈：上涨 `20%` 激活，从最高点回撤 `5%` 卖出。
-- 固定止盈：上涨 `80%` 立即卖出。
+- 移动止盈：上涨 `60%` 激活，从最高点回撤 `10%` 卖出。
+- 固定止盈：上涨 `200%` 立即卖出。
 - 固定止损：默认 `-25%`。
 - 兜底超时：默认 `30min`。
 
@@ -59,9 +59,9 @@ FLOW_REVERSAL_EXIT_WINDOW_MS=60000
 FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M=1.0
 FLOW_REVERSAL_EXIT_MIN_VOLUME_1M_SOL=0
 
-TRAILING_ACTIVATE_PCT=20
-TRAILING_DRAWDOWN_PCT=5
-TAKE_PROFIT_PCT=80
+TRAILING_ACTIVATE_PCT=60
+TRAILING_DRAWDOWN_PCT=10
+TAKE_PROFIT_PCT=200
 EMERGENCY_STOP_LOSS_PCT=-25
 
 REBUY_COOLDOWN_MS=0

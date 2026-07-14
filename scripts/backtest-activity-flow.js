@@ -303,9 +303,9 @@ function main() {
   }
 
   const model = {
-    takeProfitPct: Number(process.env.BT_TAKE_PROFIT_PCT || config.strategy.takeProfitPct || 20),
-    trailingActivatePct: Number(process.env.BT_TRAILING_ACTIVATE_PCT || config.strategy.trailingActivatePct || 10),
-    trailingDrawdownPct: Number(process.env.BT_TRAILING_DRAWDOWN_PCT || config.strategy.trailingDrawdownPct || 3),
+    takeProfitPct: Number(process.env.BT_TAKE_PROFIT_PCT || config.strategy.takeProfitPct || 200),
+    trailingActivatePct: Number(process.env.BT_TRAILING_ACTIVATE_PCT || config.strategy.trailingActivatePct || 60),
+    trailingDrawdownPct: Number(process.env.BT_TRAILING_DRAWDOWN_PCT || config.strategy.trailingDrawdownPct || 10),
     stopLossPct: Number(process.env.BT_STOP_LOSS_PCT || -12),
     maxHoldMs: Number(process.env.BT_MAX_HOLD_MS || 3 * 60 * 1000),
     cooldownMs: Number(process.env.BT_COOLDOWN_MS || config.activityFlow.cooldownMs || 60_000),

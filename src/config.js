@@ -48,21 +48,14 @@ const config = {
     // 仓位
     positionSizeSol: parseFloat(process.env.POSITION_SIZE_SOL || '0.1'),
 
-    // v3.17 止盈策略改造，v3.17.6 实战调参：
-    //   1) 主止盈 TAKE_PROFIT_PCT +50%（保留双确认）— 捕捉大反弹
-    //   2) 移动止盈 TRAILING_* — 锁中等反弹利润（实战主要止盈来源）
-    //      v3.17.6 调参：从 5%/2% 拉到 8%/3%
-    //      - 实战发现 AMM 自买入会推高池子价格 5-10%（我们 3 SOL 进 30 SOL 池子约 +10%）
-    //      - 这导致 5% activate 太敏感，会被自买入虚高触发
-    //      - 但这个问题在 v3.17.6 用 stabilization 期 + 中位数 baseline 已根治
-    //      - 所以 8% 是"双保险"：stabilization 过滤瞬态高价 + 8% 阈值再过滤一道
-    //      - openclaw 拍脑袋拉到 15%/5% 过于保守，会错过大部分中等反弹
-    //   3) 紧急止损 -15% 不变
-    //   4) MAX_HOLD_MS:30s (v3.17.19 从 30min 改下来) — 反弹窗口 5-30 秒,30 秒外不会再反弹
-    // v3.17.20 用户策略改造：固定止盈 10%，到 10% 立即卖，不等双确认。
+    // Exit model for current activity-flow strategy:
+    //   1) TAKE_PROFIT_PCT: fixed TP, sells immediately when reached.
+    //   2) TRAILING_*: arms after enough upside, then sells on drawdown from HWM.
+    //   3) EMERGENCY_STOP_LOSS_PCT and MAX_HOLD_MS remain as safety exits.
+    // 当前固定止盈：达到 TAKE_PROFIT_PCT 立即卖，不等双确认。
     //   优先级高于移动止盈（_checkExit 里先检查 TP 再检查 trailing）。
     //   tpConfirmCount/tpConfirmMinGapMs 保留字段但已不在固定止盈路径使用。
-    takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || '80'),
+    takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || '200'),
     tpConfirmCount: parseInt(process.env.TP_CONFIRM_COUNT || '2', 10),
     tpConfirmMinGapMs: parseInt(process.env.TP_CONFIRM_MIN_GAP_MS || '300', 10),
 
@@ -71,8 +64,8 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.TRAILING_ACTIVATE_PCT || '20'),
-    trailingDrawdownPct: parseFloat(process.env.TRAILING_DRAWDOWN_PCT || '5'),
+    trailingActivatePct: parseFloat(process.env.TRAILING_ACTIVATE_PCT || '60'),
+    trailingDrawdownPct: parseFloat(process.env.TRAILING_DRAWDOWN_PCT || '10'),
     trailingMinHwmAgeMs: parseInt(process.env.TRAILING_MIN_HWM_AGE_MS || '2000', 10),
 
     // v3.17.6: Stabilization 期 —— reconcile 完成后等价格稳定，再开始 trailing 追踪
@@ -146,7 +139,7 @@ const config = {
 
     // v3.17.32: 防御模式 — 持仓超过 defenseActivateMs 后进入防御 trailing
     //   数据回测: 20 分钟是 PnL 拐点, 此后 peak<8% 的单平均亏 -17.8%
-    //   防御模式: 即使没涨到 trailingActivatePct(8%), 也激活低门槛 trailing
+    //   防御模式: 即使没涨到 trailingActivatePct, 也激活低门槛 trailing
     //   defenseActivateMs: 持仓超过此时间后激活防御模式 (默认 20min)
     //   defenseTrailingDrawdownPct: 防御 trailing 回撤阈值 (默认 3%)
     //   defenseStopLossPct: 防御模式止损 (PnL% 低于此值立即卖出, 默认 -10%)

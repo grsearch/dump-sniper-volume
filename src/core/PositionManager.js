@@ -1944,9 +1944,9 @@ class PositionManager extends EventEmitter {
     // ============ 3. 评估退出条件 ============
     //    v3.17.20 策略改造（用户需求）：
     //      优先级：TP(固定止盈) > trailing(移动止盈)
-    //      - 8% 激活 trailing
-    //      - 涨到 10%(TAKE_PROFIT_PCT) → 立即 TP 卖出，不等双确认
-    //      - 涨到 8%-10% 之间回撤 3% → trailing 卖出
+    //      - 涨到 TRAILING_ACTIVATE_PCT 激活 trailing
+    //      - 涨到 TAKE_PROFIT_PCT → 立即 TP 卖出，不等双确认
+    //      - trailing 激活后从高点回撤 TRAILING_DRAWDOWN_PCT → trailing 卖出
     //    所以先检查 TP，再检查 trailing，两者不冲突。
 
     // v3.17.40: 加仓策略改为每仓独立卖出，不再做合计盈亏判断
@@ -2006,7 +2006,7 @@ class PositionManager extends EventEmitter {
     //   DEFENSE_STOP_LOSS 已禁用 (defenseStopLossPct=0)
     //   激活后从高点回撤 defenseTrailingDrawdownPct(3%) 卖出
     //
-    //   优先级: TP(20%) > 原trailing(8%/3%) > 防御trailing(3%激活/3%回撤) > MAX_HOLD
+    //   优先级: TP > 原trailing > 防御trailing > MAX_HOLD
     //
     const defenseProfitActivatePct = config.strategy.defenseProfitActivatePct || 0;
     const defenseStopLossPct = config.strategy.defenseStopLossPct;
@@ -2025,7 +2025,7 @@ class PositionManager extends EventEmitter {
       }
 
       // 3c-2. 防御 trailing: 持仓满 defenseActivateMs(20min) 后，PnL >= defenseProfitActivatePct(3%) 时激活
-      //   v3.17.35: 必须满20分钟才激活防御，20分钟前只走原trailing(8%/3%)
+      //   v3.17.35: 必须满20分钟才激活防御，20分钟前只走主 trailing 参数
       if (!pos._defenseArmed) {
         const posAgeForDefense = Date.now() - (pos.openedAt || pos.ts);
         if (posAgeForDefense >= defenseActivateMs && defenseProfitActivatePct > 0 && pnlPct >= defenseProfitActivatePct) {
