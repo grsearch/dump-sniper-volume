@@ -39,6 +39,7 @@ class OrderFlowTracker extends EventEmitter {
   constructor(opts = {}) {
     super();
     const flowConfig = config.activityFlow || {};
+    this.tokenRegistry = opts.tokenRegistry || null;
 
     this.enabled =
       opts.enabled ?? flowConfig.enabled ?? boolEnv('ACTIVITY_FLOW_ENABLED', boolEnv('ORDER_FLOW_ENABLED', true));
@@ -84,6 +85,14 @@ class OrderFlowTracker extends EventEmitter {
       opts.minPriceChange15sPct ??
       flowConfig.minPriceChange15sPct ??
       numEnv('ACTIVITY_FLOW_MIN_PRICE_CHANGE_15S_PCT', -3);
+    this.minPriceChange30sPct =
+      opts.minPriceChange30sPct ??
+      flowConfig.minPriceChange30sPct ??
+      numEnv('ACTIVITY_FLOW_MIN_PRICE_CHANGE_30S_PCT', -20);
+    this.minPriceChange60sPct =
+      opts.minPriceChange60sPct ??
+      flowConfig.minPriceChange60sPct ??
+      numEnv('ACTIVITY_FLOW_MIN_PRICE_CHANGE_60S_PCT', -30);
 
     this.minTrades5s = opts.minTrades5s ?? flowConfig.minTrades5s ?? numEnv('ACTIVITY_FLOW_MIN_TRADES_5S', 3);
     this.minVolume5sSol =
@@ -102,15 +111,19 @@ class OrderFlowTracker extends EventEmitter {
     this.maxPriceChange5sPct =
       opts.maxPriceChange5sPct ??
       flowConfig.maxPriceChange5sPct ??
-      numEnv('ACTIVITY_FLOW_MAX_PRICE_CHANGE_5S_PCT', 8);
+      numEnv('ACTIVITY_FLOW_MAX_PRICE_CHANGE_5S_PCT', 5);
     this.maxPriceChange30sPct =
       opts.maxPriceChange30sPct ??
       flowConfig.maxPriceChange30sPct ??
-      numEnv('ACTIVITY_FLOW_MAX_PRICE_CHANGE_30S_PCT', 30);
+      numEnv('ACTIVITY_FLOW_MAX_PRICE_CHANGE_30S_PCT', 10);
     this.maxPriceChange60sPct =
       opts.maxPriceChange60sPct ??
       flowConfig.maxPriceChange60sPct ??
-      numEnv('ACTIVITY_FLOW_MAX_PRICE_CHANGE_60S_PCT', 60);
+      numEnv('ACTIVITY_FLOW_MAX_PRICE_CHANGE_60S_PCT', 10);
+    this.minPoolQuoteSol =
+      opts.minPoolQuoteSol ??
+      flowConfig.minPoolQuoteSol ??
+      numEnv('ACTIVITY_FLOW_MIN_POOL_QUOTE_SOL', config.strategy.minPoolQuoteSol || 30);
 
     this.cooldownMs =
       opts.cooldownMs ??
@@ -136,6 +149,14 @@ class OrderFlowTracker extends EventEmitter {
     const price = Number(swap.price);
     const solVolume = Number(swap.solVolume);
     if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(solVolume) || solVolume <= 0) return;
+    let poolQuoteAfter = Number(swap.poolQuoteAfter);
+    if (!Number.isFinite(poolQuoteAfter) || poolQuoteAfter <= 0) {
+      poolQuoteAfter = null;
+      const tokenInfo = this.tokenRegistry ? this.tokenRegistry.getToken(swap.mint) : null;
+      if (tokenInfo?.liquidity) {
+        poolQuoteAfter = tokenInfo.liquidity / 170;
+      }
+    }
 
     const ev = {
       mint: swap.mint,
@@ -148,7 +169,7 @@ class OrderFlowTracker extends EventEmitter {
       slot: swap.slot || 0,
       signature: swap.signature || null,
       poolAddress: swap.poolAddress || null,
-      poolQuoteAfter: Number.isFinite(Number(swap.poolQuoteAfter)) ? Number(swap.poolQuoteAfter) : null,
+      poolQuoteAfter,
     };
 
     const state = this._stateOf(ev.mint);
@@ -248,7 +269,8 @@ class OrderFlowTracker extends EventEmitter {
     const s15 = this._stats(state, ev.ts, this.window15Ms);
     const s30 = this._stats(state, ev.ts, this.window30Ms);
     const s60 = this._stats(state, ev.ts, this.window60Ms);
-    const reject = this._firstReject(s5, s15, s30, s60);
+    const poolQuoteSol = ev.poolQuoteAfter || state.lastPoolQuoteAfter || null;
+    const reject = this._firstReject(s5, s15, s30, s60, poolQuoteSol);
     if (reject) {
       this._debugReject(ev.mint, ev.ts, reject, s5, s15, s30, s60);
       return;
@@ -266,8 +288,8 @@ class OrderFlowTracker extends EventEmitter {
       symbol: state.symbol || ev.symbol,
       sellSol: round(s15.sellSol, 4),
       priceImpactPct: round(Math.max(0, -s15.priceChangePct), 3),
-      poolQuoteAfter: ev.poolQuoteAfter || state.lastPoolQuoteAfter || null,
-      poolQuoteSol: ev.poolQuoteAfter || state.lastPoolQuoteAfter || null,
+      poolQuoteAfter: poolQuoteSol,
+      poolQuoteSol,
       seller: null,
       signature: `activity:${ev.signature || `${ev.mint}:${ev.ts}`}`,
       ts: ev.ts,
@@ -297,7 +319,10 @@ class OrderFlowTracker extends EventEmitter {
     this.emit('flowReversalSignal', signal);
   }
 
-  _firstReject(s5, s15, s30, s60) {
+  _firstReject(s5, s15, s30, s60, poolQuoteSol) {
+    if (this.minPoolQuoteSol > 0 && (!poolQuoteSol || poolQuoteSol < this.minPoolQuoteSol)) {
+      return `pool ${poolQuoteSol ? poolQuoteSol.toFixed(1) : 'unknown'}SOL<${this.minPoolQuoteSol}`;
+    }
     if (s60.tradeCount < this.minTrades60s) return `60s trades ${s60.tradeCount}<${this.minTrades60s}`;
     if (s60.volumeSol < this.minVolume60sSol) return `60s volume ${s60.volumeSol.toFixed(2)}<${this.minVolume60sSol}`;
     if (s60.uniqueTraders < this.minUniqueTraders60s) {
@@ -307,6 +332,12 @@ class OrderFlowTracker extends EventEmitter {
     if (s30.volumeSol < this.minVolume30sSol) return `30s volume ${s30.volumeSol.toFixed(2)}<${this.minVolume30sSol}`;
     if (s30.buySellRatio < this.minRatio30s) {
       return `30s buy/sell ${s30.buySellRatio.toFixed(2)}<${this.minRatio30s}`;
+    }
+    if (s30.priceChangePct < this.minPriceChange30sPct) {
+      return `30s price ${s30.priceChangePct.toFixed(1)}%<${this.minPriceChange30sPct}%`;
+    }
+    if (s60.priceChangePct < this.minPriceChange60sPct) {
+      return `60s price ${s60.priceChangePct.toFixed(1)}%<${this.minPriceChange60sPct}%`;
     }
 
     if (s15.tradeCount < this.minTrades15s) return `15s trades ${s15.tradeCount}<${this.minTrades15s}`;

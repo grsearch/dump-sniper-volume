@@ -35,6 +35,19 @@ monitor.registerModule('PositionManager', { staleMs: 10_000, label: 'Position Ma
 
 const SELL_RETRY_DELAYS_MS = [500, 1500, 3000, 5000, 10_000, 20_000]; // 之后保持 30s
 
+function sumSolVolume(items) {
+  return items.reduce((sum, x) => sum + (Number.isFinite(x.solVolume) ? x.solVolume : 0), 0);
+}
+
+function uniqueCount(items, field) {
+  const set = new Set();
+  for (const item of items) {
+    const v = item[field];
+    if (v) set.add(v);
+  }
+  return set.size;
+}
+
 class PositionManager extends EventEmitter {
   constructor({ tradeLogger, executor, priceTracker, tokenRegistry, tickStream, postExitTracker }) {
     super();
@@ -53,6 +66,7 @@ class PositionManager extends EventEmitter {
     this._sellQueues = new Map();    // mint → [{pos, exitPrice}, ...]
     this._sellInProgress = new Set(); // 正在卖出的 mint
     this._tickCount = 0;  // v3.26: tick counter for PoolStateCache price check
+    this._flowExitEvents = new Map(); // mint -> recent BUY/SELL swaps while holding
 
     this.positions = new Map(); // positionId → position obj
     this.byMint = new Map();    // mint → Set<positionId> (v3.17.13: 同币多仓)
@@ -116,6 +130,131 @@ class PositionManager extends EventEmitter {
   hasOpenPosition(mint) {
     const pids = this.byMint.get(mint);
     return pids != null && pids.size > 0;
+  }
+
+  handleSwapForExit(swap) {
+    const s = config.strategy;
+    if (!s.flowReversalExitEnabled || !swap || !swap.mint) return;
+
+    const pids = this.byMint.get(swap.mint);
+    if (!pids || pids.size === 0) return;
+
+    const side = String(swap.side || '').toUpperCase();
+    if (side !== 'BUY' && side !== 'SELL') return;
+
+    const price = Number(swap.price);
+    const solVolume = Number(swap.solVolume);
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(solVolume) || solVolume <= 0) return;
+
+    const ev = {
+      side,
+      price,
+      solVolume,
+      signer: swap.signer || null,
+      ts: Number.isFinite(swap.ts) ? swap.ts : Date.now(),
+      signature: swap.signature || null,
+    };
+
+    let events = this._flowExitEvents.get(swap.mint);
+    if (!events) {
+      events = [];
+      this._flowExitEvents.set(swap.mint, events);
+    }
+    events.push(ev);
+    this._pruneFlowExitEvents(swap.mint, ev.ts);
+
+    for (const pid of pids) {
+      const pos = this.positions.get(pid);
+      if (pos && !pos.exiting && pos.status !== 'stuck') {
+        this._maybeFlowReversalExit(pos, price, ev.ts);
+      }
+    }
+  }
+
+  _pruneFlowExitEvents(mint, now) {
+    const events = this._flowExitEvents.get(mint);
+    if (!events) return;
+
+    const s = config.strategy;
+    const maxWindowMs = Math.max(
+      s.flowReversalExitWindow5Ms || 5_000,
+      s.flowReversalExitWindow15Ms || 15_000,
+    ) + 1_000;
+    const cutoff = now - maxWindowMs;
+    const kept = events.filter((ev) => ev.ts >= cutoff);
+    if (kept.length > 0) this._flowExitEvents.set(mint, kept);
+    else this._flowExitEvents.delete(mint);
+  }
+
+  _flowExitStats(mint, now, windowMs) {
+    const events = (this._flowExitEvents.get(mint) || [])
+      .filter((ev) => ev.ts >= now - windowMs && ev.ts <= now)
+      .sort((a, b) => a.ts - b.ts);
+    const buys = events.filter((ev) => ev.side === 'BUY');
+    const sells = events.filter((ev) => ev.side === 'SELL');
+    const buySol = sumSolVolume(buys);
+    const sellSol = sumSolVolume(sells);
+    const volumeSol = buySol + sellSol;
+    const first = events[0] || null;
+    const last = events[events.length - 1] || null;
+
+    return {
+      tradeCount: events.length,
+      buyCount: buys.length,
+      sellCount: sells.length,
+      buySol,
+      sellSol,
+      volumeSol,
+      sellBuyRatio: sellSol / Math.max(buySol, 0.001),
+      imbalance: (sellSol - buySol) / Math.max(volumeSol, 0.001),
+      uniqueSellers: uniqueCount(sells, 'signer'),
+      uniqueBuyers: uniqueCount(buys, 'signer'),
+      firstPrice: first ? first.price : 0,
+      lastPrice: last ? last.price : 0,
+      lastSide: last ? last.side : null,
+    };
+  }
+
+  _maybeFlowReversalExit(pos, price, now) {
+    const s = config.strategy;
+    if (!s.flowReversalExitEnabled) return;
+    if (!pos || pos.exiting || pos.status === 'stuck') return;
+    if (!pos.reconciled && !pos.dryRun) return;
+    if (!Number.isFinite(price) || price <= 0 || !pos.entryPrice || pos.entryPrice <= 0) return;
+
+    const holdStart = pos.reconciledAt || pos.openedAt || now;
+    if (now - holdStart < s.flowReversalExitMinHoldMs) return;
+
+    const st5 = this._flowExitStats(pos.mint, now, s.flowReversalExitWindow5Ms);
+    if (st5.tradeCount < s.flowReversalExitMinTrades5s) return;
+    if (st5.volumeSol < s.flowReversalExitMinVolume5sSol) return;
+    if (st5.sellBuyRatio < s.flowReversalExitSellBuyRatio5s) return;
+    if (st5.imbalance < s.flowReversalExitImbalance5s) return;
+    if (st5.lastSide !== 'SELL') return;
+
+    const st15 = this._flowExitStats(pos.mint, now, s.flowReversalExitWindow15Ms);
+    if (st15.tradeCount < s.flowReversalExitMinTrades15s) return;
+    if (st15.volumeSol < s.flowReversalExitMinVolume15sSol) return;
+    if (st15.sellBuyRatio < s.flowReversalExitSellBuyRatio15s) return;
+    if (st15.imbalance < s.flowReversalExitImbalance15s) return;
+
+    const hwm = Math.max(pos.highWaterMark || 0, pos.entryPrice);
+    const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
+    const peakPnlPct = ((hwm - pos.entryPrice) / pos.entryPrice) * 100;
+    const drawdownPct = hwm > 0 ? ((hwm - price) / hwm) * 100 : 0;
+    const peakDropPct = peakPnlPct - pnlPct;
+
+    if (peakPnlPct < s.flowReversalExitMinPeakPnlPct) return;
+    if (drawdownPct < s.flowReversalExitMinDrawdownPct && peakDropPct < s.flowReversalExitMinPeakDropPct) return;
+
+    console.log(
+      `[PositionManager] FLOW_REVERSAL_EXIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `pnl=${pnlPct.toFixed(2)}% peak=${peakPnlPct.toFixed(2)}% dd=${drawdownPct.toFixed(2)}% ` +
+        `5s=${st5.sellSol.toFixed(2)}/${st5.buySol.toFixed(2)}SOL r=${st5.sellBuyRatio.toFixed(2)} ` +
+        `15s=${st15.sellSol.toFixed(2)}/${st15.buySol.toFixed(2)}SOL r=${st15.sellBuyRatio.toFixed(2)}`,
+    );
+    monitor.inc('PositionManager.flowReversalExit', 1, 'PositionManager');
+    this._exit(pos, price, 'FLOW_REVERSAL_EXIT');
   }
 
   // v3.17.40b: 加仓策略 — 自最近一笔买入价跌15%以上才允许加仓
@@ -191,6 +330,7 @@ class PositionManager extends EventEmitter {
     pids.delete(positionId);
     if (pids.size === 0) {
       this.byMint.delete(mint);
+      this._flowExitEvents.delete(mint);
     }
   }
 
@@ -889,26 +1029,9 @@ class PositionManager extends EventEmitter {
 
   _tick() {
     const now = Date.now();
-    const currentSlot = this.tickStream ? this.tickStream.latestSlot : 0;
 
     for (const pos of this.positions.values()) {
       if (pos.exiting) continue;
-
-      // v3.17.11: SLOT_EXIT — 买入后 N 个 slot 全部卖出
-      // 优先级最高，不受 reconciled/stabilizing 限制
-      const slotExitGap = config.strategy.slotExitGap;
-      if (slotExitGap > 0 && pos.buySlot > 0 && currentSlot > 0) {
-        const slotsSinceBuy = currentSlot - pos.buySlot;
-        if (slotsSinceBuy >= slotExitGap) {
-          const lastPrice = this.priceTracker.getPrice(pos.mint) || pos.entryPrice;
-          console.log(
-            `[PositionManager] ⚡ SLOT_EXIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
-              `buySlot=${pos.buySlot} currentSlot=${currentSlot} gap=${slotsSinceBuy} (>=${slotExitGap})`,
-          );
-          this._exit(pos, lastPrice, 'SLOT_EXIT');
-          continue;
-        }
-      }
 
       this._fillPreVolFallback(pos);
       const age = now - pos.openedAt;
@@ -1176,7 +1299,7 @@ class PositionManager extends EventEmitter {
   }
 
   // v3.17.42: 同步版本 — 直接查 DB，避免异步竞态导致波动率写丢失
-  // 之前 async 版本在 FAST_PROFIT_EXIT 场景下，position 可能在回调前已关闭
+  // 之前 async 版本在快速卖出场景下，position 可能在回调前已关闭
   _computePreVol5mSync(pid, mint, openedAt) {
     try {
       const db = this.tradeLogger?.db;
@@ -1390,21 +1513,6 @@ class PositionManager extends EventEmitter {
       }
     }
 
-    // v3.17.11: SLOT_EXIT — 最高优先级，不受 reconciled/stabilizing 限制
-    const slotExitGap = config.strategy.slotExitGap;
-    const currentSlot = this.tickStream ? this.tickStream.latestSlot : 0;
-    if (slotExitGap > 0 && pos.buySlot > 0 && currentSlot > 0) {
-      const slotsSinceBuy = currentSlot - pos.buySlot;
-      if (slotsSinceBuy >= slotExitGap) {
-        console.log(
-          `[PositionManager] ⚡ SLOT_EXIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
-            `buySlot=${pos.buySlot} currentSlot=${currentSlot} gap=${slotsSinceBuy} (>=${slotExitGap})`,
-        );
-        this._exit(pos, price, 'SLOT_EXIT');
-        return;
-      }
-    }
-
     // v3.12: reconcile 完成前完全跳过（entryPrice 是估算值，所有 exit 检查都不可靠）
     //        例外：MAX_HOLD_MS 超时由 _tick 那条路径触发
     if (!pos.reconciled && !pos.dryRun) {
@@ -1470,37 +1578,6 @@ class PositionManager extends EventEmitter {
         );
         this._exit(pos, price, 'EMERGENCY_STOP');
         return;
-      }
-
-      // ============ v3.17.34: 稳定期内快速止盈 ============
-      // 稳定期内利润达 fastProfitExitPct%(默认 5%)就提前卖出,不等满 5 秒
-      // 稳定期外完全走原策略,本段不影响
-      // 防虚高(自买入推高 5-10% 易制造假利润):
-      // 1) 中位数 pnl ≥ 阈值(样本中位数过滤自买入推高的少数高点)
-      // 2) 当前价 pnl ≥ 阈值(确保此刻仍在高位)
-      // 3) 样本数 ≥ fastProfitMinSamples(头 1-2 个 tick 最可能虚高,不够数跳过)
-      const fastProfitPct = config.strategy.fastProfitExitPct;
-      const fastMinSamples = config.strategy.fastProfitMinSamples;
-      if (fastProfitPct > 0 && pos.entryPrice > 0
-          && pos._stabilizeSamples && pos._stabilizeSamples.length >= fastMinSamples) {
-        const currentPnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
-        const sorted = pos._stabilizeSamples.slice().sort((a, b) => a - b);
-        const mid = Math.floor(sorted.length / 2);
-        const medianPrice = sorted.length % 2 === 0
-          ? (sorted[mid - 1] + sorted[mid]) / 2
-          : sorted[mid];
-        const medianPnlPct = ((medianPrice - pos.entryPrice) / pos.entryPrice) * 100;
-
-        if (medianPnlPct >= fastProfitPct && currentPnlPct >= fastProfitPct) {
-          console.log(
-            `[PositionManager] ⚡ FAST_PROFIT_EXIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
-              `medianPnl=${medianPnlPct.toFixed(2)}% currentPnl=${currentPnlPct.toFixed(2)}% ` +
-              `>= ${fastProfitPct}% (samples=${pos._stabilizeSamples.length}) — 稳定期内快速止盈`,
-          );
-          monitor.inc('PositionManager.fastProfitExit', 1, 'PositionManager');
-          this._exit(pos, price, 'FAST_PROFIT_EXIT');
-          return;
-        }
       }
 
       const elapsed = Date.now() - pos.reconciledAt;

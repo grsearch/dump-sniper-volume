@@ -79,12 +79,6 @@ const config = {
     //     - 太长（> 10s）：错过早期快速反弹的入场窗口
     stabilizationMs: parseInt(process.env.STABILIZATION_MS || '5000', 10),
 
-    // v3.17.34: 稳定期内快速止盈
-    //   稳定期内利润达 fastProfitExitPct%(默认 5%)就提前卖出
-    //   防虚高: 中位数+当前价都>=阈值且样本>=fastProfitMinSamples
-    fastProfitExitPct: parseFloat(process.env.FAST_PROFIT_EXIT_PCT || '5.0'),
-    fastProfitMinSamples: parseInt(process.env.FAST_PROFIT_MIN_SAMPLES || '3', 10),
-
     // v3.17.7: stabilization 期内 emergency_stop 的阈值
     //   stabilization 期内"相对 entryPrice 的 PnL"不可靠（自买入推高+回归造成假亏损）
     //   所以期间改用"相对样本最高价的回撤"判断 emergency
@@ -118,7 +112,22 @@ const config = {
     //   clean:     30min (1800000ms) — 短线反弹策略, 超时强制退出
     maxHoldMs: parseInt(process.env.MAX_HOLD_MS || '1800000', 10),
     lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '1800000', 10),  // v3.17.40c: peakPnl<trailingActivate 超时割肉, 默认30min
-    slotExitGap: parseInt(process.env.SLOT_EXIT_GAP || '0', 10),  // 0 = disabled
+    // FLOW_REVERSAL_EXIT: 持仓后如果短窗口买盘反转为卖盘，则主动退出。
+    flowReversalExitEnabled: (process.env.FLOW_REVERSAL_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    flowReversalExitMinHoldMs: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_HOLD_MS || '5000', 10),
+    flowReversalExitWindow5Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_5S_MS || '5000', 10),
+    flowReversalExitWindow15Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_15S_MS || '15000', 10),
+    flowReversalExitMinTrades5s: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_TRADES_5S || '3', 10),
+    flowReversalExitMinVolume5sSol: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_VOLUME_5S_SOL || '1.5'),
+    flowReversalExitSellBuyRatio5s: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_5S || '1.35'),
+    flowReversalExitImbalance5s: parseFloat(process.env.FLOW_REVERSAL_EXIT_IMBALANCE_5S || '0.20'),
+    flowReversalExitMinTrades15s: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_TRADES_15S || '6', 10),
+    flowReversalExitMinVolume15sSol: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_VOLUME_15S_SOL || '3'),
+    flowReversalExitSellBuyRatio15s: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_15S || '1.15'),
+    flowReversalExitImbalance15s: parseFloat(process.env.FLOW_REVERSAL_EXIT_IMBALANCE_15S || '0.10'),
+    flowReversalExitMinDrawdownPct: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_DRAWDOWN_PCT || '3'),
+    flowReversalExitMinPeakDropPct: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_PEAK_DROP_PCT || '4'),
+    flowReversalExitMinPeakPnlPct: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_PEAK_PNL_PCT || '0'),
 
     // v3.17.32: 防御模式 — 持仓超过 defenseActivateMs 后进入防御 trailing
     //   数据回测: 20 分钟是 PnL 拐点, 此后 peak<8% 的单平均亏 -17.8%
@@ -210,15 +219,18 @@ const config = {
     minImbalance15s: parseFloat(process.env.ACTIVITY_FLOW_MIN_IMBALANCE_15S || '0.12'),
     minUniqueBuyers15s: parseInt(process.env.ACTIVITY_FLOW_MIN_UNIQUE_BUYERS_15S || '3', 10),
     minPriceChange15sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_15S_PCT || '-3'),
+    minPriceChange30sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_30S_PCT || '-20'),
+    minPriceChange60sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_60S_PCT || '-30'),
     minTrades5s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_5S || '3', 10),
     minVolume5sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_5S_SOL || '1.5'),
     minRatio5s: parseFloat(process.env.ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_5S || '1.35'),
     minImbalance5s: parseFloat(process.env.ACTIVITY_FLOW_MIN_IMBALANCE_5S || '0.20'),
     minUniqueBuyers5s: parseInt(process.env.ACTIVITY_FLOW_MIN_UNIQUE_BUYERS_5S || '2', 10),
     minPriceChange5sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_5S_PCT || '0.2'),
-    maxPriceChange5sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_5S_PCT || '8'),
-    maxPriceChange30sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_30S_PCT || '30'),
-    maxPriceChange60sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_60S_PCT || '60'),
+    maxPriceChange5sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_5S_PCT || '5'),
+    maxPriceChange30sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_30S_PCT || '10'),
+    maxPriceChange60sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_60S_PCT || '10'),
+    minPoolQuoteSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_POOL_QUOTE_SOL || process.env.MIN_POOL_QUOTE_SOL || '30'),
     cooldownMs: parseInt(process.env.ACTIVITY_FLOW_COOLDOWN_MS || process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),
     maxSignalAgeMs: parseInt(process.env.ACTIVITY_FLOW_MAX_SIGNAL_AGE_MS || process.env.MAX_PUSH_LAG_MS || '5000', 10),
     maxEventsPerMint: parseInt(process.env.ACTIVITY_FLOW_MAX_EVENTS_PER_MINT || '600', 10),

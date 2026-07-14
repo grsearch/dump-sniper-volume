@@ -101,7 +101,7 @@ async function main() {
   });
   // v3.17.7: tickStream 必须先于 signalEngine 创建（signalEngine 需要它的 latestSlot getter）
   const tickStream = new TickStream();
-  // v3.17.11: PositionManager 需要 tickStream.latestSlot 来判断 SLOT_EXIT
+  // Keep latest slot available for buy metadata and downstream execution.
   positionManager.tickStream = tickStream;
   // v3.17.12: DumpDetector 查询 sig 的首次来源（SS vs LS）
   dumpDetector._tickStream = tickStream;
@@ -180,19 +180,24 @@ async function main() {
     followSellMinWinRate: parseFloat(process.env.COMPETITOR_FOLLOW_SELL_MIN_WINRATE || '60'),
     followSellMinClosed: parseInt(process.env.COMPETITOR_FOLLOW_SELL_MIN_CLOSED || '10', 10),
   });
-  const activityFlowTracker = new ActivityFlowTracker();
+  const activityFlowTracker = new ActivityFlowTracker({ tokenRegistry });
   console.log(
     `[main] ActivityFlow ${activityFlowTracker.enabled ? 'enabled' : 'disabled'}: ` +
       `60s>=${activityFlowTracker.minTrades60s}tx/${activityFlowTracker.minVolume60sSol}SOL/${activityFlowTracker.minUniqueTraders60s}traders ` +
       `30s>=${activityFlowTracker.minTrades30s}tx/${activityFlowTracker.minVolume30sSol}SOL ratio>=${activityFlowTracker.minRatio30s} ` +
       `15s>=${activityFlowTracker.minTrades15s}tx/${activityFlowTracker.minVolume15sSol}SOL ratio>=${activityFlowTracker.minRatio15s} ` +
       `5s>=${activityFlowTracker.minTrades5s}tx/${activityFlowTracker.minVolume5sSol}SOL ratio>=${activityFlowTracker.minRatio5s} ` +
+      `maxChg=${activityFlowTracker.maxPriceChange5sPct}/${activityFlowTracker.maxPriceChange30sPct}/${activityFlowTracker.maxPriceChange60sPct}% ` +
+      `pool>=${activityFlowTracker.minPoolQuoteSol}SOL ` +
       `replaceDump=${activityFlowTracker.replaceDumpSignal}`,
   );
   dumpDetector.on("swapParsed", (swap) => {
     try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
     try { activityFlowTracker.handleSwap(swap); } catch (err) {
       console.warn(`[ActivityFlow] handleSwap failed: ${err.message}`);
+    }
+    try { positionManager.handleSwapForExit(swap); } catch (err) {
+      console.warn(`[FlowExit] handleSwap failed: ${err.message}`);
     }
   });
 
@@ -667,7 +672,7 @@ async function main() {
     // 标记此 mint 正在 buy 中，让后续并发 dumpSignal 看到这个槽位被占
     signalEngine.markBuyInflight(order.mint);
 
-    // v3.17.11: BUY 前记录当前链上 slot，用于 SLOT_EXIT 策略
+    // Record the current chain slot on BUY for execution metadata.
     executor.setLatestSlot(tickStream.latestSlot || 0);
 
     // v3.17.27: 同步刷新 pool state → 确保 executor.buy cache hit
