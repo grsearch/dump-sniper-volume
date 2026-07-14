@@ -114,7 +114,7 @@ const config = {
     lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '1800000', 10),  // v3.17.40c: peakPnl<trailingActivate 超时割肉, 默认30min
     // FLOW_REVERSAL_EXIT: 持仓后如果短窗口买盘反转为卖盘，则主动退出。
     flowReversalExitEnabled: (process.env.FLOW_REVERSAL_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
-    flowReversalExitMinHoldMs: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_HOLD_MS || '15000', 10),
+    flowReversalExitMinHoldMs: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_HOLD_MS || '0', 10),
     flowReversalExitWindow5Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_5S_MS || '5000', 10),
     flowReversalExitWindow15Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_15S_MS || '15000', 10),
     flowReversalExitMinTrades5s: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_TRADES_5S || '3', 10),
