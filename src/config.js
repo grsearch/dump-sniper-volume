@@ -368,7 +368,7 @@ const config = {
   priorityFee: {
     // 静态模式（dynamic=false 时使用）
     // v3.17.20: 用户调整 BUY/SELL fee 范围 (BUY 0.001-0.009, SELL 0.0001-0.0003)
-    buyMaxLamports: parseInt(process.env.BUY_MAX_PRIORITY_FEE_LAMPORTS || '9000000', 10),  // 0.009 SOL
+    buyMaxLamports: parseInt(process.env.BUY_MAX_PRIORITY_FEE_LAMPORTS || '500000', 10),  // 0.0005 SOL
     sellMaxLamports: parseInt(process.env.SELL_MAX_PRIORITY_FEE_LAMPORTS || '300000', 10),  // 0.0003 SOL
 
     // 动态模式：用 Helius getPriorityFeeEstimate 查 mempool 实时拥堵
@@ -383,17 +383,17 @@ const config = {
     // 动态模式下限
     // v3.17.20: 用户压低成本设置 — 注意 BUY μL/CU 会从 267M 降到 36M (CU 250K, fee 0.009 上限)
     //   如果出现 BUY_CHAIN_FAILED 增多,先把 BUY_CAP 调到 0.02 SOL 看是否恢复
-    buyMinLamports: parseInt(process.env.BUY_MIN_PRIORITY_FEE_LAMPORTS || '1000000', 10),  // 0.001 SOL
+    buyMinLamports: parseInt(process.env.BUY_MIN_PRIORITY_FEE_LAMPORTS || '500000', 10),  // 0.0005 SOL
     sellMinLamports: parseInt(process.env.SELL_MIN_PRIORITY_FEE_LAMPORTS || '100000', 10),  // 0.0001 SOL
 
     // 动态查询的上限 (即使 mempool 极拥堵也不超过)
     // v3.17.20: 用户调整,激进压成本
-    buyCapLamports: parseInt(process.env.BUY_CAP_PRIORITY_FEE_LAMPORTS || '9000000', 10),   // 0.009 SOL
+    buyCapLamports: parseInt(process.env.BUY_CAP_PRIORITY_FEE_LAMPORTS || '500000', 10),   // 0.0005 SOL
     sellCapLamports: parseInt(process.env.SELL_CAP_PRIORITY_FEE_LAMPORTS || '300000', 10),  // 0.0003 SOL
   },
 
   // 旧字段保留，向后兼容（仅用于 fallback）
-  maxPriorityFeeLamports: parseInt(process.env.MAX_PRIORITY_FEE_LAMPORTS || '5000000', 10), // 0.005 SOL
+  maxPriorityFeeLamports: parseInt(process.env.MAX_PRIORITY_FEE_LAMPORTS || '500000', 10), // 0.0005 SOL
 
   // 启动时是否自动尝试补充缺失的 pool 信息（PoolFinder）
   autoFillPoolsOnStart: (process.env.AUTO_FILL_POOLS_ON_START ?? 'true').toLowerCase() === 'true',
