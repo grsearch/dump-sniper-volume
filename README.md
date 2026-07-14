@@ -6,8 +6,13 @@ Solana / Pump.fun 短线交易机器人。当前默认买入策略是 **Activity
 
 每个监控代币收到实时 swap 后，程序立即重算最近 1 分钟窗口：
 
-- 1 分钟总成交量默认必须达到 `$2,000`，按 `SOL_PRICE_USD` 换算成 SOL。`.env.example` 默认 `SOL_PRICE_USD=72`，所以约等于 `27.8 SOL/分钟`。
-- 1 分钟买量 / 卖量默认必须 `>= 1.2`。
+- 1 分钟总成交量默认必须达到 `$5,000`，按 `SOL_PRICE_USD` 换算成 SOL。`.env.example` 默认 `SOL_PRICE_USD=72`，所以约等于 `69.4 SOL/分钟`。
+- 1 分钟买量 / 卖量默认必须 `>= 1.35`。
+- 1 分钟交易次数默认必须 `>=25`，过滤低频小量币。
+- 最近 5 秒必须至少有 `4` 笔买入、`3` 个不同买家，且买量 / 卖量 `>=1.1`。
+- 最近 5 秒最大买家的买量占比不能超过 `50%`，避免单钱包或拆单制造假繁荣。
+- 最近 5 秒涨幅不能超过 `6%`，任一单笔买入的价格冲击不能超过 `4%`，避免追入瞬时拉高。
+- Activity Flow 信号和普通卖出后的同币冷却均为 `0`；只要没有持仓或在途买单，下一笔合格信号可立即重新判断。
 - 触发那一笔必须是 BUY。
 - 池子 SOL 默认仍需 `>=30 SOL`。
 - 信号必须足够新，默认 `ACTIVITY_FLOW_MAX_SIGNAL_AGE_MS=5000`。
@@ -15,14 +20,14 @@ Solana / Pump.fun 短线交易机器人。当前默认买入策略是 **Activity
 默认入口日志应显示：
 
 ```text
-Entry: ACTIVITY_FLOW (VOLUME_RATIO_1M: 1m volume>=...SOL (~$2000), buy/sell>=1.2)
+Entry: ACTIVITY_FLOW (VOLUME_RATIO_1M: 1m volume>=...SOL (~$5000), buy/sell>=1.35)
 Legacy dumpSignal: suppressed
 [main] ActivityFlow enabled: mode=VOLUME_RATIO_1M ...
 ```
 
 ## 当前卖出策略
 
-- 反转卖出：持仓期间最近 1 分钟窗口内 `卖量 > 买量`，且最新一笔是 SELL，立即触发 `FLOW_REVERSAL_EXIT`。
+- 反转卖出：持仓至少 `10s` 后，最近 1 分钟窗口内 `卖量/买量 >= 1.35`、1m 反转成交量 `>=5 SOL`，且最新一笔是 SELL，才触发 `FLOW_REVERSAL_EXIT`。
 - 移动止盈：上涨 `60%` 激活，从最高点回撤 `10%` 卖出。
 - 固定止盈：上涨 `200%` 立即卖出。
 - 固定止损：默认 `-25%`。
@@ -46,18 +51,26 @@ TokenWatchdog 默认每 15 分钟巡检一次：
 ACTIVITY_FLOW_ENABLED=true
 ACTIVITY_FLOW_REPLACE_DUMP_SIGNAL=true
 ACTIVITY_FLOW_ENTRY_MODE=VOLUME_RATIO_1M
-ACTIVITY_FLOW_1M_MIN_VOLUME_USD=2000
+ACTIVITY_FLOW_1M_MIN_VOLUME_USD=5000
 ACTIVITY_FLOW_1M_MIN_VOLUME_SOL=
-ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO=1.2
-ACTIVITY_FLOW_1M_MIN_TRADES=0
+ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO=1.35
+ACTIVITY_FLOW_1M_MIN_TRADES=25
+ACTIVITY_FLOW_CONFIRM_MIN_BUY_TRADES_5S=4
+ACTIVITY_FLOW_CONFIRM_MIN_UNIQUE_BUYERS_5S=3
+ACTIVITY_FLOW_CONFIRM_MIN_BUY_SELL_RATIO_5S=1.10
+ACTIVITY_FLOW_CONFIRM_MAX_BUYER_SHARE_5S=0.50
+ACTIVITY_FLOW_CONFIRM_MAX_PRICE_RISE_5S_PCT=6
+ACTIVITY_FLOW_CONFIRM_MAX_SINGLE_BUY_IMPACT_PCT=4
+ACTIVITY_FLOW_COOLDOWN_MS=0
 ACTIVITY_FLOW_MIN_POOL_QUOTE_SOL=30
 ACTIVITY_FLOW_MAX_SIGNAL_AGE_MS=5000
 
 FLOW_REVERSAL_EXIT_ENABLED=true
 FLOW_REVERSAL_EXIT_MODE=VOLUME_RATIO_1M
 FLOW_REVERSAL_EXIT_WINDOW_MS=60000
-FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M=1.0
-FLOW_REVERSAL_EXIT_MIN_VOLUME_1M_SOL=0
+FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M=1.35
+FLOW_REVERSAL_EXIT_MIN_VOLUME_1M_SOL=5
+FLOW_REVERSAL_EXIT_MIN_HOLD_MS=10000
 
 TRAILING_ACTIVATE_PCT=60
 TRAILING_DRAWDOWN_PCT=10

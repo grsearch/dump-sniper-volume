@@ -14,7 +14,7 @@ function numberEnv(name, fallback) {
 }
 
 const solPriceUsdForConfig = numberEnv('SOL_PRICE_USD', 72);
-const activityFlow1mMinVolumeUsdDefault = numberEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 2000);
+const activityFlow1mMinVolumeUsdDefault = numberEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 5000);
 const activityFlow1mMinVolumeSolDefault = activityFlow1mMinVolumeUsdDefault / Math.max(solPriceUsdForConfig, 0.001);
 
 const config = {
@@ -120,9 +120,9 @@ const config = {
     flowReversalExitEnabled: (process.env.FLOW_REVERSAL_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
     flowReversalExitMode: String(process.env.FLOW_REVERSAL_EXIT_MODE || 'VOLUME_RATIO_1M').toUpperCase(),
     flowReversalExitWindowMs: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_MS || '60000', 10),
-    flowReversalExitSellBuyRatio1m: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M || '1.0'),
-    flowReversalExitMinVolume1mSol: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_VOLUME_1M_SOL || '0'),
-    flowReversalExitMinHoldMs: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_HOLD_MS || '0', 10),
+    flowReversalExitSellBuyRatio1m: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M || '1.35'),
+    flowReversalExitMinVolume1mSol: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_VOLUME_1M_SOL || '5'),
+    flowReversalExitMinHoldMs: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_HOLD_MS || '10000', 10),
     flowReversalExitWindow5Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_5S_MS || '5000', 10),
     flowReversalExitWindow15Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_15S_MS || '15000', 10),
     flowReversalExitMinTrades5s: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_TRADES_5S || '3', 10),
@@ -212,12 +212,20 @@ const config = {
       (process.env.ACTIVITY_FLOW_REPLACE_DUMP_SIGNAL ?? process.env.ORDER_FLOW_REPLACE_DUMP_SIGNAL ?? 'true')
         .toLowerCase() === 'true',
     entryMode: String(process.env.ACTIVITY_FLOW_ENTRY_MODE || 'VOLUME_RATIO_1M').toUpperCase(),
-    minVolume1mUsd: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_USD || '2000'),
+    minVolume1mUsd: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_USD || '5000'),
     minVolume1mSol: parseFloat(
       process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_SOL || String(activityFlow1mMinVolumeSolDefault),
     ),
-    minRatio1m: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO || '1.2'),
-    minTrades1m: parseInt(process.env.ACTIVITY_FLOW_1M_MIN_TRADES || '0', 10),
+    minRatio1m: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO || '1.35'),
+    minTrades1m: parseInt(process.env.ACTIVITY_FLOW_1M_MIN_TRADES || '25', 10),
+    confirmMinBuyTrades5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_TRADES_5S || '4', 10),
+    confirmMinUniqueBuyers5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_UNIQUE_BUYERS_5S || '3', 10),
+    confirmMinRatio5s: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_SELL_RATIO_5S || '1.10'),
+    confirmMaxBuyerShare5s: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MAX_BUYER_SHARE_5S || '0.50'),
+    confirmMaxPriceRise5sPct: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MAX_PRICE_RISE_5S_PCT || '6'),
+    confirmMaxSingleBuyImpactPct: parseFloat(
+      process.env.ACTIVITY_FLOW_CONFIRM_MAX_SINGLE_BUY_IMPACT_PCT || '4',
+    ),
     window5Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_5S_MS || '5000', 10),
     window15Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_15S_MS || '15000', 10),
     window30Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_30S_MS || '30000', 10),
@@ -246,7 +254,7 @@ const config = {
     maxPriceChange30sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_30S_PCT || '10'),
     maxPriceChange60sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_60S_PCT || '10'),
     minPoolQuoteSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_POOL_QUOTE_SOL || process.env.MIN_POOL_QUOTE_SOL || '30'),
-    cooldownMs: parseInt(process.env.ACTIVITY_FLOW_COOLDOWN_MS || process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),
+    cooldownMs: parseInt(process.env.ACTIVITY_FLOW_COOLDOWN_MS || '0', 10),
     maxSignalAgeMs: parseInt(process.env.ACTIVITY_FLOW_MAX_SIGNAL_AGE_MS || process.env.MAX_PUSH_LAG_MS || '5000', 10),
     maxEventsPerMint: parseInt(process.env.ACTIVITY_FLOW_MAX_EVENTS_PER_MINT || '600', 10),
     debug: (process.env.ACTIVITY_FLOW_DEBUG ?? 'false').toLowerCase() === 'true',

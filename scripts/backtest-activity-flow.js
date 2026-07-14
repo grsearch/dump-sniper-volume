@@ -23,6 +23,16 @@ function sum(items, field) {
   return items.reduce((acc, item) => acc + (Number.isFinite(item[field]) ? item[field] : 0), 0);
 }
 
+function largestVolumeShare(items, total, field) {
+  const volumes = new Map();
+  for (const item of items) {
+    const key = item[field] || '__unknown__';
+    volumes.set(key, (volumes.get(key) || 0) + (Number.isFinite(item.solVolume) ? item.solVolume : 0));
+  }
+  const largest = volumes.size > 0 ? Math.max(...volumes.values()) : 0;
+  return largest / Math.max(total, 0.001);
+}
+
 function windowStats(events, idx, windowMs) {
   const now = events[idx].ts;
   const rows = [];
@@ -44,6 +54,7 @@ function windowStats(events, idx, windowMs) {
 
   return {
     tradeCount: rows.length,
+    buyCount: buys.length,
     buySol,
     sellSol,
     volumeSol,
@@ -51,6 +62,11 @@ function windowStats(events, idx, windowMs) {
     imbalance: (buySol - sellSol) / Math.max(volumeSol, 0.001),
     uniqueBuyers: uniqueCount(buys, 'signer'),
     uniqueTraders: uniqueCount(rows, 'signer'),
+    largestBuyerShare: largestVolumeShare(buys, buySol, 'signer'),
+    maxSingleBuyImpactPct: buys.reduce(
+      (maxImpact, buy) => Math.max(maxImpact, Number.isFinite(buy.priceChangePct) ? buy.priceChangePct : 0),
+      0,
+    ),
     priceChangePct: firstPrice > 0 && lastPrice > 0 ? ((lastPrice - firstPrice) / firstPrice) * 100 : 0,
     lastSide: last ? last.side : null,
   };
@@ -62,6 +78,12 @@ function passesEntry(cfg, s5, s15, s30, s60, poolQuoteAfter) {
     if (cfg.minTrades1m > 0 && s60.tradeCount < cfg.minTrades1m) return false;
     if (s60.volumeSol < cfg.minVolume1mSol) return false;
     if (s60.buySellRatio < cfg.minRatio1m) return false;
+    if (s5.buyCount < cfg.confirmMinBuyTrades5s) return false;
+    if (s5.uniqueBuyers < cfg.confirmMinUniqueBuyers5s) return false;
+    if (s5.buySellRatio < cfg.confirmMinRatio5s) return false;
+    if (s5.largestBuyerShare > cfg.confirmMaxBuyerShare5s) return false;
+    if (s5.priceChangePct > cfg.confirmMaxPriceRise5sPct) return false;
+    if (s5.maxSingleBuyImpactPct > cfg.confirmMaxSingleBuyImpactPct) return false;
     if (s60.lastSide !== 'BUY') return false;
     return true;
   }
@@ -128,7 +150,7 @@ function simulateExit(events, entryIdx, model) {
     if (ev.price > hwm) hwm = ev.price;
 
     const pnlPct = ((ev.price - entryPrice) / entryPrice) * 100;
-    if (model.flowExitEnabled && ev.side === 'SELL') {
+    if (model.flowExitEnabled && ev.side === 'SELL' && ev.ts - entry.ts >= model.flowExitMinHoldMs) {
       const st = postEntryWindowStats(events, entryIdx, i, model.flowExitWindowMs);
       if (
         st.volumeSol >= model.flowExitMinVolumeSol &&
@@ -166,6 +188,12 @@ function makeConfigs() {
     minVolume1mSol: config.activityFlow.minVolume1mSol,
     minRatio1m: config.activityFlow.minRatio1m,
     minTrades1m: config.activityFlow.minTrades1m,
+    confirmMinBuyTrades5s: config.activityFlow.confirmMinBuyTrades5s,
+    confirmMinUniqueBuyers5s: config.activityFlow.confirmMinUniqueBuyers5s,
+    confirmMinRatio5s: config.activityFlow.confirmMinRatio5s,
+    confirmMaxBuyerShare5s: config.activityFlow.confirmMaxBuyerShare5s,
+    confirmMaxPriceRise5sPct: config.activityFlow.confirmMaxPriceRise5sPct,
+    confirmMaxSingleBuyImpactPct: config.activityFlow.confirmMaxSingleBuyImpactPct,
     minTrades60s: config.activityFlow.minTrades60s,
     minVolume60sSol: config.activityFlow.minVolume60sSol,
     minUniqueTraders60s: config.activityFlow.minUniqueTraders60s,
@@ -193,7 +221,7 @@ function makeConfigs() {
         base.minVolume1mSol * 1.25,
         base.minVolume1mSol * 1.5,
       ]),
-      minRatio1m: numList('BT_MIN_RATIO_1M', [1.1, 1.2, 1.35]),
+      minRatio1m: numList('BT_MIN_RATIO_1M', [1.2, 1.35, 1.5]),
     };
 
     let configs = [base];
@@ -308,12 +336,13 @@ function main() {
     trailingDrawdownPct: Number(process.env.BT_TRAILING_DRAWDOWN_PCT || config.strategy.trailingDrawdownPct || 10),
     stopLossPct: Number(process.env.BT_STOP_LOSS_PCT || -12),
     maxHoldMs: Number(process.env.BT_MAX_HOLD_MS || 3 * 60 * 1000),
-    cooldownMs: Number(process.env.BT_COOLDOWN_MS || config.activityFlow.cooldownMs || 60_000),
+    cooldownMs: Number(process.env.BT_COOLDOWN_MS ?? config.activityFlow.cooldownMs ?? 0),
     positionSol: Number(process.env.BT_POSITION_SOL || config.strategy.positionSizeSol || 1),
     flowExitEnabled: String(process.env.BT_FLOW_EXIT_ENABLED ?? config.strategy.flowReversalExitEnabled ?? 'true').toLowerCase() !== 'false',
     flowExitWindowMs: Number(process.env.BT_FLOW_EXIT_WINDOW_MS || config.strategy.flowReversalExitWindowMs || 60_000),
-    flowExitSellBuyRatio: Number(process.env.BT_FLOW_EXIT_SELL_BUY_RATIO || config.strategy.flowReversalExitSellBuyRatio1m || 1.0),
-    flowExitMinVolumeSol: Number(process.env.BT_FLOW_EXIT_MIN_VOLUME_SOL || config.strategy.flowReversalExitMinVolume1mSol || 0),
+    flowExitSellBuyRatio: Number(process.env.BT_FLOW_EXIT_SELL_BUY_RATIO || config.strategy.flowReversalExitSellBuyRatio1m || 1.35),
+    flowExitMinVolumeSol: Number(process.env.BT_FLOW_EXIT_MIN_VOLUME_SOL || config.strategy.flowReversalExitMinVolume1mSol || 5),
+    flowExitMinHoldMs: Number(process.env.BT_FLOW_EXIT_MIN_HOLD_MS || config.strategy.flowReversalExitMinHoldMs || 10_000),
   };
 
   const results = makeConfigs()
@@ -329,6 +358,11 @@ function main() {
       mode: cfg.entryMode,
       vol1m: cfg.minVolume1mSol ? +cfg.minVolume1mSol.toFixed(2) : undefined,
       r1m: cfg.minRatio1m,
+      buys5: cfg.confirmMinBuyTrades5s,
+      buyers5: cfg.confirmMinUniqueBuyers5s,
+      topBuyer5: cfg.confirmMaxBuyerShare5s,
+      rise5: cfg.confirmMaxPriceRise5sPct,
+      impact1: cfg.confirmMaxSingleBuyImpactPct,
       r30: cfg.minRatio30s,
       r15: cfg.minRatio15s,
       imb15: cfg.minImbalance15s,
@@ -340,7 +374,7 @@ function main() {
     }));
 
   console.log(`Loaded ${rows.length} swap events across ${byMint.size} mints.`);
-  console.log(`Exit model: TP ${model.takeProfitPct}%, trailing ${model.trailingActivatePct}/${model.trailingDrawdownPct}%, stop ${model.stopLossPct}%, maxHold ${Math.round(model.maxHoldMs / 1000)}s.`);
+  console.log(`Exit model: TP ${model.takeProfitPct}%, trailing ${model.trailingActivatePct}/${model.trailingDrawdownPct}%, flowExit hold>=${Math.round(model.flowExitMinHoldMs / 1000)}s ratio>=${model.flowExitSellBuyRatio} vol>=${model.flowExitMinVolumeSol}SOL, stop ${model.stopLossPct}%, maxHold ${Math.round(model.maxHoldMs / 1000)}s.`);
   console.table(results);
 }
 

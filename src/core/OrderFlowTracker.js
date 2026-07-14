@@ -54,13 +54,37 @@ class OrderFlowTracker extends EventEmitter {
           'VOLUME_RATIO_1M',
       ).toUpperCase();
     this.minVolume1mUsd =
-      opts.minVolume1mUsd ?? flowConfig.minVolume1mUsd ?? numEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 2000);
+      opts.minVolume1mUsd ?? flowConfig.minVolume1mUsd ?? numEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 5000);
     this.minVolume1mSol =
       opts.minVolume1mSol ?? flowConfig.minVolume1mSol ?? numEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_SOL', 25);
     this.minRatio1m =
-      opts.minRatio1m ?? flowConfig.minRatio1m ?? numEnv('ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO', 1.2);
+      opts.minRatio1m ?? flowConfig.minRatio1m ?? numEnv('ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO', 1.35);
     this.minTrades1m =
-      opts.minTrades1m ?? flowConfig.minTrades1m ?? numEnv('ACTIVITY_FLOW_1M_MIN_TRADES', 0);
+      opts.minTrades1m ?? flowConfig.minTrades1m ?? numEnv('ACTIVITY_FLOW_1M_MIN_TRADES', 25);
+    this.confirmMinBuyTrades5s =
+      opts.confirmMinBuyTrades5s ??
+      flowConfig.confirmMinBuyTrades5s ??
+      numEnv('ACTIVITY_FLOW_CONFIRM_MIN_BUY_TRADES_5S', 4);
+    this.confirmMinUniqueBuyers5s =
+      opts.confirmMinUniqueBuyers5s ??
+      flowConfig.confirmMinUniqueBuyers5s ??
+      numEnv('ACTIVITY_FLOW_CONFIRM_MIN_UNIQUE_BUYERS_5S', 3);
+    this.confirmMinRatio5s =
+      opts.confirmMinRatio5s ??
+      flowConfig.confirmMinRatio5s ??
+      numEnv('ACTIVITY_FLOW_CONFIRM_MIN_BUY_SELL_RATIO_5S', 1.10);
+    this.confirmMaxBuyerShare5s =
+      opts.confirmMaxBuyerShare5s ??
+      flowConfig.confirmMaxBuyerShare5s ??
+      numEnv('ACTIVITY_FLOW_CONFIRM_MAX_BUYER_SHARE_5S', 0.50);
+    this.confirmMaxPriceRise5sPct =
+      opts.confirmMaxPriceRise5sPct ??
+      flowConfig.confirmMaxPriceRise5sPct ??
+      numEnv('ACTIVITY_FLOW_CONFIRM_MAX_PRICE_RISE_5S_PCT', 6);
+    this.confirmMaxSingleBuyImpactPct =
+      opts.confirmMaxSingleBuyImpactPct ??
+      flowConfig.confirmMaxSingleBuyImpactPct ??
+      numEnv('ACTIVITY_FLOW_CONFIRM_MAX_SINGLE_BUY_IMPACT_PCT', 4);
 
     this.window5Ms = opts.window5Ms ?? flowConfig.window5Ms ?? numEnv('ACTIVITY_FLOW_WINDOW_5S_MS', 5_000);
     this.window15Ms = opts.window15Ms ?? flowConfig.window15Ms ?? numEnv('ACTIVITY_FLOW_WINDOW_15S_MS', 15_000);
@@ -142,7 +166,7 @@ class OrderFlowTracker extends EventEmitter {
     this.cooldownMs =
       opts.cooldownMs ??
       flowConfig.cooldownMs ??
-      numEnv('ACTIVITY_FLOW_COOLDOWN_MS', config.strategy.cooldownMsPerToken || 60_000);
+      numEnv('ACTIVITY_FLOW_COOLDOWN_MS', 0);
     this.maxSignalAgeMs =
       opts.maxSignalAgeMs ?? flowConfig.maxSignalAgeMs ?? numEnv('ACTIVITY_FLOW_MAX_SIGNAL_AGE_MS', config.strategy.maxPushLagMs || 5_000);
     this.maxEventsPerMint =
@@ -161,8 +185,15 @@ class OrderFlowTracker extends EventEmitter {
     if (side !== 'BUY' && side !== 'SELL') return;
 
     const price = Number(swap.price);
+    const priceBefore = Number(swap.priceBefore);
+    let priceChangePct = Number(swap.priceChangePct);
     const solVolume = Number(swap.solVolume);
     if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(solVolume) || solVolume <= 0) return;
+    if (!Number.isFinite(priceChangePct)) {
+      priceChangePct = Number.isFinite(priceBefore) && priceBefore > 0
+        ? ((price - priceBefore) / priceBefore) * 100
+        : 0;
+    }
     let poolQuoteAfter = Number(swap.poolQuoteAfter);
     if (!Number.isFinite(poolQuoteAfter) || poolQuoteAfter <= 0) {
       poolQuoteAfter = null;
@@ -179,6 +210,8 @@ class OrderFlowTracker extends EventEmitter {
       side,
       solVolume,
       price,
+      priceBefore: Number.isFinite(priceBefore) && priceBefore > 0 ? priceBefore : null,
+      priceChangePct,
       ts: Number.isFinite(swap.ts) ? swap.ts : Date.now(),
       slot: swap.slot || 0,
       signature: swap.signature || null,
@@ -241,6 +274,16 @@ class OrderFlowTracker extends EventEmitter {
     const buySol = sumVolume(buys);
     const sellSol = sumVolume(sells);
     const volumeSol = buySol + sellSol;
+    const buyerVolume = new Map();
+    for (const buy of buys) {
+      const buyer = buy.signer || '__unknown__';
+      buyerVolume.set(buyer, (buyerVolume.get(buyer) || 0) + buy.solVolume);
+    }
+    const largestBuyerSol = buyerVolume.size > 0 ? Math.max(...buyerVolume.values()) : 0;
+    const maxSingleBuyImpactPct = buys.reduce(
+      (maxImpact, buy) => Math.max(maxImpact, Number.isFinite(buy.priceChangePct) ? buy.priceChangePct : 0),
+      0,
+    );
     const first = events[0] || null;
     const last = events[events.length - 1] || null;
     const firstPrice = first ? first.price : 0;
@@ -262,6 +305,9 @@ class OrderFlowTracker extends EventEmitter {
       uniqueBuyers: uniqueCount(buys, 'signer'),
       uniqueSellers: uniqueCount(sells, 'signer'),
       uniqueTraders: uniqueCount(events, 'signer'),
+      largestBuyerSol,
+      largestBuyerShare: largestBuyerSol / Math.max(buySol, 0.001),
+      maxSingleBuyImpactPct,
       firstPrice,
       lastPrice,
       priceChangePct,
@@ -325,7 +371,9 @@ class OrderFlowTracker extends EventEmitter {
       `[ActivityFlow] BUY_CONFIRM ${signal.symbol || ev.mint.slice(0, 6)} ` +
         `mode=${this.entryMode} ` +
         `5s=${flow.s5.tradeCount}tx/${flow.s5.volumeSol.toFixed(1)}SOL ` +
-        `r=${flow.s5.buySellRatio.toFixed(2)} imb=${flow.s5.imbalance.toFixed(2)} chg=${flow.s5.priceChangePct.toFixed(1)}% ` +
+        `r=${flow.s5.buySellRatio.toFixed(2)} buyers=${flow.s5.uniqueBuyers} ` +
+        `top=${(flow.s5.largestBuyerShare * 100).toFixed(0)}% ` +
+        `jump=${flow.s5.maxSingleBuyImpactPct.toFixed(1)}% chg=${flow.s5.priceChangePct.toFixed(1)}% ` +
         `| 15s=${flow.s15.tradeCount}tx/${flow.s15.volumeSol.toFixed(1)}SOL ` +
         `r=${flow.s15.buySellRatio.toFixed(2)} imb=${flow.s15.imbalance.toFixed(2)} chg=${flow.s15.priceChangePct.toFixed(1)}% ` +
         `| 60s=${flow.s60.tradeCount}tx/${flow.s60.volumeSol.toFixed(1)}SOL traders=${flow.s60.uniqueTraders}`,
@@ -348,6 +396,24 @@ class OrderFlowTracker extends EventEmitter {
       }
       if (s60.buySellRatio < this.minRatio1m) {
         return `1m buy/sell ${s60.buySellRatio.toFixed(2)}<${this.minRatio1m}`;
+      }
+      if (s5.buyCount < this.confirmMinBuyTrades5s) {
+        return `5s buy trades ${s5.buyCount}<${this.confirmMinBuyTrades5s}`;
+      }
+      if (s5.uniqueBuyers < this.confirmMinUniqueBuyers5s) {
+        return `5s buyers ${s5.uniqueBuyers}<${this.confirmMinUniqueBuyers5s}`;
+      }
+      if (s5.buySellRatio < this.confirmMinRatio5s) {
+        return `5s buy/sell ${s5.buySellRatio.toFixed(2)}<${this.confirmMinRatio5s}`;
+      }
+      if (s5.largestBuyerShare > this.confirmMaxBuyerShare5s) {
+        return `5s top buyer ${(s5.largestBuyerShare * 100).toFixed(0)}%>${(this.confirmMaxBuyerShare5s * 100).toFixed(0)}%`;
+      }
+      if (s5.priceChangePct > this.confirmMaxPriceRise5sPct) {
+        return `5s price ${s5.priceChangePct.toFixed(1)}%>${this.confirmMaxPriceRise5sPct}%`;
+      }
+      if (s5.maxSingleBuyImpactPct > this.confirmMaxSingleBuyImpactPct) {
+        return `single buy impact ${s5.maxSingleBuyImpactPct.toFixed(1)}%>${this.confirmMaxSingleBuyImpactPct}%`;
       }
       if (s60.lastSide !== 'BUY') return 'last side is not BUY';
       return null;
@@ -422,6 +488,8 @@ class OrderFlowTracker extends EventEmitter {
       uniqueBuyers: stats.uniqueBuyers,
       uniqueSellers: stats.uniqueSellers,
       uniqueTraders: stats.uniqueTraders,
+      largestBuyerShare: round(stats.largestBuyerShare, 3),
+      maxSingleBuyImpactPct: round(stats.maxSingleBuyImpactPct, 3),
       priceChangePct: round(stats.priceChangePct, 3),
     };
   }

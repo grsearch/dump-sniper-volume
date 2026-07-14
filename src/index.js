@@ -32,11 +32,17 @@ async function main() {
   console.log(
     `Entry: ACTIVITY_FLOW ` +
       `(${config.activityFlow.entryMode}: 1m volume>=${config.activityFlow.minVolume1mSol.toFixed(2)}SOL ` +
-      `(~$${Math.round(config.activityFlow.minVolume1mUsd)}), buy/sell>=${config.activityFlow.minRatio1m})`,
+      `(~$${Math.round(config.activityFlow.minVolume1mUsd)}), buy/sell>=${config.activityFlow.minRatio1m}, ` +
+      `trades>=${config.activityFlow.minTrades1m}; ` +
+      `5s buyers>=${config.activityFlow.confirmMinUniqueBuyers5s}, ` +
+      `topBuyer<=${Math.round(config.activityFlow.confirmMaxBuyerShare5s * 100)}%, ` +
+      `rise<=${config.activityFlow.confirmMaxPriceRise5sPct}%)`,
   );
   console.log(
     `Flow exit: ${config.strategy.flowReversalExitMode} ` +
-      `(sell>buy in ${config.strategy.flowReversalExitWindowMs}ms window)`,
+      `(1m sell/buy>=${config.strategy.flowReversalExitSellBuyRatio1m}, ` +
+      `volume>=${config.strategy.flowReversalExitMinVolume1mSol}SOL, ` +
+      `hold>=${config.strategy.flowReversalExitMinHoldMs}ms)`,
   );
   console.log(`Legacy dumpSignal: ${config.activityFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
   console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15min check)`);
@@ -188,6 +194,12 @@ async function main() {
       `mode=${activityFlowTracker.entryMode} ` +
       `1m>=${activityFlowTracker.minVolume1mSol.toFixed(2)}SOL(~$${Math.round(activityFlowTracker.minVolume1mUsd)}) ` +
       `buy/sell>=${activityFlowTracker.minRatio1m} ` +
+      `trades>=${activityFlowTracker.minTrades1m} ` +
+      `5s buys>=${activityFlowTracker.confirmMinBuyTrades5s} ` +
+      `buyers>=${activityFlowTracker.confirmMinUniqueBuyers5s} ` +
+      `topBuyer<=${Math.round(activityFlowTracker.confirmMaxBuyerShare5s * 100)}% ` +
+      `rise<=${activityFlowTracker.confirmMaxPriceRise5sPct}% ` +
+      `singleImpact<=${activityFlowTracker.confirmMaxSingleBuyImpactPct}% ` +
       `pool>=${activityFlowTracker.minPoolQuoteSol}SOL ` +
       `replaceDump=${activityFlowTracker.replaceDumpSignal}`,
   );

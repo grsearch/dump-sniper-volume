@@ -287,8 +287,9 @@ class SignalEngine extends EventEmitter {
 
     // 5. 冷却
     //    买入后冷却 + 卖出后冷却（防止同一根K线买卖）
+    const triggerCooldownMs = signal._activityFlow ? 0 : config.strategy.cooldownMsPerToken;
     const last = this.lastTriggerTs.get(mint);
-    if (last && Date.now() - last < config.strategy.cooldownMsPerToken) {
+    if (triggerCooldownMs > 0 && last && Date.now() - last < triggerCooldownMs) {
       monitor.inc('SignalEngine.rejectedCooldown', 1, 'SignalEngine');
       this._logReject(signal, `cooldown (${Math.round((Date.now() - last) / 1000)}s ago)`);
       return;
