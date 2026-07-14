@@ -6,7 +6,7 @@ Solana / Pump.fun 短线交易机器人。当前默认买入策略是 **Activity
 
 每个监控代币收到实时 swap 后，程序立即重算最近 1 分钟窗口：
 
-- 1 分钟总成交量默认必须达到 `$5,000`，按 `SOL_PRICE_USD` 换算成 SOL。`.env.example` 默认 `SOL_PRICE_USD=72`，所以约等于 `69.4 SOL/分钟`。
+- 1 分钟总成交量默认必须达到 `$3,000`，按 `SOL_PRICE_USD` 换算成 SOL。`.env.example` 默认 `SOL_PRICE_USD=72`，所以约等于 `41.7 SOL/分钟`。
 - 1 分钟买量 / 卖量默认必须 `>= 1.35`。
 - 1 分钟交易次数默认必须 `>=25`，过滤低频小量币。
 - 最近 5 秒必须至少有 `4` 笔买入、`3` 个不同买家，且买量 / 卖量 `>=1.1`。
@@ -20,7 +20,7 @@ Solana / Pump.fun 短线交易机器人。当前默认买入策略是 **Activity
 默认入口日志应显示：
 
 ```text
-Entry: ACTIVITY_FLOW (VOLUME_RATIO_1M: 1m volume>=...SOL (~$5000), buy/sell>=1.35)
+Entry: ACTIVITY_FLOW (VOLUME_RATIO_1M: 1m volume>=...SOL (~$3000), buy/sell>=1.35)
 Legacy dumpSignal: suppressed
 [main] ActivityFlow enabled: mode=VOLUME_RATIO_1M ...
 ```
@@ -40,6 +40,7 @@ TokenWatchdog 默认每 15 分钟巡检一次：
 - FDV 必须在 `$30,000 ~ $1,000,000`
 - 24h 交易量必须 `>= $5,000`
 - 不再按代币年龄自动移除
+- 监控列表上限默认 `500` 个；只有新增代币后超过该上限才会触发驱逐
 
 ## 数据留存
 
@@ -51,7 +52,7 @@ TokenWatchdog 默认每 15 分钟巡检一次：
 ACTIVITY_FLOW_ENABLED=true
 ACTIVITY_FLOW_REPLACE_DUMP_SIGNAL=true
 ACTIVITY_FLOW_ENTRY_MODE=VOLUME_RATIO_1M
-ACTIVITY_FLOW_1M_MIN_VOLUME_USD=5000
+ACTIVITY_FLOW_1M_MIN_VOLUME_USD=3000
 ACTIVITY_FLOW_1M_MIN_VOLUME_SOL=
 ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO=1.35
 ACTIVITY_FLOW_1M_MIN_TRADES=25
@@ -82,6 +83,7 @@ TOKEN_MAX_AGE_MS=0
 MAX_TOKEN_AGE_MS=0
 MAX_MINT_AGE_HOURS=0
 NEW_COIN_AGE_THRESHOLD_MS=0
+MAX_WATCHED_TOKENS=500
 
 BUY_MIN_PRIORITY_FEE_LAMPORTS=500000
 BUY_CAP_PRIORITY_FEE_LAMPORTS=500000

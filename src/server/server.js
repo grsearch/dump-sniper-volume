@@ -489,7 +489,7 @@ class Server {
    * @returns {Array<{mint, symbol, reason}>} evicted tokens
    */
   async _evictIfNeeded(incomingMint) {
-    const MAX_TOKENS = parseInt(process.env.MAX_WATCHED_TOKENS || '95', 10);
+    const MAX_TOKENS = parseInt(process.env.MAX_WATCHED_TOKENS || '500', 10);
     const currentTokens = this.tokenRegistry.listAll().filter(t => t.is_active);
     const currentCount = currentTokens.length;
 

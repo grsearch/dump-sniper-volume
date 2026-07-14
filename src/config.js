@@ -14,7 +14,7 @@ function numberEnv(name, fallback) {
 }
 
 const solPriceUsdForConfig = numberEnv('SOL_PRICE_USD', 72);
-const activityFlow1mMinVolumeUsdDefault = numberEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 5000);
+const activityFlow1mMinVolumeUsdDefault = numberEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 3000);
 const activityFlow1mMinVolumeSolDefault = activityFlow1mMinVolumeUsdDefault / Math.max(solPriceUsdForConfig, 0.001);
 
 const config = {
@@ -212,7 +212,7 @@ const config = {
       (process.env.ACTIVITY_FLOW_REPLACE_DUMP_SIGNAL ?? process.env.ORDER_FLOW_REPLACE_DUMP_SIGNAL ?? 'true')
         .toLowerCase() === 'true',
     entryMode: String(process.env.ACTIVITY_FLOW_ENTRY_MODE || 'VOLUME_RATIO_1M').toUpperCase(),
-    minVolume1mUsd: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_USD || '5000'),
+    minVolume1mUsd: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_USD || '3000'),
     minVolume1mSol: parseFloat(
       process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_SOL || String(activityFlow1mMinVolumeSolDefault),
     ),
