@@ -2091,9 +2091,11 @@ class PositionManager extends EventEmitter {
       } else if (isTimeout) {
         rebuyCooldownMs = parseInt(process.env.TIMEOUT_REBUY_COOLDOWN_MS || '86400000', 10); // 24h
       } else {
-        rebuyCooldownMs = parseInt(process.env.REBUY_COOLDOWN_MS || '300000', 10); // default 5min
+        rebuyCooldownMs = parseInt(process.env.REBUY_COOLDOWN_MS || '0', 10);
       }
-      this.signalEngine._exitCooldowns.set(pos.mint, Date.now() + rebuyCooldownMs);
+      if (rebuyCooldownMs > 0) {
+        this.signalEngine._exitCooldowns.set(pos.mint, Date.now() + rebuyCooldownMs);
+      }
       if (isSmartStop) {
         console.log(
           `[PositionManager] 🔒 SMART_STOP cooldown ${pos.symbol || pos.mint.slice(0, 6)} for ${Math.round(rebuyCooldownMs / 3600000)}h (no rebuy until cooldown expires)`,

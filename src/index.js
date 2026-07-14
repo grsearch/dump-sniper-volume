@@ -192,6 +192,9 @@ async function main() {
       `replaceDump=${activityFlowTracker.replaceDumpSignal}`,
   );
   dumpDetector.on("swapParsed", (swap) => {
+    if (config.capture.swapEventsEnabled) {
+      try { tradeLogger.logSwapEvent(swap); } catch (_) { /* analytics only */ }
+    }
     try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
     try { activityFlowTracker.handleSwap(swap); } catch (err) {
       console.warn(`[ActivityFlow] handleSwap failed: ${err.message}`);

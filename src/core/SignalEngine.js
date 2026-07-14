@@ -427,8 +427,8 @@ class SignalEngine extends EventEmitter {
     //    （用户需求：不再对同币加仓，避免单币过度集中 + 重复买在下跌途中）
     // v3.24: 同币卖出后冷却检查 — 避免短时间重复买入同一币
     {
-      const rebuyCooldownMs = parseInt(process.env.REBUY_COOLDOWN_MS || '300000', 10); // default 5min
-      const exitCooldown = this._exitCooldowns.get(mint);
+      const rebuyCooldownMs = parseInt(process.env.REBUY_COOLDOWN_MS || '0', 10);
+      const exitCooldown = rebuyCooldownMs > 0 ? this._exitCooldowns.get(mint) : 0;
       if (exitCooldown && Date.now() < exitCooldown) {
         monitor.inc('SignalEngine.rejectedRebuyCooldown', 1, 'SignalEngine');
         this._logReject(signal, 'REBUY_COOLDOWN: sold this mint recently, cooldown ' + Math.round((exitCooldown - Date.now()) / 1000) + 's remaining');

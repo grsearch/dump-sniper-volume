@@ -194,6 +194,8 @@ class DumpDetector extends EventEmitter {
         side: parsed.side,                 // 'BUY' | 'SELL'
         solVolume: parsed.quoteAmount,     // 这笔 swap 的 SOL 体积
         price: parsed.priceAfter,
+        priceBefore: parsed.priceBefore,
+        priceChangePct: parsed.priceChangePct,
         ts: parsed.ts,
         slot: parsed.slot,
         signature: parsed.signature,

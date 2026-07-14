@@ -67,16 +67,16 @@ class OrderFlowTracker extends EventEmitter {
     this.minVolume30sSol =
       opts.minVolume30sSol ?? flowConfig.minVolume30sSol ?? numEnv('ACTIVITY_FLOW_MIN_VOLUME_30S_SOL', 6);
     this.minRatio30s =
-      opts.minRatio30s ?? flowConfig.minRatio30s ?? numEnv('ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_30S', 0.85);
+      opts.minRatio30s ?? flowConfig.minRatio30s ?? numEnv('ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_30S', 1.05);
 
     this.minTrades15s =
       opts.minTrades15s ?? flowConfig.minTrades15s ?? numEnv('ACTIVITY_FLOW_MIN_TRADES_15S', 8);
     this.minVolume15sSol =
       opts.minVolume15sSol ?? flowConfig.minVolume15sSol ?? numEnv('ACTIVITY_FLOW_MIN_VOLUME_15S_SOL', 4);
     this.minRatio15s =
-      opts.minRatio15s ?? flowConfig.minRatio15s ?? numEnv('ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_15S', 1.25);
+      opts.minRatio15s ?? flowConfig.minRatio15s ?? numEnv('ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_15S', 1.45);
     this.minImbalance15s =
-      opts.minImbalance15s ?? flowConfig.minImbalance15s ?? numEnv('ACTIVITY_FLOW_MIN_IMBALANCE_15S', 0.12);
+      opts.minImbalance15s ?? flowConfig.minImbalance15s ?? numEnv('ACTIVITY_FLOW_MIN_IMBALANCE_15S', 0.20);
     this.minUniqueBuyers15s =
       opts.minUniqueBuyers15s ??
       flowConfig.minUniqueBuyers15s ??
@@ -94,13 +94,13 @@ class OrderFlowTracker extends EventEmitter {
       flowConfig.minPriceChange60sPct ??
       numEnv('ACTIVITY_FLOW_MIN_PRICE_CHANGE_60S_PCT', -30);
 
-    this.minTrades5s = opts.minTrades5s ?? flowConfig.minTrades5s ?? numEnv('ACTIVITY_FLOW_MIN_TRADES_5S', 3);
+    this.minTrades5s = opts.minTrades5s ?? flowConfig.minTrades5s ?? numEnv('ACTIVITY_FLOW_MIN_TRADES_5S', 5);
     this.minVolume5sSol =
-      opts.minVolume5sSol ?? flowConfig.minVolume5sSol ?? numEnv('ACTIVITY_FLOW_MIN_VOLUME_5S_SOL', 1.5);
+      opts.minVolume5sSol ?? flowConfig.minVolume5sSol ?? numEnv('ACTIVITY_FLOW_MIN_VOLUME_5S_SOL', 2.5);
     this.minRatio5s =
-      opts.minRatio5s ?? flowConfig.minRatio5s ?? numEnv('ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_5S', 1.35);
+      opts.minRatio5s ?? flowConfig.minRatio5s ?? numEnv('ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_5S', 1.40);
     this.minImbalance5s =
-      opts.minImbalance5s ?? flowConfig.minImbalance5s ?? numEnv('ACTIVITY_FLOW_MIN_IMBALANCE_5S', 0.2);
+      opts.minImbalance5s ?? flowConfig.minImbalance5s ?? numEnv('ACTIVITY_FLOW_MIN_IMBALANCE_5S', 0.25);
     this.minUniqueBuyers5s =
       opts.minUniqueBuyers5s ?? flowConfig.minUniqueBuyers5s ?? numEnv('ACTIVITY_FLOW_MIN_UNIQUE_BUYERS_5S', 2);
     this.minPriceChange5sPct =

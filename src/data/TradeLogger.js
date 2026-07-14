@@ -124,6 +124,29 @@ class TradeLogger {
       );
       CREATE INDEX IF NOT EXISTS idx_post_exit_stats_mint ON post_exit_stats(mint);
       CREATE INDEX IF NOT EXISTS idx_post_exit_stats_exit_ts ON post_exit_stats(exit_ts);
+
+      CREATE TABLE IF NOT EXISTS swap_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        signer TEXT,
+        side TEXT NOT NULL,
+        sol_volume REAL,
+        price REAL,
+        price_before REAL,
+        price_change_pct REAL,
+        slot INTEGER,
+        signature TEXT,
+        pool_address TEXT,
+        pool_quote_after REAL
+      );
+      CREATE INDEX IF NOT EXISTS idx_swap_events_ts ON swap_events(ts);
+      CREATE INDEX IF NOT EXISTS idx_swap_events_mint_ts ON swap_events(mint, ts);
+      CREATE INDEX IF NOT EXISTS idx_swap_events_signature ON swap_events(signature);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_events_sig_mint_side
+        ON swap_events(signature, mint, side)
+        WHERE signature IS NOT NULL AND signature != '';
     `);
 
     // v3.17.19: migrate dump_slot column for upgrading from earlier schemas
@@ -210,6 +233,20 @@ class TradeLogger {
 
       recentTrades: this.db.prepare(`
         SELECT * FROM trades ORDER BY ts DESC LIMIT ?
+      `),
+
+      // ============ swap_events ============
+      insertSwapEvent: this.db.prepare(`
+        INSERT OR IGNORE INTO swap_events
+          (ts, mint, symbol, signer, side, sol_volume, price, price_before, price_change_pct,
+           slot, signature, pool_address, pool_quote_after)
+        VALUES
+          (@ts, @mint, @symbol, @signer, @side, @solVolume, @price, @priceBefore, @priceChangePct,
+           @slot, @signature, @poolAddress, @poolQuoteAfter)
+      `),
+
+      swapEventsInRange: this.db.prepare(`
+        SELECT * FROM swap_events WHERE ts >= ? AND ts < ? ORDER BY mint, ts ASC
       `),
 
       // ============ positions ============
@@ -415,6 +452,35 @@ class TradeLogger {
     });
   }
 
+  logSwapEvent(swap) {
+    if (!swap || !swap.mint) return;
+    const side = String(swap.side || '').toUpperCase();
+    if (side !== 'BUY' && side !== 'SELL') return;
+
+    const num = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    try {
+      this.stmts.insertSwapEvent.run({
+        ts: num(swap.ts) || Date.now(),
+        mint: swap.mint,
+        symbol: swap.symbol || null,
+        signer: swap.signer || null,
+        side,
+        solVolume: num(swap.solVolume),
+        price: num(swap.price),
+        priceBefore: num(swap.priceBefore),
+        priceChangePct: num(swap.priceChangePct),
+        slot: num(swap.slot),
+        signature: swap.signature || null,
+        poolAddress: swap.poolAddress || null,
+        poolQuoteAfter: num(swap.poolQuoteAfter),
+      });
+    } catch (_) { /* best effort; strategy must never block on analytics writes */ }
+  }
+
   // ============================================================
   // Position lifecycle API
   // ============================================================
@@ -570,6 +636,10 @@ class TradeLogger {
 
   getTradesInRange(startMs, endMs) {
     return this.stmts.tradesInRange.all(startMs, endMs);
+  }
+
+  getSwapEventsInRange(startMs, endMs) {
+    return this.stmts.swapEventsInRange.all(startMs, endMs);
   }
 
   getPositionsInRange(startMs, endMs) {
