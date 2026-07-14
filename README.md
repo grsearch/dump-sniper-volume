@@ -46,6 +46,31 @@ TokenWatchdog 默认每 15 分钟巡检一次：
 
 默认开启 `SWAP_EVENT_LOG_ENABLED=true`。程序会把每一笔已解析的监控币实时 swap 写入 SQLite 的 `swap_events` 表，后续可以基于这张表离线重算窗口并回测阈值。
 
+## 参数优化回测
+
+运行内置优化器：
+
+```bash
+npm run optimize:activity -- --hours 168 --iterations 2000
+```
+
+优化器会：
+
+- 按时间顺序把数据切成 `60%` 训练、`20%` 验证、`20%` 隔离测试，测试集不参与参数选择。
+- 搜索 1 分钟成交量/买卖比/交易数、5 秒买盘质量、反转卖出、移动止盈、固定止盈和止损阈值。
+- 默认按每边 `1%` 执行成本及每笔 `0.0005 SOL` 优先费计算，并额外输出每边 `0.5% / 1% / 2%` 成本压力测试。
+- 输出 Markdown、CSV、JSON 和一份候选 `.env` 到 `reports/`，但不会修改线上 `.env`、重启服务或发送交易。
+- 数据少于 `72h`、有效 swap 少于 `10,000` 或隔离测试交易不足时，会明确标记为探索性结果，不宣称已经找到可盈利策略。
+
+常用选项：
+
+```bash
+npm run optimize:activity -- --hours 0 --iterations 5000 --min-trades 10 --cost-bps 100
+npm run optimize:activity -- --self-test
+```
+
+`--hours 0` 表示使用数据库内全部历史。推荐先积累至少 3 到 7 天连续数据，再依据隔离测试和分时段稳定性决定是否采用候选参数。
+
 ## 关键配置
 
 ```env

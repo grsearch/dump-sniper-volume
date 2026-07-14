@@ -13,6 +13,7 @@
     "diagnose": "node scripts/diagnose.js",
     "diagnose:quick": "node scripts/diagnose.js --quick",
     "backtest:activity": "node scripts/backtest-activity-flow.js",
+    "optimize:activity": "node scripts/optimize-activity-flow.js",
     "fill-pools": "node scripts/fill-pools.js",
     "verify-pools": "node scripts/verify-pools.js",
     "verify-pools:fix": "node scripts/verify-pools.js --fix",
