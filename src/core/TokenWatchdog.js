@@ -52,8 +52,8 @@ class TokenWatchdog {
       ? parseFloat(process.env.MIN_LP_SOL)
       : config.strategy.minLpSol;
 
-    // 代币年龄过滤默认关闭；如需恢复，可显式设置 MAX_TOKEN_AGE_MS。
-    this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '0', 10);
+    // Monitoring-list age limit. Open positions are retained until they close.
+    this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '14400000', 10);
 
     this._pendingExitMints = new Set();
     this._checkInterval = null;
@@ -277,7 +277,7 @@ class TokenWatchdog {
       const reasonStr = reasons.join(', ');
 
       // WATCHDOG_EXIT is disabled. If this mint has an open position, keep it
-      // subscribed so swap-driven exits (FLOW_REVERSAL_EXIT) can still fire.
+      // subscribed so price-driven take-profit and trailing exits can still fire.
       // Tokens with no open position may be removed from monitoring normally.
       const hasOpenPos = this.positionManager.hasOpenPosition(token.mint);
       if (hasOpenPos) {

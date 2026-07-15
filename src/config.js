@@ -55,7 +55,7 @@ const config = {
     // 当前固定止盈：达到 TAKE_PROFIT_PCT 立即卖，不等双确认。
     //   优先级高于移动止盈（_checkExit 里先检查 TP 再检查 trailing）。
     //   tpConfirmCount/tpConfirmMinGapMs 保留字段但已不在固定止盈路径使用。
-    takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || '200'),
+    takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || '100'),
     tpConfirmCount: parseInt(process.env.TP_CONFIRM_COUNT || '2', 10),
     tpConfirmMinGapMs: parseInt(process.env.TP_CONFIRM_MIN_GAP_MS || '300', 10),
 
@@ -64,7 +64,7 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.TRAILING_ACTIVATE_PCT || '60'),
+    trailingActivatePct: parseFloat(process.env.TRAILING_ACTIVATE_PCT || '40'),
     trailingDrawdownPct: parseFloat(process.env.TRAILING_DRAWDOWN_PCT || '10'),
     trailingMinHwmAgeMs: parseInt(process.env.TRAILING_MIN_HWM_AGE_MS || '2000', 10),
 
@@ -91,12 +91,12 @@ const config = {
     //   - 20% 既能放过"自买入回归"（通常 ≤ 10-12%），又能抓真的暴跌
     //   设 0 禁用 stabilization 期内的 emergency_stop（极端 dangerous，不推荐）
     stabilizationEmergencyDrawdownPct: parseFloat(
-      process.env.STABILIZATION_EMERGENCY_DRAWDOWN_PCT || '20.0',
+      process.env.STABILIZATION_EMERGENCY_DRAWDOWN_PCT || '0',
     ),
 
     // 紧急止损（防止灾难性下跌）
     // 设置为 0 可禁用紧急止损（恢复"硬扛"行为）
-    emergencyStopLossPct: parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '-25'),
+    emergencyStopLossPct: parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '0'),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值
     // 智能规则: trailing已armed时不触发(trailing自行处理回撤), 只救trailing永远不armed的死扛仓位
@@ -114,10 +114,10 @@ const config = {
     //   v3.17.20: 设 0 禁用 TIMEOUT 卖出，持仓靠 TP/Trailing/Emergency 退出
     //   v3.17.32: 恢复为 4h 强制退出(数据回测: 4h+ 只有 30% 胜率, 平均亏 -13%)
     //   clean:     30min (1800000ms) — 短线反弹策略, 超时强制退出
-    maxHoldMs: parseInt(process.env.MAX_HOLD_MS || '1800000', 10),
-    lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '1800000', 10),  // v3.17.40c: peakPnl<trailingActivate 超时割肉, 默认30min
+    maxHoldMs: parseInt(process.env.MAX_HOLD_MS || '0', 10),
+    lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '0', 10),
     // FLOW_REVERSAL_EXIT: 持仓后如果短窗口买盘反转为卖盘，则主动退出。
-    flowReversalExitEnabled: (process.env.FLOW_REVERSAL_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    flowReversalExitEnabled: (process.env.FLOW_REVERSAL_EXIT_ENABLED ?? 'false').toLowerCase() === 'true',
     flowReversalExitMode: String(process.env.FLOW_REVERSAL_EXIT_MODE || 'VOLUME_RATIO_1M').toUpperCase(),
     flowReversalExitWindowMs: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_MS || '60000', 10),
     flowReversalExitSellBuyRatio1m: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M || '1.35'),
@@ -143,17 +143,17 @@ const config = {
     //   defenseActivateMs: 持仓超过此时间后激活防御模式 (默认 20min)
     //   defenseTrailingDrawdownPct: 防御 trailing 回撤阈值 (默认 3%)
     //   defenseStopLossPct: 防御模式止损 (PnL% 低于此值立即卖出, 默认 -10%)
-    defenseActivateMs: parseInt(process.env.DEFENSE_ACTIVATE_MS || '1200000', 10),
-    defenseTrailingDrawdownPct: parseFloat(process.env.DEFENSE_TRAILING_DRAWDOWN_PCT || '3.0'),
-    defenseStopLossPct: parseFloat(process.env.DEFENSE_STOP_LOSS_PCT || '-10.0'),
-    defenseProfitActivatePct: parseFloat(process.env.DEFENSE_PROFIT_ACTIVATE_PCT || '3.0'),  // v3.17.33: PnL>=3%激活防御trailing
+    defenseActivateMs: parseInt(process.env.DEFENSE_ACTIVATE_MS || '0', 10),
+    defenseTrailingDrawdownPct: parseFloat(process.env.DEFENSE_TRAILING_DRAWDOWN_PCT || '0'),
+    defenseStopLossPct: parseFloat(process.env.DEFENSE_STOP_LOSS_PCT || '0'),
+    defenseProfitActivatePct: parseFloat(process.env.DEFENSE_PROFIT_ACTIVATE_PCT || '0'),
 
     // 滑点
     buySlippageBps: parseInt(process.env.BUY_SLIPPAGE_BPS || '1500', 10),  // 15%
     sellSlippageBps: parseInt(process.env.SELL_SLIPPAGE_BPS || '2000', 10), // 20%
 
     // 风控（v3.17 默认 maxConcurrent 5）
-    cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),
+    cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '0', 10),
     maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS || '10', 10),
 
     // v3.17.6: 同砸单去重时间窗（毫秒）
@@ -218,6 +218,10 @@ const config = {
     ),
     minRatio1m: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO || '1.35'),
     minTrades1m: parseInt(process.env.ACTIVITY_FLOW_1M_MIN_TRADES || '25', 10),
+    rsi1mEnabled: (process.env.ACTIVITY_FLOW_RSI_1M_ENABLED ?? 'true').toLowerCase() === 'true',
+    rsi1mPeriod: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_PERIOD || '7', 10),
+    rsi1mMax: parseFloat(process.env.ACTIVITY_FLOW_RSI_1M_MAX || '50'),
+    rsi1mMinBars: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_MIN_BARS || '8', 10),
     confirmMinBuyTrades5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_TRADES_5S || '4', 10),
     confirmMinUniqueBuyers5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_UNIQUE_BUYERS_5S || '3', 10),
     confirmMinRatio5s: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_SELL_RATIO_5S || '1.10'),

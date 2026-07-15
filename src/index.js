@@ -23,6 +23,7 @@ const ActivityFlowTracker = require('./core/OrderFlowTracker');
 const monitor = getMonitor();
 
 async function main() {
+  const maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '14400000', 10);
   console.log('================================================');
   console.log('🎯 Dump Sniper V3.17.20 starting...');
   console.log(`Mode: ${config.DRY_RUN ? 'DRY_RUN' : '⚠️  LIVE TRADING ⚠️'}`);
@@ -33,20 +34,26 @@ async function main() {
     `Entry: ACTIVITY_FLOW ` +
       `(${config.activityFlow.entryMode}: 1m volume>=${config.activityFlow.minVolume1mSol.toFixed(2)}SOL ` +
       `(~$${Math.round(config.activityFlow.minVolume1mUsd)}), buy/sell>=${config.activityFlow.minRatio1m}, ` +
-      `trades>=${config.activityFlow.minTrades1m}; ` +
+      `trades>=${config.activityFlow.minTrades1m}, ` +
+      `${config.activityFlow.rsi1mEnabled
+        ? `RSI(${config.activityFlow.rsi1mPeriod},1m)<${config.activityFlow.rsi1mMax}`
+        : 'RSI disabled'}; ` +
       `5s buyers>=${config.activityFlow.confirmMinUniqueBuyers5s}, ` +
       `topBuyer<=${Math.round(config.activityFlow.confirmMaxBuyerShare5s * 100)}%, ` +
       `rise<=${config.activityFlow.confirmMaxPriceRise5sPct}%)`,
   );
-  console.log(
-    `Flow exit: ${config.strategy.flowReversalExitMode} ` +
+  console.log(config.strategy.flowReversalExitEnabled
+    ? `Flow exit: ${config.strategy.flowReversalExitMode} ` +
       `(1m sell/buy>=${config.strategy.flowReversalExitSellBuyRatio1m}, ` +
       `volume>=${config.strategy.flowReversalExitMinVolume1mSol}SOL, ` +
-      `hold>=${config.strategy.flowReversalExitMinHoldMs}ms)`,
-  );
+      `hold>=${config.strategy.flowReversalExitMinHoldMs}ms)`
+    : 'Flow exit: disabled');
   console.log(`Legacy dumpSignal: ${config.activityFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
-  console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15min check)`);
-  console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct}%`);
+  console.log(
+    `Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL, ` +
+      `maxAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 3_600_000) + 'h' : 'disabled'} (15min check)`,
+  );
+  console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct < 0 ? config.strategy.emergencyStopLossPct + '%' : 'disabled'}`);
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);
   console.log(`Add-on: disabled (one position per mint)`);
   console.log(`Executor: Pump AMM SDK direct (no Jupiter)`);
@@ -124,7 +131,7 @@ async function main() {
   const RsiCalculator = require('./core/RsiCalculator');
   const rsiMode = process.env.RSI_FILTER || 'off';
   const rsiCalculator = (rsiMode === 'peak' || rsiMode === 'slope' || rsiMode === 'off')
-    ? new RsiCalculator()
+    ? new RsiCalculator({ period60: config.activityFlow.rsi1mPeriod })
     : null;
   // v3.17.30: 即使 RSI_FILTER=off 也需要 RsiCalculator (RECENT_PUMP 用 buckets 数据)
   // 只有完全不需要 RSI 数据时才设 null
@@ -138,7 +145,8 @@ async function main() {
     // v3.17.42: 从price_samples预热RSI — 重启后立即有30s桶数据
     //   取最近5min的samples喂给RsiCalculator，避免重启后4min内RSI过滤失效
     try {
-      const warmupStart = Date.now() - 600000; // 5min前
+      const warmupMinutes = Math.max(12, config.activityFlow.rsi1mPeriod + 3);
+      const warmupStart = Date.now() - warmupMinutes * 60_000;
       const warmupRows = tradeLogger.db.prepare(`
         SELECT mint, ts, price FROM price_samples 
         WHERE ts > ? ORDER BY ts ASC
@@ -148,7 +156,7 @@ async function main() {
         rsiCalculator.feedTick(r.mint, r.price, r.ts);
         fed++;
       }
-      console.log(`[main] RSI warmup: fed ${fed} price_samples from last 5min`);
+      console.log(`[main] RSI warmup: fed ${fed} price_samples from last ${warmupMinutes}min`);
     } catch (e) {
       console.warn('[main] RSI warmup failed:', e.message);
     }

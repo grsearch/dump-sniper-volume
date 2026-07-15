@@ -46,18 +46,30 @@ class RsiCalculator {
    * @param {number} [opts.bucketMs5=5000]
    * @param {number} [opts.maxBuckets=120]  最多保留 120 桶
    */
-  constructor({ period1 = 14, period5 = 7, period30 = 7, bucketMs1 = 1000, bucketMs5 = 5000, bucketMs30 = 30000, maxBuckets = 120 } = {}) {
+  constructor({
+    period1 = 14,
+    period5 = 7,
+    period30 = 7,
+    period60 = 7,
+    bucketMs1 = 1000,
+    bucketMs5 = 5000,
+    bucketMs30 = 30000,
+    bucketMs60 = 60000,
+    maxBuckets = 120,
+  } = {}) {
     this.period1 = period1;
     this.period5 = period5;
     this.period30 = period30;
+    this.period60 = Math.max(1, period60);
     // 向后兼容:旧代码用 this.period
     this.period = period1;
     this.bucketMs1 = bucketMs1;
     this.bucketMs5 = bucketMs5;
     this.bucketMs30 = bucketMs30;
+    this.bucketMs60 = bucketMs60;
     this.maxBuckets = maxBuckets;
 
-    // mint → { buckets1s: [...], buckets5s: [...], buckets30s: [...], lastPrice }
+    // mint → { buckets1s, buckets5s, buckets30s, buckets60s, lastPrice }
     this.state = new Map();
   }
 
@@ -69,9 +81,11 @@ class RsiCalculator {
     if (!Number.isFinite(price) || price <= 0) return;
     const s = this._stateOf(mint);
     s.lastPrice = price;
+    this._updateRsi1mState(s, price, ts);
     this._touchBucket(s.buckets1s, price, 0, ts, this.bucketMs1);
     this._touchBucket(s.buckets5s, price, 0, ts, this.bucketMs5);
     this._touchBucket(s.buckets30s, price, 0, ts, this.bucketMs30);
+    this._touchBucket(s.buckets60s, price, 0, ts, this.bucketMs60, true);
     this._trim(s);
   }
 
@@ -109,9 +123,11 @@ class RsiCalculator {
     }
 
     s.lastPrice = price;
+    this._updateRsi1mState(s, price, ts);
     this._touchBucket(s.buckets1s, price, solVolume, ts, this.bucketMs1);
     this._touchBucket(s.buckets5s, price, solVolume, ts, this.bucketMs5);
     this._touchBucket(s.buckets30s, price, solVolume, ts, this.bucketMs30);
+    this._touchBucket(s.buckets60s, price, solVolume, ts, this.bucketMs60, true);
     this._trim(s);
   }
 
@@ -122,8 +138,18 @@ class RsiCalculator {
         buckets1s: [],
         buckets5s: [],
         buckets30s: [],
+        buckets60s: [],
         lastPrice: null,
         lastPoolQuoteSol: null,
+        rsi1mCurrentIdx: null,
+        rsi1mCurrentClose: null,
+        rsi1mFinalClose: null,
+        rsi1mCloseCount: 0,
+        rsi1mSeedChanges: 0,
+        rsi1mSeedGain: 0,
+        rsi1mSeedLoss: 0,
+        rsi1mAvgGain: null,
+        rsi1mAvgLoss: null,
       };
       this.state.set(mint, s);
     }
@@ -134,7 +160,7 @@ class RsiCalculator {
    * 桶聚合: 当前 tick 落到哪个桶 (按 bucketMs 对齐), 用 volume 加权累加
    * 如果跳过了若干桶, forward-fill 用上一笔价 (volume=0 表示 "占位")
    */
-  _touchBucket(buckets, price, solVolume, ts, bucketMs) {
+  _touchBucket(buckets, price, solVolume, ts, bucketMs, closeFill = false) {
     const idx = Math.floor(ts / bucketMs);
     if (buckets.length === 0) {
       buckets.push({ idx, sumPriceVolume: price * (solVolume || 1), sumVolume: solVolume || 1, lastPrice: price });
@@ -151,8 +177,15 @@ class RsiCalculator {
     if (idx < last.idx) return; // 时间回退,忽略
 
     // forward fill 中间空桶
-    let fillPrice = last.sumVolume > 0 ? last.sumPriceVolume / last.sumVolume : last.lastPrice;
-    for (let i = last.idx + 1; i < idx; i++) {
+    const fillPrice = closeFill
+      ? last.lastPrice
+      : (last.sumVolume > 0 ? last.sumPriceVolume / last.sumVolume : last.lastPrice);
+    let fillFrom = last.idx + 1;
+    if (idx - last.idx >= this.maxBuckets) {
+      buckets.length = 0;
+      fillFrom = idx - this.maxBuckets + 1;
+    }
+    for (let i = fillFrom; i < idx; i++) {
       buckets.push({ idx: i, sumPriceVolume: 0, sumVolume: 0, lastPrice: fillPrice });
     }
     // 新桶
@@ -164,6 +197,92 @@ class RsiCalculator {
     });
   }
 
+  _commitRsi1mClose(s, close) {
+    if (s.rsi1mFinalClose == null) {
+      s.rsi1mFinalClose = close;
+      s.rsi1mCloseCount = 1;
+      return;
+    }
+
+    const delta = close - s.rsi1mFinalClose;
+    const gain = delta > 0 ? delta : 0;
+    const loss = delta < 0 ? -delta : 0;
+    if (s.rsi1mSeedChanges < this.period60) {
+      s.rsi1mSeedGain += gain;
+      s.rsi1mSeedLoss += loss;
+      s.rsi1mSeedChanges += 1;
+      if (s.rsi1mSeedChanges === this.period60) {
+        s.rsi1mAvgGain = s.rsi1mSeedGain / this.period60;
+        s.rsi1mAvgLoss = s.rsi1mSeedLoss / this.period60;
+      }
+    } else {
+      s.rsi1mAvgGain = (s.rsi1mAvgGain * (this.period60 - 1) + gain) / this.period60;
+      s.rsi1mAvgLoss = (s.rsi1mAvgLoss * (this.period60 - 1) + loss) / this.period60;
+    }
+    s.rsi1mFinalClose = close;
+    s.rsi1mCloseCount += 1;
+  }
+
+  _commitFlatRsi1mBars(s, close, count) {
+    let remaining = count;
+    while (remaining > 0 && s.rsi1mSeedChanges < this.period60) {
+      this._commitRsi1mClose(s, close);
+      remaining -= 1;
+    }
+    if (remaining <= 0) return;
+
+    const decay = Math.pow((this.period60 - 1) / this.period60, remaining);
+    s.rsi1mAvgGain *= decay;
+    s.rsi1mAvgLoss *= decay;
+    s.rsi1mFinalClose = close;
+    s.rsi1mCloseCount += remaining;
+  }
+
+  _updateRsi1mState(s, price, ts) {
+    const idx = Math.floor(ts / this.bucketMs60);
+    if (s.rsi1mCurrentIdx == null) {
+      s.rsi1mCurrentIdx = idx;
+      s.rsi1mCurrentClose = price;
+      return;
+    }
+    if (idx < s.rsi1mCurrentIdx) return;
+    if (idx === s.rsi1mCurrentIdx) {
+      s.rsi1mCurrentClose = price;
+      return;
+    }
+
+    const previousClose = s.rsi1mCurrentClose;
+    this._commitRsi1mClose(s, previousClose);
+    this._commitFlatRsi1mBars(s, previousClose, idx - s.rsi1mCurrentIdx - 1);
+    s.rsi1mCurrentIdx = idx;
+    s.rsi1mCurrentClose = price;
+  }
+
+  _rsiFromAverages(avgGain, avgLoss) {
+    if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
+    return 100 - 100 / (1 + avgGain / avgLoss);
+  }
+
+  _currentRsi1m(s) {
+    if (s.rsi1mFinalClose == null || s.rsi1mCurrentClose == null) return null;
+    const delta = s.rsi1mCurrentClose - s.rsi1mFinalClose;
+    const gain = delta > 0 ? delta : 0;
+    const loss = delta < 0 ? -delta : 0;
+
+    if (s.rsi1mSeedChanges < this.period60) {
+      if (s.rsi1mSeedChanges + 1 < this.period60) return null;
+      return this._rsiFromAverages(
+        (s.rsi1mSeedGain + gain) / this.period60,
+        (s.rsi1mSeedLoss + loss) / this.period60,
+      );
+    }
+
+    return this._rsiFromAverages(
+      (s.rsi1mAvgGain * (this.period60 - 1) + gain) / this.period60,
+      (s.rsi1mAvgLoss * (this.period60 - 1) + loss) / this.period60,
+    );
+  }
+
   _trim(s) {
     if (s.buckets1s.length > this.maxBuckets) {
       s.buckets1s.splice(0, s.buckets1s.length - this.maxBuckets);
@@ -173,6 +292,9 @@ class RsiCalculator {
     }
     if (s.buckets30s.length > this.maxBuckets) {
       s.buckets30s.splice(0, s.buckets30s.length - this.maxBuckets);
+    }
+    if (s.buckets60s.length > this.maxBuckets) {
+      s.buckets60s.splice(0, s.buckets60s.length - this.maxBuckets);
     }
   }
 
@@ -244,11 +366,11 @@ class RsiCalculator {
     const prices5s = this._bucketsToPrices(s.buckets5s);
 
     const prices30s = this._bucketsToPrices(s.buckets30s);
-
     const rsi1s = this._wildersRsi(prices1s, this.period1);
     const rsi5s = this._wildersRsi(prices5s, this.period5);
     const rsi30s = this._wildersRsi(prices30s, this.period30);
-    if (rsi1s == null && rsi5s == null && rsi30s == null) return null;
+    const rsi1m = this._currentRsi1m(s);
+    if (rsi1s == null && rsi5s == null && rsi30s == null && rsi1m == null) return null;
 
     // RSI 上拐: 当前 RSI vs 3 秒前 RSI 的差(正数 = RSI 在涨 = 反弹起点)
     let rsi1sSlope = null;
@@ -263,10 +385,12 @@ class RsiCalculator {
       rsi1s,
       rsi5s,
       rsi30s,
+      rsi1m,
       rsi1sSlope,
       bucketCount1s: s.buckets1s.length,
       bucketCount5s: s.buckets5s.length,
       bucketCount30s: s.buckets30s.length,
+      bucketCount1m: s.buckets60s.length,
       lastPrice: s.lastPrice,
       lastPoolQuoteSol: s.lastPoolQuoteSol,
       poolHealthy: s.lastPoolQuoteSol == null
@@ -322,8 +446,20 @@ class RsiCalculator {
   getRecentPriceHistory(mint, lookbackSec, bucketType = '1s') {
     const s = this.state.get(mint);
     if (!s) return null;
-    const buckets = bucketType === '30s' ? s.buckets30s : bucketType === '5s' ? s.buckets5s : s.buckets1s;
-    const bucketMs = bucketType === '30s' ? this.bucketMs30 : bucketType === '5s' ? this.bucketMs5 : this.bucketMs1;
+    const buckets = bucketType === '1m'
+      ? s.buckets60s
+      : bucketType === '30s'
+        ? s.buckets30s
+        : bucketType === '5s'
+          ? s.buckets5s
+          : s.buckets1s;
+    const bucketMs = bucketType === '1m'
+      ? this.bucketMs60
+      : bucketType === '30s'
+        ? this.bucketMs30
+        : bucketType === '5s'
+          ? this.bucketMs5
+          : this.bucketMs1;
     const need = Math.floor((lookbackSec * 1000) / bucketMs);
     // v3.17.39: 降低最低要求 — 有部分数据(至少30个桶=2.5min)就返回，不必等满整个窗口
     //   之前要求 buckets.length >= need(240 for 20min)，重启后数据不够就返回 null → 过滤被跳过

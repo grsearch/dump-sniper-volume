@@ -300,6 +300,31 @@ class SignalEngine extends EventEmitter {
       this._sampleLongPrice(mint, signal.priceAfter);
     }
 
+    // Activity Flow entry uses TradingView-style RSI(7) on 1-minute candle closes.
+    // Fail closed until enough bars exist so a restart cannot bypass the filter.
+    if (signal._activityFlow && config.activityFlow.rsi1mEnabled) {
+      const minBars = Math.max(config.activityFlow.rsi1mPeriod + 1, config.activityFlow.rsi1mMinBars);
+      const snap = this.rsiCalculator ? this.rsiCalculator.snapshot(mint) : null;
+      if (!snap || !Number.isFinite(snap.rsi1m) || snap.bucketCount1m < minBars) {
+        monitor.inc('SignalEngine.rejectedRsi1mNotReady', 1, 'SignalEngine');
+        this._logReject(
+          signal,
+          `RSI_1M_NOT_READY: bars=${snap?.bucketCount1m || 0}/${minBars}`,
+        );
+        return;
+      }
+      if (snap.rsi1m >= config.activityFlow.rsi1mMax) {
+        monitor.inc('SignalEngine.rejectedRsi1mHigh', 1, 'SignalEngine');
+        this._logReject(
+          signal,
+          `RSI_1M_HIGH: RSI(${config.activityFlow.rsi1mPeriod},1m)=` +
+            `${snap.rsi1m.toFixed(1)} >= ${config.activityFlow.rsi1mMax}`,
+        );
+        return;
+      }
+      signal._rsi1m = snap.rsi1m;
+    }
+
     // v3.17.38: 在任何过滤判断之前,先取"砸单前 RSI"
     let rsiPreDump = null;
     let rsi1sPreDump = null;
@@ -725,7 +750,8 @@ class SignalEngine extends EventEmitter {
     const activityReason = signal._activityFlow && flow
       ? `activity_flow_1m: ${flow.s60.tradeCount}tx/${flow.s60.volumeSol.toFixed(2)}SOL ` +
         `buy=${flow.s60.buySol.toFixed(2)} sell=${flow.s60.sellSol.toFixed(2)} ` +
-        `r=${flow.s60.buySellRatio.toFixed(2)}`
+        `r=${flow.s60.buySellRatio.toFixed(2)} ` +
+        `rsi1m=${Number.isFinite(signal._rsi1m) ? signal._rsi1m.toFixed(1) : 'n/a'}`
       : null;
 
     // v3.10: 先 emit buyOrder（让 Executor 立即开始工作），再异步写 DB
@@ -738,6 +764,7 @@ class SignalEngine extends EventEmitter {
       rsiPreDump: signal._rsiPreDump,
       rsi1sPreDump: signal._rsi1sPreDump,
       rsi30sPreDump: signal._rsi30sPreDump,
+      rsi1m: signal._rsi1m,
       preVol5m: signal._preVol5m,
       dumpDepth: signal._dumpDepth,
     });

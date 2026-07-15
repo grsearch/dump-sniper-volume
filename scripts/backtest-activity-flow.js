@@ -4,11 +4,17 @@ require('dotenv').config({ override: true });
 
 const Database = require('better-sqlite3');
 const { config } = require('../src/config');
+const RsiCalculator = require('../src/core/RsiCalculator');
 
 function numList(name, fallback) {
   const raw = process.env[name];
   if (!raw) return fallback;
   return raw.split(',').map((x) => Number(x.trim())).filter((x) => Number.isFinite(x));
+}
+
+function envNumber(name, fallback) {
+  const raw = process.env[name];
+  return raw == null || raw === '' ? Number(fallback) : Number(raw);
 }
 
 function uniqueCount(items, field) {
@@ -72,12 +78,18 @@ function windowStats(events, idx, windowMs) {
   };
 }
 
-function passesEntry(cfg, s5, s15, s30, s60, poolQuoteAfter) {
+function passesEntry(cfg, s5, s15, s30, s60, event) {
+  const poolQuoteAfter = event.poolQuoteAfter;
   if (poolQuoteAfter && cfg.minPoolQuoteSol > 0 && poolQuoteAfter < cfg.minPoolQuoteSol) return false;
   if (cfg.entryMode === 'VOLUME_RATIO_1M') {
     if (cfg.minTrades1m > 0 && s60.tradeCount < cfg.minTrades1m) return false;
     if (s60.volumeSol < cfg.minVolume1mSol) return false;
     if (s60.buySellRatio < cfg.minRatio1m) return false;
+    if (cfg.rsi1mEnabled) {
+      const minBars = Math.max(cfg.rsi1mPeriod + 1, cfg.rsi1mMinBars);
+      if (event.rsi1mBars < minBars || !Number.isFinite(event.rsi1m)) return false;
+      if (event.rsi1m >= cfg.rsi1mMax) return false;
+    }
     if (s5.buyCount < cfg.confirmMinBuyTrades5s) return false;
     if (s5.uniqueBuyers < cfg.confirmMinUniqueBuyers5s) return false;
     if (s5.buySellRatio < cfg.confirmMinRatio5s) return false;
@@ -137,7 +149,7 @@ function postEntryWindowStats(events, entryIdx, idx, windowMs) {
 function simulateExit(events, entryIdx, model) {
   const entry = events[entryIdx];
   const entryPrice = entry.price;
-  const deadline = entry.ts + model.maxHoldMs;
+  const deadline = model.maxHoldMs > 0 ? entry.ts + model.maxHoldMs : Infinity;
   let hwm = entryPrice;
   let trailingArmed = false;
   let last = entry;
@@ -161,16 +173,16 @@ function simulateExit(events, entryIdx, model) {
       }
     }
 
-    if (pnlPct >= model.takeProfitPct) {
+    if (model.takeProfitPct > 0 && pnlPct >= model.takeProfitPct) {
       return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'TAKE_PROFIT' };
     }
-    if (pnlPct <= model.stopLossPct) {
+    if (model.stopLossPct < 0 && pnlPct <= model.stopLossPct) {
       return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'STOP_LOSS' };
     }
 
     const peakPnlPct = ((hwm - entryPrice) / entryPrice) * 100;
-    if (peakPnlPct >= model.trailingActivatePct) trailingArmed = true;
-    if (trailingArmed) {
+    if (model.trailingActivatePct > 0 && peakPnlPct >= model.trailingActivatePct) trailingArmed = true;
+    if (trailingArmed && model.trailingDrawdownPct > 0) {
       const drawdownPct = ((hwm - ev.price) / hwm) * 100;
       if (drawdownPct >= model.trailingDrawdownPct) {
         return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'TRAILING_STOP' };
@@ -178,6 +190,7 @@ function simulateExit(events, entryIdx, model) {
     }
   }
 
+  if (model.maxHoldMs <= 0) return null;
   const pnlPct = last && last.price > 0 ? ((last.price - entryPrice) / entryPrice) * 100 : 0;
   return { exitIdx: Math.max(entryIdx, events.indexOf(last)), exitTs: last.ts, pnlPct, reason: 'TIMEOUT' };
 }
@@ -188,6 +201,10 @@ function makeConfigs() {
     minVolume1mSol: config.activityFlow.minVolume1mSol,
     minRatio1m: config.activityFlow.minRatio1m,
     minTrades1m: config.activityFlow.minTrades1m,
+    rsi1mEnabled: config.activityFlow.rsi1mEnabled,
+    rsi1mPeriod: config.activityFlow.rsi1mPeriod,
+    rsi1mMax: config.activityFlow.rsi1mMax,
+    rsi1mMinBars: config.activityFlow.rsi1mMinBars,
     confirmMinBuyTrades5s: config.activityFlow.confirmMinBuyTrades5s,
     confirmMinUniqueBuyers5s: config.activityFlow.confirmMinUniqueBuyers5s,
     confirmMinRatio5s: config.activityFlow.confirmMinRatio5s,
@@ -260,6 +277,7 @@ function evaluate(cfg, byMint, model) {
   let trades = 0;
   let wins = 0;
   let pnlPctSum = 0;
+  let openPositions = 0;
   const reasons = {};
 
   for (const events of byMint.values()) {
@@ -272,9 +290,13 @@ function evaluate(cfg, byMint, model) {
       const s15 = windowStats(events, i, 15_000);
       const s30 = windowStats(events, i, 30_000);
       const s60 = windowStats(events, i, 60_000);
-      if (!passesEntry(cfg, s5, s15, s30, s60, ev.poolQuoteAfter)) continue;
+      if (!passesEntry(cfg, s5, s15, s30, s60, ev)) continue;
 
       const exit = simulateExit(events, i, model);
+      if (!exit) {
+        openPositions += 1;
+        break;
+      }
       trades += 1;
       if (exit.pnlPct > 0) wins += 1;
       pnlPctSum += exit.pnlPct;
@@ -291,6 +313,7 @@ function evaluate(cfg, byMint, model) {
     pnlPctSum,
     avgPnlPct: trades ? pnlPctSum / trades : 0,
     approxSol: (pnlPctSum / 100) * model.positionSol,
+    openPositions,
     reasons,
   };
 }
@@ -330,12 +353,22 @@ function main() {
     byMint.get(row.mint).push(row);
   }
 
+  for (const [mint, events] of byMint) {
+    const rsi = new RsiCalculator({ period60: config.activityFlow.rsi1mPeriod });
+    for (const event of events) {
+      rsi.feedTick(mint, event.price, event.ts);
+      const snapshot = rsi.snapshot(mint);
+      event.rsi1m = snapshot?.rsi1m ?? null;
+      event.rsi1mBars = snapshot?.bucketCount1m || 0;
+    }
+  }
+
   const model = {
-    takeProfitPct: Number(process.env.BT_TAKE_PROFIT_PCT || config.strategy.takeProfitPct || 200),
-    trailingActivatePct: Number(process.env.BT_TRAILING_ACTIVATE_PCT || config.strategy.trailingActivatePct || 60),
-    trailingDrawdownPct: Number(process.env.BT_TRAILING_DRAWDOWN_PCT || config.strategy.trailingDrawdownPct || 10),
-    stopLossPct: Number(process.env.BT_STOP_LOSS_PCT || -12),
-    maxHoldMs: Number(process.env.BT_MAX_HOLD_MS || 3 * 60 * 1000),
+    takeProfitPct: envNumber('BT_TAKE_PROFIT_PCT', config.strategy.takeProfitPct),
+    trailingActivatePct: envNumber('BT_TRAILING_ACTIVATE_PCT', config.strategy.trailingActivatePct),
+    trailingDrawdownPct: envNumber('BT_TRAILING_DRAWDOWN_PCT', config.strategy.trailingDrawdownPct),
+    stopLossPct: envNumber('BT_STOP_LOSS_PCT', config.strategy.emergencyStopLossPct),
+    maxHoldMs: envNumber('BT_MAX_HOLD_MS', config.strategy.maxHoldMs),
     cooldownMs: Number(process.env.BT_COOLDOWN_MS ?? config.activityFlow.cooldownMs ?? 0),
     positionSol: Number(process.env.BT_POSITION_SOL || config.strategy.positionSizeSol || 1),
     flowExitEnabled: String(process.env.BT_FLOW_EXIT_ENABLED ?? config.strategy.flowReversalExitEnabled ?? 'true').toLowerCase() !== 'false',
@@ -355,6 +388,7 @@ function main() {
       winRate: `${result.winRate.toFixed(1)}%`,
       approxSol: +result.approxSol.toFixed(4),
       avgPct: +result.avgPnlPct.toFixed(2),
+      open: result.openPositions,
       mode: cfg.entryMode,
       vol1m: cfg.minVolume1mSol ? +cfg.minVolume1mSol.toFixed(2) : undefined,
       r1m: cfg.minRatio1m,
@@ -374,7 +408,12 @@ function main() {
     }));
 
   console.log(`Loaded ${rows.length} swap events across ${byMint.size} mints.`);
-  console.log(`Exit model: TP ${model.takeProfitPct}%, trailing ${model.trailingActivatePct}/${model.trailingDrawdownPct}%, flowExit hold>=${Math.round(model.flowExitMinHoldMs / 1000)}s ratio>=${model.flowExitSellBuyRatio} vol>=${model.flowExitMinVolumeSol}SOL, stop ${model.stopLossPct}%, maxHold ${Math.round(model.maxHoldMs / 1000)}s.`);
+  console.log(
+    `Exit model: TP ${model.takeProfitPct}%, trailing ${model.trailingActivatePct}/${model.trailingDrawdownPct}%, ` +
+    `flowExit ${model.flowExitEnabled ? 'enabled' : 'disabled'}, ` +
+    `stop ${model.stopLossPct < 0 ? model.stopLossPct + '%' : 'disabled'}, ` +
+    `maxHold ${model.maxHoldMs > 0 ? Math.round(model.maxHoldMs / 1000) + 's' : 'disabled'}.`,
+  );
   console.table(results);
 }
 

@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const RsiCalculator = require('../src/core/RsiCalculator');
 
 const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
@@ -21,6 +22,10 @@ const FALLBACK = {
     entryMinVolumeUsd: 3000,
     entryMinRatio1m: 1.35,
     entryMinTrades1m: 25,
+    entryRsi1mEnabled: true,
+    entryRsi1mPeriod: 7,
+    entryRsi1mMax: 50,
+    entryRsi1mMinBars: 8,
     entryMinBuyTrades5s: 4,
     entryMinUniqueBuyers5s: 3,
     entryMinRatio5s: 1.10,
@@ -28,14 +33,15 @@ const FALLBACK = {
     entryMaxRise5sPct: 6,
     entryMaxSingleBuyImpactPct: 4,
     minPoolQuoteSol: 30,
+    flowExitEnabled: false,
     flowExitRatio: 1.35,
     flowExitMinVolumeSol: 5,
     flowExitMinHoldMs: 10_000,
-    trailingActivatePct: 60,
+    trailingActivatePct: 40,
     trailingDrawdownPct: 10,
-    takeProfitPct: 200,
-    stopLossPct: -25,
-    maxHoldMs: 30 * MINUTE_MS,
+    takeProfitPct: 100,
+    stopLossPct: 0,
+    maxHoldMs: 0,
     stabilizationMs: 5_000,
     stopLossMinHoldMs: 30_000,
     trailingMinHwmAgeMs: 2_000,
@@ -52,14 +58,9 @@ const PARAM_SPACE = {
   entryMaxBuyerShare5s: [0.35, 0.45, 0.50, 0.60, 0.70, 0.80],
   entryMaxRise5sPct: [3, 4, 5, 6, 8, 10, 12],
   entryMaxSingleBuyImpactPct: [2, 3, 4, 5, 6, 8, 10],
-  flowExitRatio: [1.0, 1.10, 1.20, 1.35, 1.50, 1.75, 2.0],
-  flowExitMinVolumeSol: [1, 2, 3, 5, 8, 10, 15],
-  flowExitMinHoldMs: [0, 5_000, 10_000, 15_000, 30_000],
   trailingActivatePct: [20, 30, 40, 60, 80, 100],
   trailingDrawdownPct: [5, 8, 10, 12, 15, 20],
   takeProfitPct: [50, 80, 100, 150, 200, 250],
-  stopLossPct: [-8, -10, -12, -15, -20, -25],
-  maxHoldMs: [60_000, 120_000, 180_000, 300_000, 600_000, 1_800_000],
 };
 
 function numberOr(value, fallback) {
@@ -182,6 +183,10 @@ function loadRuntime() {
         entryMinVolumeUsd: config.activityFlow.minVolume1mUsd,
         entryMinRatio1m: config.activityFlow.minRatio1m,
         entryMinTrades1m: config.activityFlow.minTrades1m,
+        entryRsi1mEnabled: config.activityFlow.rsi1mEnabled,
+        entryRsi1mPeriod: config.activityFlow.rsi1mPeriod,
+        entryRsi1mMax: config.activityFlow.rsi1mMax,
+        entryRsi1mMinBars: config.activityFlow.rsi1mMinBars,
         entryMinBuyTrades5s: config.activityFlow.confirmMinBuyTrades5s,
         entryMinUniqueBuyers5s: config.activityFlow.confirmMinUniqueBuyers5s,
         entryMinRatio5s: config.activityFlow.confirmMinRatio5s,
@@ -189,6 +194,7 @@ function loadRuntime() {
         entryMaxRise5sPct: config.activityFlow.confirmMaxPriceRise5sPct,
         entryMaxSingleBuyImpactPct: config.activityFlow.confirmMaxSingleBuyImpactPct,
         minPoolQuoteSol: config.activityFlow.minPoolQuoteSol,
+        flowExitEnabled: config.strategy.flowReversalExitEnabled,
         flowExitRatio: config.strategy.flowReversalExitSellBuyRatio1m,
         flowExitMinVolumeSol: config.strategy.flowReversalExitMinVolume1mSol,
         flowExitMinHoldMs: config.strategy.flowReversalExitMinHoldMs,
@@ -339,13 +345,20 @@ function computeWindows(events, windowMs, detailed) {
   return stats;
 }
 
-function prepareMint(events, segmentIndex) {
+function prepareMint(events, segmentIndex, rsi1mPeriod = 7) {
   events.sort((a, b) => (a.ts - b.ts) || (a.id - b.id));
   const buyPrefix = new Float64Array(events.length + 1);
   const sellPrefix = new Float64Array(events.length + 1);
+  const rsi1m = new Float64Array(events.length);
+  const rsi1mBars = new Uint16Array(events.length);
+  const rsi = new RsiCalculator({ period60: rsi1mPeriod });
   for (let i = 0; i < events.length; i += 1) {
     buyPrefix[i + 1] = buyPrefix[i] + (events[i].side === 'BUY' ? events[i].solVolume : 0);
     sellPrefix[i + 1] = sellPrefix[i] + (events[i].side === 'SELL' ? events[i].solVolume : 0);
+    rsi.feedTick(events[i].mint, events[i].price, events[i].ts);
+    const snapshot = rsi.snapshot(events[i].mint);
+    rsi1m[i] = Number.isFinite(snapshot?.rsi1m) ? snapshot.rsi1m : NaN;
+    rsi1mBars[i] = snapshot?.bucketCount1m || 0;
   }
   return {
     mint: events[0].mint,
@@ -355,6 +368,8 @@ function prepareMint(events, segmentIndex) {
     events,
     w5: computeWindows(events, 5_000, true),
     w60: computeWindows(events, 60_000, false),
+    rsi1m,
+    rsi1mBars,
     buyPrefix,
     sellPrefix,
   };
@@ -406,6 +421,7 @@ function prepareRows(rows, prepareOptions = {}) {
     1.01,
     numberOr(prepareOptions.maxConsecutivePriceRatio, FALLBACK.maxConsecutivePriceRatio),
   );
+  const rsi1mPeriod = Math.max(1, Math.floor(numberOr(prepareOptions.rsi1mPeriod, 7)));
   let invalidRows = 0;
   let missingPoolQuote = 0;
   let duplicateSignatures = 0;
@@ -467,7 +483,7 @@ function prepareRows(rows, prepareOptions = {}) {
       affectedMints.add(mint);
     });
     split.segments.forEach((segment, index) => {
-      prepared.set(`${mint}:${index}`, prepareMint(segment, index));
+      prepared.set(`${mint}:${index}`, prepareMint(segment, index, rsi1mPeriod));
     });
   }
   globalTimes.sort((a, b) => a - b);
@@ -510,6 +526,11 @@ function passesEntry(data, idx, candidate, solPriceUsd) {
   if (s60.tradeCount < candidate.entryMinTrades1m) return false;
   if (s60.volumeSol < minVolumeSol) return false;
   if (s60.buySellRatio < candidate.entryMinRatio1m) return false;
+  if (candidate.entryRsi1mEnabled) {
+    const minBars = Math.max(candidate.entryRsi1mPeriod + 1, candidate.entryRsi1mMinBars);
+    if (data.rsi1mBars[idx] < minBars || !Number.isFinite(data.rsi1m[idx])) return false;
+    if (data.rsi1m[idx] >= candidate.entryRsi1mMax) return false;
+  }
   if (s5.buyCount < candidate.entryMinBuyTrades5s) return false;
   if (s5.uniqueBuyers < candidate.entryMinUniqueBuyers5s) return false;
   if (s5.buySellRatio < candidate.entryMinRatio5s) return false;
@@ -560,7 +581,7 @@ function makeTrade(data, entryIdx, exitIdx, reason, candidate, options) {
 function simulateExit(data, entryIdx, splitEnd, candidate, options) {
   const events = data.events;
   const entry = events[entryIdx];
-  const deadline = entry.ts + candidate.maxHoldMs;
+  const deadline = candidate.maxHoldMs > 0 ? entry.ts + candidate.maxHoldMs : Infinity;
   let hwm = entry.price;
   let hwmTs = entry.ts;
   let trailingArmed = false;
@@ -577,7 +598,7 @@ function simulateExit(data, entryIdx, splitEnd, candidate, options) {
     const holdMs = ev.ts - entry.ts;
     const rawPnlPct = ((ev.price - entry.price) / entry.price) * 100;
 
-    if (ev.side === 'SELL' && holdMs >= candidate.flowExitMinHoldMs) {
+    if (candidate.flowExitEnabled && ev.side === 'SELL' && holdMs >= candidate.flowExitMinHoldMs) {
       const st = flowExitStats(data, entryIdx, i);
       if (st.volumeSol >= candidate.flowExitMinVolumeSol && st.sellSol > st.buySol &&
           st.sellBuyRatio >= candidate.flowExitRatio) {
@@ -795,12 +816,17 @@ function envBlock(candidate) {
     'ACTIVITY_FLOW_1M_MIN_VOLUME_SOL=',
     `ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO=${candidate.entryMinRatio1m}`,
     `ACTIVITY_FLOW_1M_MIN_TRADES=${candidate.entryMinTrades1m}`,
+    `ACTIVITY_FLOW_RSI_1M_ENABLED=${candidate.entryRsi1mEnabled}`,
+    `ACTIVITY_FLOW_RSI_1M_PERIOD=${candidate.entryRsi1mPeriod}`,
+    `ACTIVITY_FLOW_RSI_1M_MAX=${candidate.entryRsi1mMax}`,
+    `ACTIVITY_FLOW_RSI_1M_MIN_BARS=${candidate.entryRsi1mMinBars}`,
     `ACTIVITY_FLOW_CONFIRM_MIN_BUY_TRADES_5S=${candidate.entryMinBuyTrades5s}`,
     `ACTIVITY_FLOW_CONFIRM_MIN_UNIQUE_BUYERS_5S=${candidate.entryMinUniqueBuyers5s}`,
     `ACTIVITY_FLOW_CONFIRM_MIN_BUY_SELL_RATIO_5S=${candidate.entryMinRatio5s}`,
     `ACTIVITY_FLOW_CONFIRM_MAX_BUYER_SHARE_5S=${candidate.entryMaxBuyerShare5s}`,
     `ACTIVITY_FLOW_CONFIRM_MAX_PRICE_RISE_5S_PCT=${candidate.entryMaxRise5sPct}`,
     `ACTIVITY_FLOW_CONFIRM_MAX_SINGLE_BUY_IMPACT_PCT=${candidate.entryMaxSingleBuyImpactPct}`,
+    `FLOW_REVERSAL_EXIT_ENABLED=${candidate.flowExitEnabled}`,
     `FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M=${candidate.flowExitRatio}`,
     `FLOW_REVERSAL_EXIT_MIN_VOLUME_1M_SOL=${candidate.flowExitMinVolumeSol}`,
     `FLOW_REVERSAL_EXIT_MIN_HOLD_MS=${candidate.flowExitMinHoldMs}`,
@@ -808,6 +834,7 @@ function envBlock(candidate) {
     `TRAILING_DRAWDOWN_PCT=${candidate.trailingDrawdownPct}`,
     `TAKE_PROFIT_PCT=${candidate.takeProfitPct}`,
     `EMERGENCY_STOP_LOSS_PCT=${candidate.stopLossPct}`,
+    'STABILIZATION_EMERGENCY_DRAWDOWN_PCT=0',
     `MAX_HOLD_MS=${candidate.maxHoldMs}`,
   ].join('\n');
 }
@@ -1139,6 +1166,8 @@ function selfTest() {
     entryMinVolumeUsd: 5,
     entryMinRatio1m: 1.2,
     entryMinTrades1m: 5,
+    entryRsi1mEnabled: false,
+    flowExitEnabled: true,
     flowExitMinVolumeSol: 5,
     flowExitMinHoldMs: 5_000,
     stabilizationMs: 0,
@@ -1245,6 +1274,7 @@ function main() {
   const preparedRows = prepareRows(rows, {
     maxConsecutivePriceRatio:
       args.maxPriceJumpRatio ?? runtime.maxConsecutivePriceRatio ?? FALLBACK.maxConsecutivePriceRatio,
+    rsi1mPeriod: runtime.baseline.entryRsi1mPeriod,
   });
   if (preparedRows.quality.validRows === 0) throw new Error('No valid swap events after data-quality checks.');
   console.log(
