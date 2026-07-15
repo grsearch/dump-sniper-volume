@@ -19,7 +19,7 @@ const { getMonitor } = require('../monitor/HealthMonitor');
 const { fetchTokenMarketOnly, fetchTokenFullInfo } = require('../utils/tokenMeta');
 
 const monitor = getMonitor();
-monitor.registerModule('TokenWatchdog', { staleMs: 1_800_000, label: 'Token Watchdog' });
+monitor.registerModule('TokenWatchdog', { staleMs: 300_000, label: 'Token Watchdog' });
 
 class TokenWatchdog {
   /**
@@ -57,6 +57,16 @@ class TokenWatchdog {
 
     this._pendingExitMints = new Set();
     this._checkInterval = null;
+    this._checking = false;
+    this._lastFdvCheckAt = new Map();
+    this.checkIntervalMs = Math.max(
+      10_000,
+      parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '60000', 10),
+    );
+    this.lpRefreshConcurrency = Math.max(
+      1,
+      parseInt(process.env.WATCHDOG_LP_REFRESH_CONCURRENCY || '5', 10),
+    );
 
     // v3.17.13: Birdeye 熔断 — 连续失败后跳过调用，避免 _check 卡死
     this._birdeyeConsecutiveFails = 0;
@@ -68,7 +78,7 @@ class TokenWatchdog {
     this.noBuyRemoveMs = parseInt(process.env.NO_BUY_REMOVE_MS || '86400000', 10); // 默认 24h
     this.tradeLogger = tradeLogger || null; // v3.17.41: 从参数注入
 
-    const features = [];
+    const features = [`checkEvery=${this.checkIntervalMs / 60_000}min`];
     if (this.maxWatchDurationMs > 0) features.push(`maxWatch=${this.maxWatchDurationMs / 60000}min`);
     if (this.minFdVUsd > 0) features.push(`minFDV=$${this.minFdVUsd}`);
     if (this.maxFdVUsd > 0) features.push(`maxFDV=$${this.maxFdVUsd}`);
@@ -84,19 +94,29 @@ class TokenWatchdog {
   start() {
     if (this.maxWatchDurationMs <= 0 && this.minFdVUsd <= 0 && this.maxFdVUsd <= 0 && this.minLpSol <= 0 && this.minVolume24hUsd <= 0 && this.noBuyRemoveMs <= 0 && this.maxTokenAgeMs <= 0) return;
 
-    this._checkInterval = setInterval(() => {
-      this._check().catch((err) => {
-        monitor.recordError('TokenWatchdog', err, { phase: 'check' });
-        console.error(`[TokenWatchdog] check error: ${err.message}`);
-      });
-    }, parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '900000', 10));
+    this._checkInterval = setInterval(() => this._runCheck(), this.checkIntervalMs);
 
     // 首次检查延迟 10 秒
     setTimeout(() => {
-      this._check().catch((err) => {
-        console.error(`[TokenWatchdog] initial check error: ${err.message}`);
-      });
+      this._runCheck();
     }, 10_000);
+  }
+
+  async _runCheck() {
+    if (this._checking) {
+      monitor.beat('TokenWatchdog', 'check:overlap_skipped');
+      monitor.inc('TokenWatchdog.overlapSkipped', 1, 'TokenWatchdog');
+      return;
+    }
+    this._checking = true;
+    try {
+      await this._check();
+    } catch (err) {
+      monitor.recordError('TokenWatchdog', err, { phase: 'check' });
+      console.error(`[TokenWatchdog] check error: ${err.message}`);
+    } finally {
+      this._checking = false;
+    }
   }
 
   stop() {
@@ -112,8 +132,11 @@ class TokenWatchdog {
   _getPoolQuoteSol(token) {
     if (!this.poolStateCache || !token.pool_address) return null;
     const cached = this.poolStateCache.get(token.pool_address);
-    if (!cached || !cached.state) return null;
-    const state = cached.state;
+    return this._poolQuoteSolFromState(cached);
+  }
+
+  _poolQuoteSolFromState(state) {
+    if (!state) return null;
     // Pump AMM SDK swapSolanaState 返回 poolQuoteAmount (lamports BN)
     const lamports = state.poolQuoteAmount;
     if (lamports == null) return null;
@@ -122,10 +145,44 @@ class TokenWatchdog {
     return val / 1e9; // lamports → SOL
   }
 
+  async _refreshPoolQuotes(tokens) {
+    const quotes = new Map();
+    if (this.minLpSol <= 0 || !this.poolStateCache) return quotes;
+
+    const targets = tokens.filter((token) => token.pool_address);
+    if (targets.length === 0) return quotes;
+
+    let cursor = 0;
+    let refreshed = 0;
+    let unavailable = 0;
+    const worker = async () => {
+      while (cursor < targets.length) {
+        const token = targets[cursor++];
+        const state = await this.poolStateCache.refreshOne(token.pool_address);
+        const poolSol = this._poolQuoteSolFromState(
+          state || this.poolStateCache.get(token.pool_address),
+        );
+        if (poolSol == null) {
+          unavailable++;
+          continue;
+        }
+        quotes.set(token.mint, poolSol);
+        refreshed++;
+      }
+    };
+
+    const workerCount = Math.min(this.lpRefreshConcurrency, targets.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    monitor.set('TokenWatchdog.lpRefreshed', refreshed, 'TokenWatchdog');
+    monitor.set('TokenWatchdog.lpUnavailable', unavailable, 'TokenWatchdog');
+    return quotes;
+  }
+
   async _check() {
     monitor.beat('TokenWatchdog', 'check');
     const now = Date.now();
     const activeTokens = this.tokenRegistry.listActive();
+    const poolQuoteByMint = await this._refreshPoolQuotes(activeTokens);
     let removed = 0;
     let fdvRefreshed = 0;
 
@@ -142,7 +199,9 @@ class TokenWatchdog {
 
       // 2) LP 下限（链上 PoolStateCache，秒级，不依赖 Birdeye）
       //    优先用链上数据，比 Birdeye 快得多且更准确
-      const poolSol = this._getPoolQuoteSol(token);
+      const poolSol = poolQuoteByMint.has(token.mint)
+        ? poolQuoteByMint.get(token.mint)
+        : this._getPoolQuoteSol(token);
       let latestLp = token.liquidity;
       if (poolSol != null) latestLp = poolSol;
 
@@ -155,18 +214,17 @@ class TokenWatchdog {
       // 3) FDV 下限（Birdeye，USD）— 只对有仓位的代币查 FDV，减少 API 调用
       let fdv = token.fdv;
       let birdeyeFailed = false;
-      const hasPosition = this.positionManager.hasOpenPosition(token.mint);
-      // v3.22: 分层FDV检查频率省birdeye API
-      // 有仓位: 15min（FDV异常可能需要提前退出）
-      // 无仓位: 1h（只需维持监控状态，很多代币几天才1次交易机会）
-      const fdvCooldownMs = hasPosition ? 900_000 : 3_600_000;
-      const needFdVCheck = this.minFdVUsd > 0 && (
-        (fdv == null || fdv === 0 || (now - (token.updated_at || 0)) > fdvCooldownMs)
-      );
+      // FDV uses its own timestamp because token.updated_at is also changed by
+      // pool and metadata writes. Both positioned and unpositioned tokens are
+      // refreshed at the configured one-minute watchdog cadence.
+      const lastFdvCheckAt = this._lastFdvCheckAt.get(token.mint) || 0;
+      const fdvFilterEnabled = this.minFdVUsd > 0 || this.maxFdVUsd > 0;
+      const needFdVCheck = fdvFilterEnabled && now - lastFdvCheckAt >= this.checkIntervalMs;
 
       const birdeyeAvailable = !this._birdeyeCircuitOpen || Date.now() >= this._birdeyeCircuitOpenUntil;
 
       if (needFdVCheck && birdeyeAvailable) {
+        this._lastFdvCheckAt.set(token.mint, now);
         try {
           const freshInfo = await fetchTokenMarketOnly(token.mint);
           if (freshInfo._birdeyeError) {
@@ -291,6 +349,7 @@ class TokenWatchdog {
       console.log(`[TokenWatchdog] 🗑️ REMOVE ${symbol}: ${reasonStr}`);
       this.tokenRegistry.removeToken(token.mint);
       this._pendingExitMints.delete(token.mint);
+      this._lastFdvCheckAt.delete(token.mint);
       removed++;
 
       if (this.onTokenRemoved) this.onTokenRemoved();

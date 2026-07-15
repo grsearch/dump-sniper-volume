@@ -25,6 +25,10 @@ const monitor = getMonitor();
 
 async function main() {
   const maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '14400000', 10);
+  const watchdogCheckIntervalMs = parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '60000', 10);
+  const watchdogFdvRange = config.strategy.maxFdVUsd > 0
+    ? `$${config.strategy.minFdVUsd}-$${config.strategy.maxFdVUsd}`
+    : `>=$${config.strategy.minFdVUsd}`;
   console.log('================================================');
   console.log('🎯 Dump Sniper V3.17.20 starting...');
   console.log(`Mode: ${config.DRY_RUN ? 'DRY_RUN' : '⚠️  LIVE TRADING ⚠️'}`);
@@ -51,8 +55,9 @@ async function main() {
     : 'Flow exit: disabled');
   console.log(`Legacy dumpSignal: ${config.activityFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
   console.log(
-    `Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL, ` +
-      `maxAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 3_600_000) + 'h' : 'disabled'} (15min check)`,
+    `Watchdog: FDV=${watchdogFdvRange}, LP>=${config.strategy.minLpSol} SOL, ` +
+      `maxAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 3_600_000) + 'h' : 'disabled'} ` +
+      `(check every ${watchdogCheckIntervalMs / 60_000}min)`,
   );
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct < 0 ? config.strategy.emergencyStopLossPct + '%' : 'disabled'}`);
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);

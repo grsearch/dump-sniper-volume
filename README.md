@@ -7,7 +7,7 @@ The service discovers successful Pump.fun graduations without a webhook:
 - Helius WebSocket logs provide the low-latency path; the migration wallet is polled every 5 seconds to fill gaps.
 - A transaction is accepted only when it contains the official Pump `migrate` discriminator and targets the official PumpSwap program.
 - Mint, pool, vaults, chain `blockTime`, slot, and signature are read from the confirmed transaction and saved in `tokens`.
-- Default admission requires FDV `$30,000-$1,000,000`, liquidity at least `$5,000`, revoked mint/freeze authorities, and creation age no more than 4 hours.
+- Default admission requires FDV `$20,000-$1,000,000`, liquidity at least `$5,000`, revoked mint/freeze authorities, and creation age no more than 4 hours.
 - Discovery does not require 24-hour volume because newly migrated market data is incomplete. `TokenWatchdog` still applies its periodic filters afterward.
 - Passing discovery only adds the token to monitoring. The Activity Flow buy strategy remains unchanged.
 
@@ -49,9 +49,9 @@ Legacy dumpSignal: suppressed
 
 ## 监控列表过滤
 
-TokenWatchdog 默认每 15 分钟巡检一次：
+TokenWatchdog 默认每 1 分钟巡检一次 FDV 和 LP：
 
-- FDV 必须在 `$30,000 ~ $1,000,000`
+- FDV 必须在 `$20,000 ~ $1,000,000`
 - 24h 交易量必须 `>= $5,000`
 - 创建时间超过 `4h` 的代币会从监控列表移除；已有持仓会保留监控直到平仓
 - 监控列表上限默认 `500` 个；只有新增代币后超过该上限才会触发驱逐
@@ -127,6 +127,9 @@ MAX_HOLD_MS=0
 
 REBUY_COOLDOWN_MS=0
 TOKEN_MAX_AGE_MS=0
+MIN_FDV_USD=20000
+MAX_FDV_USD=1000000
+WATCHDOG_CHECK_INTERVAL_MS=60000
 MAX_TOKEN_AGE_MS=14400000
 MAX_MINT_AGE_HOURS=0
 NEW_COIN_AGE_THRESHOLD_MS=0

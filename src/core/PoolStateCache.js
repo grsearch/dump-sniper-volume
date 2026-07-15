@@ -236,17 +236,19 @@ class PoolStateCache {
    * 不阻塞调用方；后台异步刷新。如果该 pool 0.5s 内已经刷过则跳过。
    */
   async refreshOne(poolAddress) {
-    if (!this.onlineSdk || !this.user || !poolAddress) return;
+    if (!this.onlineSdk || !this.user || !poolAddress) return null;
     const cached = this.cache.get(poolAddress);
-    if (cached && Date.now() - cached.fetchedAt < 500) return;
+    if (cached && Date.now() - cached.fetchedAt < 500) return cached.state;
     try {
       const state = await this._fetchPoolState(poolAddress);
       if (state) {
         this.cache.set(poolAddress, { state, fetchedAt: Date.now() });
         monitor.inc('PoolStateCache.refreshOneOk', 1, 'PoolStateCache');
       }
+      return state || null;
     } catch (err) {
       monitor.inc('PoolStateCache.refreshOneFail', 1, 'PoolStateCache');
+      return null;
     }
   }
 

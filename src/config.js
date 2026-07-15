@@ -191,9 +191,8 @@ const config = {
     // v3.17.13: 代币监控超时（毫秒），0 = 禁用
     //   v3.17.20: 用户明确不要"监控超时退出"（不要 6 小时到期退出），保持 0
     maxWatchDurationMs: parseInt(process.env.MAX_WATCH_DURATION_MS || '0', 10),
-    // v3.17.20: FDV 下限（USD），低于此值自动移除监控（默认开启 $20,000）
-    //   Birdeye fdv 字段是 USD 计价。15 分钟巡检一次（见 TokenWatchdog）
-    minFdVUsd: parseFloat(process.env.MIN_FDV_USD || '30000'),
+    // v3.17.20: FDV lower bound in USD; refreshed once per minute by TokenWatchdog.
+    minFdVUsd: parseFloat(process.env.MIN_FDV_USD || '20000'),
     // v3.17.20: LP 下限（SOL），低于此值自动移除监控（默认开启 5000 SOL）
     //   用链上池子 quote vault 的实际 SOL 余额，不依赖 Birdeye（新币数据不准）
     minLpSol: parseFloat(process.env.MIN_LP_SOL || '0'),
@@ -396,7 +395,7 @@ const config = {
     marketRetries: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRIES || '8', 10),
     marketRetryMs: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRY_MS || '3000', 10),
     maxConcurrentChecks: parseInt(process.env.PUMP_DISCOVERY_MAX_CONCURRENT_CHECKS || '3', 10),
-    minFdvUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_FDV_USD || process.env.MIN_FDV_USD || '30000'),
+    minFdvUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_FDV_USD || process.env.MIN_FDV_USD || '20000'),
     maxFdvUsd: parseFloat(process.env.PUMP_DISCOVERY_MAX_FDV_USD || process.env.MAX_FDV_USD || '1000000'),
     minLiquidityUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_LIQUIDITY_USD || '5000'),
     minVolume24hUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_VOLUME_24H_USD || '0'),
