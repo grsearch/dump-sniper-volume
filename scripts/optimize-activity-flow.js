@@ -16,6 +16,7 @@ const FALLBACK = {
   positionSol: 1,
   costBps: 100,
   priorityFeeSol: 0.0005,
+  maxConsecutivePriceRatio: 20,
   baseline: {
     entryMinVolumeUsd: 3000,
     entryMinRatio1m: 1.35,
@@ -72,7 +73,7 @@ function parseArgs(argv) {
     iterations: 1200,
     top: 10,
     minTrades: 8,
-    minTestTrades: 5,
+    minTestTrades: 30,
     seed: 20260715,
     costBps: null,
     priorityFeeSol: null,
@@ -80,6 +81,7 @@ function parseArgs(argv) {
     positionSol: null,
     dbPath: null,
     reportsDir: null,
+    maxPriceJumpRatio: null,
     selfTest: false,
     help: false,
   };
@@ -96,6 +98,7 @@ function parseArgs(argv) {
     '--position-sol': 'positionSol',
     '--db': 'dbPath',
     '--reports-dir': 'reportsDir',
+    '--max-price-jump-ratio': 'maxPriceJumpRatio',
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -137,13 +140,14 @@ Options:
   --iterations N           Random parameter candidates (default 1200)
   --top N                  Candidates written to reports (default 10)
   --min-trades N           Minimum train/validation trades (default 8)
-  --min-test-trades N      Minimum test trades for a robust verdict (default 5)
+  --min-test-trades N      Minimum test trades for a robust verdict (default 30)
   --cost-bps N             Execution cost per side, including slippage (default 100)
   --priority-fee-sol N     Fixed priority fee per transaction (default 0.0005)
   --sol-price-usd N        SOL/USD used for the USD volume threshold
   --position-sol N         Position size used for PnL in SOL
   --db PATH                SQLite database path
   --reports-dir PATH       Output directory
+  --max-price-jump-ratio N Split a mint when adjacent price units differ by this ratio (default 20)
   --seed N                 Deterministic random seed
   --self-test              Run synthetic tests without reading the database
 `);
@@ -170,6 +174,10 @@ function loadRuntime() {
       positionSol: config.strategy.positionSizeSol,
       costBps: numberOr(process.env.BT_EXECUTION_COST_BPS, FALLBACK.costBps),
       priorityFeeSol: priorityLamports / 1e9,
+      maxConsecutivePriceRatio: numberOr(
+        process.env.BT_MAX_CONSECUTIVE_PRICE_RATIO,
+        FALLBACK.maxConsecutivePriceRatio,
+      ),
       baseline: {
         entryMinVolumeUsd: config.activityFlow.minVolume1mUsd,
         entryMinRatio1m: config.activityFlow.minRatio1m,
@@ -331,7 +339,7 @@ function computeWindows(events, windowMs, detailed) {
   return stats;
 }
 
-function prepareMint(events) {
+function prepareMint(events, segmentIndex) {
   events.sort((a, b) => (a.ts - b.ts) || (a.id - b.id));
   const buyPrefix = new Float64Array(events.length + 1);
   const sellPrefix = new Float64Array(events.length + 1);
@@ -340,6 +348,10 @@ function prepareMint(events) {
     sellPrefix[i + 1] = sellPrefix[i] + (events[i].side === 'SELL' ? events[i].solVolume : 0);
   }
   return {
+    mint: events[0].mint,
+    segmentIndex,
+    startTs: events[0].ts,
+    endTs: events[events.length - 1].ts,
     events,
     w5: computeWindows(events, 5_000, true),
     w60: computeWindows(events, 60_000, false),
@@ -348,8 +360,52 @@ function prepareMint(events) {
   };
 }
 
-function prepareRows(rows) {
+function symmetricPriceRatio(a, b) {
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return Infinity;
+  return Math.max(a / b, b / a);
+}
+
+function splitMintEvents(events, maxConsecutivePriceRatio) {
+  events.sort((a, b) => (a.ts - b.ts) || (a.id - b.id));
+  const segments = [];
+  const boundaries = [];
+  let current = [];
+
+  for (const ev of events) {
+    const prev = current[current.length - 1];
+    let poolChanged = false;
+    let priceJumped = false;
+    let continuityRatio = 1;
+    if (prev) {
+      poolChanged = Boolean(
+        prev.poolAddress && ev.poolAddress && prev.poolAddress !== ev.poolAddress,
+      );
+      const continuityPrice = ev.priceBefore && ev.priceBefore > 0 ? ev.priceBefore : ev.price;
+      continuityRatio = symmetricPriceRatio(prev.price, continuityPrice);
+      priceJumped = continuityRatio > maxConsecutivePriceRatio;
+    }
+    if (prev && (poolChanged || priceJumped)) {
+      segments.push(current);
+      boundaries.push({
+        ts: ev.ts,
+        poolChanged,
+        priceJumped,
+        continuityRatio,
+      });
+      current = [];
+    }
+    current.push(ev);
+  }
+  if (current.length > 0) segments.push(current);
+  return { segments, boundaries };
+}
+
+function prepareRows(rows, prepareOptions = {}) {
   const byMint = new Map();
+  const maxConsecutivePriceRatio = Math.max(
+    1.01,
+    numberOr(prepareOptions.maxConsecutivePriceRatio, FALLBACK.maxConsecutivePriceRatio),
+  );
   let invalidRows = 0;
   let missingPoolQuote = 0;
   let duplicateSignatures = 0;
@@ -391,6 +447,7 @@ function prepareRows(rows) {
       priceBefore: Number.isFinite(priceBefore) ? priceBefore : null,
       priceChangePct,
       poolQuoteAfter: Number.isFinite(poolQuoteAfter) && poolQuoteAfter > 0 ? poolQuoteAfter : null,
+      poolAddress: row.poolAddress || null,
       ts,
     };
     if (!byMint.has(ev.mint)) byMint.set(ev.mint, []);
@@ -399,7 +456,20 @@ function prepareRows(rows) {
   }
 
   const prepared = new Map();
-  for (const [mint, events] of byMint) prepared.set(mint, prepareMint(events));
+  let priceJumpBoundaries = 0;
+  let poolChangeBoundaries = 0;
+  const affectedMints = new Set();
+  for (const [mint, events] of byMint) {
+    const split = splitMintEvents(events, maxConsecutivePriceRatio);
+    split.boundaries.forEach((boundary) => {
+      if (boundary.priceJumped) priceJumpBoundaries += 1;
+      if (boundary.poolChanged) poolChangeBoundaries += 1;
+      affectedMints.add(mint);
+    });
+    split.segments.forEach((segment, index) => {
+      prepared.set(`${mint}:${index}`, prepareMint(segment, index));
+    });
+  }
   globalTimes.sort((a, b) => a - b);
   let gapCount = 0;
   let maxGapMs = 0;
@@ -414,7 +484,12 @@ function prepareRows(rows) {
       rawRows: rows.length,
       validRows: globalTimes.length,
       invalidRows,
-      mints: prepared.size,
+      mints: byMint.size,
+      segments: prepared.size,
+      priceJumpBoundaries,
+      poolChangeBoundaries,
+      affectedMints: [...affectedMints].sort(),
+      maxConsecutivePriceRatio,
       missingPoolQuote,
       duplicateSignatures,
       startTs: globalTimes[0] || 0,
@@ -478,6 +553,7 @@ function makeTrade(data, entryIdx, exitIdx, reason, candidate, options) {
     netSol,
     reason,
     candidateId: candidate.id,
+    segmentIndex: data.segmentIndex,
   };
 }
 
@@ -606,7 +682,11 @@ function summarizeTrades(trades, openPositions, minTrades) {
 function evaluateCandidate(prepared, split, candidate, options) {
   const trades = [];
   let openPositions = 0;
-  for (const data of prepared.values()) {
+  const blockedMints = new Set();
+  const streams = [...prepared.values()].sort((a, b) =>
+    a.mint.localeCompare(b.mint) || (a.startTs - b.startTs) || (a.segmentIndex - b.segmentIndex));
+  for (const data of streams) {
+    if (blockedMints.has(data.mint)) continue;
     const events = data.events;
     let i = lowerBound(events, split.start);
     while (i < events.length && events[i].ts < split.end) {
@@ -617,6 +697,7 @@ function evaluateCandidate(prepared, split, candidate, options) {
       const trade = simulateExit(data, i, split.end, candidate, options);
       if (!trade) {
         openPositions += 1;
+        blockedMints.add(data.mint);
         break;
       }
       trades.push(trade);
@@ -648,10 +729,19 @@ function makeSplits(startTs, endTs) {
 function bootstrapNetSol(trades, seed, samples = 500) {
   if (trades.length === 0) return { p05: 0, p50: 0, p95: 0 };
   const random = mulberry32(seed ^ 0xA5A5A5A5);
+  const byMint = new Map();
+  for (const trade of trades) {
+    if (!byMint.has(trade.mint)) byMint.set(trade.mint, []);
+    byMint.get(trade.mint).push(trade);
+  }
+  const mintGroups = [...byMint.values()];
   const totals = [];
   for (let sample = 0; sample < samples; sample += 1) {
     let total = 0;
-    for (let i = 0; i < trades.length; i += 1) total += trades[Math.floor(random() * trades.length)].netSol;
+    for (let i = 0; i < mintGroups.length; i += 1) {
+      const group = mintGroups[Math.floor(random() * mintGroups.length)];
+      total += group.reduce((sum, trade) => sum + trade.netSol, 0);
+    }
     totals.push(total);
   }
   totals.sort((a, b) => a - b);
@@ -743,6 +833,7 @@ function writeReports(output, runtime, args) {
   const base = `activity-flow-optimizer-${stamp}`;
   const jsonPath = path.join(dir, `${base}.json`);
   const csvPath = path.join(dir, `${base}.csv`);
+  const tradesCsvPath = path.join(dir, `${base}.trades.csv`);
   const mdPath = path.join(dir, `${base}.md`);
   const envPath = path.join(dir, `${base}.recommended.env`);
 
@@ -769,6 +860,15 @@ function writeReports(output, runtime, args) {
     ];
   });
   fs.writeFileSync(csvPath, [csvHeaders, ...csvRows].map((row) => row.map(csvEscape).join(',')).join('\n'));
+  const tradeHeaders = [
+    'mint', 'symbol', 'segmentIndex', 'entryTs', 'exitTs', 'holdMs', 'entryPrice', 'exitPrice',
+    'rawPnlPct', 'netPnlPct', 'netSol', 'reason',
+  ];
+  const tradeRows = output.recommended.testTradeRows.map((trade) => tradeHeaders.map((key) => trade[key]));
+  fs.writeFileSync(
+    tradesCsvPath,
+    [tradeHeaders, ...tradeRows].map((row) => row.map(csvEscape).join(',')).join('\n'),
+  );
   fs.writeFileSync(envPath, envBlock(output.recommended.candidate) + '\n');
 
   const q = output.dataQuality;
@@ -813,6 +913,9 @@ ${warnings}
 - Range: ${formatDate(q.startTs)} to ${formatDate(q.endTs)} (${round(q.spanHours, 2)} hours)
 - Rows: ${q.validRows} valid / ${q.rawRows} total
 - Mints: ${q.mints}
+- Price-continuous segments: ${q.segments}
+- Affected mints: ${q.affectedMints.length}; price-jump boundaries: ${q.priceJumpBoundaries}; pool-change boundaries: ${q.poolChangeBoundaries}
+- Maximum allowed adjacent price-unit ratio: ${q.maxConsecutivePriceRatio}x
 - Invalid rows: ${q.invalidRows}
 - Missing pool quote: ${q.missingPoolQuote}
 - Duplicate signature+mint+side: ${q.duplicateSignatures}
@@ -823,6 +926,7 @@ ${warnings}
 - Chronological split: 60% train, 20% validation, 20% untouched test.
 - Candidates: ${output.candidateCount}; deterministic seed ${args.seed}.
 - Selection: train shortlist, then validation winner. Test metrics were not used to select the winner.
+- A mint is split when its pool changes or adjacent price units differ by more than ${q.maxConsecutivePriceRatio}x; windows and positions cannot cross the boundary.
 - Execution cost: ${output.options.costBps} bps per side plus ${output.options.priorityFeeSol} SOL per transaction.
 - Position size: ${output.options.positionSol} SOL.
 
@@ -845,7 +949,9 @@ This is the validation winner, not the best-looking test result.
 ${envBlock(output.recommended.candidate)}
 \`\`\`
 
-Test bootstrap net SOL interval: p05=${round(output.bootstrap.p05, 4)}, p50=${round(output.bootstrap.p50, 4)}, p95=${round(output.bootstrap.p95, 4)}.
+Mint-clustered test bootstrap net SOL interval: p05=${round(output.bootstrap.p05, 4)}, p50=${round(output.bootstrap.p50, 4)}, p95=${round(output.bootstrap.p95, 4)}.
+
+The recommended candidate's untouched-test trades are written to \`${path.basename(tradesCsvPath)}\` for audit.
 
 ## Cost stress on untouched test
 
@@ -863,7 +969,7 @@ ${markdownTable(['fold', 'trades', 'net SOL', 'profit factor', 'max DD SOL'], fo
 - Do not deploy a recommendation until the test set and several chronological folds remain profitable after costs.
 `;
   fs.writeFileSync(mdPath, markdown);
-  return { mdPath, csvPath, jsonPath, envPath };
+  return { mdPath, csvPath, tradesCsvPath, jsonPath, envPath };
 }
 
 function stripTrades(result) {
@@ -883,7 +989,7 @@ function loadRows(dbPath, sinceTs) {
     return db.prepare(`
       SELECT id, mint, symbol, signer, side, sol_volume AS solVolume, price,
              price_before AS priceBefore, price_change_pct AS priceChangePct,
-             ts, signature, pool_quote_after AS poolQuoteAfter
+             ts, signature, pool_address AS poolAddress, pool_quote_after AS poolQuoteAfter
       FROM swap_events
       WHERE ts >= ?
       ORDER BY mint, ts, id
@@ -961,9 +1067,22 @@ function optimize(preparedRows, runtime, args) {
   if (quality.missingPoolQuote / Math.max(quality.validRows, 1) > 0.20) {
     warnings.push('More than 20% of swaps have no pool quote and cannot pass the live liquidity guard.');
   }
+  if (quality.affectedMints.length > 0) {
+    warnings.push(
+      `${quality.affectedMints.length} mints were split at ${quality.priceJumpBoundaries} price-jump ` +
+      `and ${quality.poolChangeBoundaries} pool-change boundaries; trades cannot cross them.`,
+    );
+  }
+  if (recommended.test.topMintShare > 0.50) {
+    warnings.push(
+      `Profitable test PnL is concentrated: the top mint contributes ` +
+      `${round(recommended.test.topMintShare * 100, 1)}%.`,
+    );
+  }
   const robust = quality.spanHours >= 72 && quality.validRows >= 10_000 &&
     recommended.validation.netSol > 0 && recommended.test.netSol > 0 &&
-    recommended.test.trades >= args.minTestTrades && positiveFolds >= 3 && bootstrap.p05 > 0;
+    recommended.test.trades >= args.minTestTrades && recommended.test.profitFactor > 1 &&
+    recommended.test.topMintShare <= 0.50 && positiveFolds >= 3 && bootstrap.p05 > 0;
 
   return {
     generatedAt: Date.now(),
@@ -990,6 +1109,7 @@ function optimize(preparedRows, runtime, args) {
       train: stripTrades(recommended.train),
       validation: stripTrades(recommended.validation),
       test: stripTrades(recommended.test),
+      testTradeRows: recommended.test.tradeRows,
     },
     costStress: costStress.map((item) => ({ costBps: item.costBps, metrics: stripTrades(item.metrics) })),
     walkForward: walkForward.map(stripTrades),
@@ -1035,6 +1155,29 @@ function selfTest() {
   assert.strictEqual(result.reasons.FLOW_REVERSAL_EXIT, 1, 'healthy flow should use flow reversal exit');
   assert.strictEqual(result.tradeRows[0].mint, 'HEALTHY', 'spike mint must be rejected');
 
+  const migrationRows = [
+    { id: 20, mint: 'MIGRATION', signer: 'S1', side: 'SELL', solVolume: 2, price: 1e-12, priceBefore: 1e-12, priceChangePct: 0, poolQuoteAfter: 100, poolAddress: 'CURVE', ts: base },
+    { id: 21, mint: 'MIGRATION', signer: 'B1', side: 'BUY', solVolume: 2, price: 1.01e-12, priceBefore: 1e-12, priceChangePct: 1, poolQuoteAfter: 100, poolAddress: 'CURVE', ts: base + 500 },
+    { id: 22, mint: 'MIGRATION', signer: 'B2', side: 'BUY', solVolume: 2, price: 1.02e-12, priceBefore: 1.01e-12, priceChangePct: 0.99, poolQuoteAfter: 100, poolAddress: 'CURVE', ts: base + 1000 },
+    { id: 23, mint: 'MIGRATION', signer: 'B3', side: 'BUY', solVolume: 2, price: 1.03e-12, priceBefore: 1.02e-12, priceChangePct: 0.98, poolQuoteAfter: 100, poolAddress: 'CURVE', ts: base + 1500 },
+    { id: 24, mint: 'MIGRATION', signer: 'B4', side: 'BUY', solVolume: 2, price: 1.04e-12, priceBefore: 1.03e-12, priceChangePct: 0.97, poolQuoteAfter: 100, poolAddress: 'CURVE', ts: base + 2000 },
+    { id: 25, mint: 'MIGRATION', signer: 'B5', side: 'BUY', solVolume: 2, price: 1, priceBefore: 0.99, priceChangePct: 1.01, poolQuoteAfter: 100, poolAddress: 'AMM', ts: base + 2500 },
+    { id: 26, mint: 'MIGRATION', signer: 'S2', side: 'SELL', solVolume: 8, price: 0.95, priceBefore: 1, priceChangePct: -5, poolQuoteAfter: 100, poolAddress: 'AMM', ts: base + 12_000 },
+  ];
+  const migrationPrepared = prepareRows(migrationRows, { maxConsecutivePriceRatio: 20 });
+  assert.strictEqual(migrationPrepared.quality.segments, 2, 'pool migration should create two price-continuous segments');
+  assert.strictEqual(migrationPrepared.quality.priceJumpBoundaries, 1, 'migration price-unit jump should be reported');
+  assert.strictEqual(migrationPrepared.quality.poolChangeBoundaries, 1, 'migration pool change should be reported');
+  const migrationResult = evaluateCandidate(migrationPrepared.prepared, split, candidate, {
+    solPriceUsd: 1,
+    positionSol: 1,
+    costBps: 0,
+    priorityFeeSol: 0,
+    minTrades: 1,
+  });
+  assert.strictEqual(migrationResult.trades, 0, 'a simulated position must not cross a migration boundary');
+  assert.strictEqual(migrationResult.openPositions, 1, 'an unresolved pre-migration position must be disclosed');
+
   const repeated = [];
   let id = 100;
   for (let episode = 0; episode < 24; episode += 1) {
@@ -1074,6 +1217,7 @@ function selfTest() {
     );
     assert.ok(fs.existsSync(files.mdPath), 'markdown report should be written');
     assert.ok(fs.existsSync(files.csvPath), 'CSV report should be written');
+    assert.ok(fs.existsSync(files.tradesCsvPath), 'trade audit CSV should be written');
     assert.ok(fs.existsSync(files.jsonPath), 'JSON report should be written');
     assert.ok(fs.existsSync(files.envPath), 'recommended env file should be written');
   } finally {
@@ -1098,7 +1242,10 @@ function main() {
   console.log(`Loading swap_events from ${dbPath}...`);
   const rows = loadRows(dbPath, sinceTs);
   if (rows.length === 0) throw new Error('No swap_events found in the requested time range.');
-  const preparedRows = prepareRows(rows);
+  const preparedRows = prepareRows(rows, {
+    maxConsecutivePriceRatio:
+      args.maxPriceJumpRatio ?? runtime.maxConsecutivePriceRatio ?? FALLBACK.maxConsecutivePriceRatio,
+  });
   if (preparedRows.quality.validRows === 0) throw new Error('No valid swap events after data-quality checks.');
   console.log(
     `Loaded ${preparedRows.quality.validRows} valid events across ${preparedRows.quality.mints} mints ` +
@@ -1134,6 +1281,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  bootstrapNetSol,
   computeWindows,
   evaluateCandidate,
   generateCandidates,
@@ -1142,4 +1290,6 @@ module.exports = {
   passesEntry,
   prepareRows,
   selfTest,
+  splitMintEvents,
+  writeReports,
 };

@@ -57,15 +57,17 @@ npm run optimize:activity -- --hours 168 --iterations 2000
 优化器会：
 
 - 按时间顺序把数据切成 `60%` 训练、`20%` 验证、`20%` 隔离测试，测试集不参与参数选择。
+- 按池地址和价格连续性拆分交易片段，防止 bonding curve 迁移到 AMM 时价格口径跳变产生虚假巨额收益。
 - 搜索 1 分钟成交量/买卖比/交易数、5 秒买盘质量、反转卖出、移动止盈、固定止盈和止损阈值。
 - 默认按每边 `1%` 执行成本及每笔 `0.0005 SOL` 优先费计算，并额外输出每边 `0.5% / 1% / 2%` 成本压力测试。
-- 输出 Markdown、CSV、JSON 和一份候选 `.env` 到 `reports/`，但不会修改线上 `.env`、重启服务或发送交易。
-- 数据少于 `72h`、有效 swap 少于 `10,000` 或隔离测试交易不足时，会明确标记为探索性结果，不宣称已经找到可盈利策略。
+- 输出 Markdown、候选参数 CSV、隔离测试逐笔交易 CSV、JSON 和一份候选 `.env` 到 `reports/`，但不会修改线上 `.env`、重启服务或发送交易。
+- 数据少于 `72h`、有效 swap 少于 `10,000` 或隔离测试交易少于 `30` 笔时，会明确标记为探索性结果，不宣称已经找到可盈利策略。
 
 常用选项：
 
 ```bash
 npm run optimize:activity -- --hours 0 --iterations 5000 --min-trades 10 --cost-bps 100
+npm run optimize:activity -- --hours 0 --iterations 5000 --max-price-jump-ratio 20
 npm run optimize:activity -- --self-test
 ```
 
