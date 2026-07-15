@@ -356,6 +356,8 @@ const config = {
 
   // ============ Programs ============
   programs: {
+    pump: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
+    pumpMigrationWallet: '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg',
     pumpAmm: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',
     pumpAmmV2: 'Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1',
     tokenProgram: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
@@ -381,6 +383,25 @@ const config = {
 
   capture: {
     swapEventsEnabled: (process.env.SWAP_EVENT_LOG_ENABLED ?? 'true').toLowerCase() === 'true',
+  },
+
+  // Passing this gate only adds a mint to monitoring; it does not buy the token.
+  pumpDiscovery: {
+    enabled: (process.env.PUMP_DISCOVERY_ENABLED ?? 'true').toLowerCase() === 'true',
+    wsUrl: process.env.PUMP_DISCOVERY_WS_URL || null,
+    pollIntervalMs: parseInt(process.env.PUMP_DISCOVERY_POLL_INTERVAL_MS || '5000', 10),
+    pollLimit: parseInt(process.env.PUMP_DISCOVERY_POLL_LIMIT || '100', 10),
+    startupLookbackSec: parseInt(process.env.PUMP_DISCOVERY_STARTUP_LOOKBACK_SEC || '120', 10),
+    marketInitialDelayMs: parseInt(process.env.PUMP_DISCOVERY_MARKET_INITIAL_DELAY_MS || '2000', 10),
+    marketRetries: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRIES || '8', 10),
+    marketRetryMs: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRY_MS || '3000', 10),
+    maxConcurrentChecks: parseInt(process.env.PUMP_DISCOVERY_MAX_CONCURRENT_CHECKS || '3', 10),
+    minFdvUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_FDV_USD || process.env.MIN_FDV_USD || '30000'),
+    maxFdvUsd: parseFloat(process.env.PUMP_DISCOVERY_MAX_FDV_USD || process.env.MAX_FDV_USD || '1000000'),
+    minLiquidityUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_LIQUIDITY_USD || '5000'),
+    minVolume24hUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_VOLUME_24H_USD || '0'),
+    maxTokenAgeMs: parseInt(process.env.PUMP_DISCOVERY_MAX_TOKEN_AGE_MS || process.env.MAX_TOKEN_AGE_MS || '14400000', 10),
+    requireRevokedAuthorities: (process.env.PUMP_DISCOVERY_REQUIRE_REVOKED_AUTHORITIES ?? 'true').toLowerCase() === 'true',
   },
 
   // ============ Priority fees ============

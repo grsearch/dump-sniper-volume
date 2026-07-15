@@ -19,6 +19,7 @@ const AlertChecker = require('./monitor/AlertChecker');
 const TokenWatchdog = require('./core/TokenWatchdog');
 const CompetitorTracker = require('./core/CompetitorTracker');
 const ActivityFlowTracker = require('./core/OrderFlowTracker');
+const PumpGraduationDiscovery = require('./core/PumpGraduationDiscovery');
 
 const monitor = getMonitor();
 
@@ -57,6 +58,7 @@ async function main() {
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);
   console.log(`Add-on: disabled (one position per mint)`);
   console.log(`Executor: Pump AMM SDK direct (no Jupiter)`);
+  console.log(`Pump graduation discovery: ${config.pumpDiscovery.enabled ? 'enabled' : 'disabled'}`);
   console.log('================================================');
 
   const errors = validateConfig();
@@ -287,6 +289,32 @@ async function main() {
         });
       }
       // v2: 新币加入 EMA 监控
+    },
+  });
+
+  const pumpDiscovery = new PumpGraduationDiscovery({
+    tokenRegistry,
+    onBeforeAdd: (mint) => server._evictIfNeeded(mint),
+    onTokenAdded: async ({ token, migration, screening, evicted }) => {
+      const mints = tokenRegistry.listActive().map((t) => t.mint);
+      tickStream.updateSubscription(mints);
+      if (migration.poolAddress && executor.poolStateCache) {
+        executor.poolStateCache.refreshOne(migration.poolAddress).catch(() => {});
+      }
+      server.broadcast({
+        type: 'tokenAdded',
+        token,
+        discovery: {
+          source: 'pump_graduation',
+          migrationTime: migration.migrationTime,
+          migrationTimeSource: migration.migrationTimeSource,
+          migrationSlot: migration.slot,
+          signature: migration.signature,
+          fdv: screening.market.fdv,
+          liquidity: screening.market.liquidity,
+        },
+        evicted,
+      });
     },
   });
 
@@ -856,11 +884,13 @@ async function main() {
   const initialMints = tokenRegistry.listActive().map((t) => t.mint);
   console.log(`[main] starting LaserStream with ${initialMints.length} initial tokens`);
   await tickStream.start(initialMints);
+  pumpDiscovery.start();
 
   // ============ 优雅退出 ============
   const shutdown = async (signal) => {
     console.log(`\n[main] ${signal} received, shutting down gracefully...`);
     try {
+      pumpDiscovery.stop();
       await tickStream.stop();
       postExitTracker.shutdown();
       positionManager.stop();

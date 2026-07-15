@@ -64,10 +64,26 @@ class TokenRegistry {
         added_at INTEGER,
         updated_at INTEGER,
         meta_json TEXT,
-        creation_time INTEGER
+        creation_time INTEGER,
+        migration_time INTEGER,
+        migration_time_source TEXT,
+        migration_slot INTEGER,
+        migration_signature TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_tokens_active ON tokens (is_active);
     `);
+
+    // CREATE TABLE does not add columns to an existing installation.
+    const columns = new Set(this.db.pragma('table_info(tokens)').map((row) => row.name));
+    const additions = [
+      ['migration_time', 'INTEGER'],
+      ['migration_time_source', 'TEXT'],
+      ['migration_slot', 'INTEGER'],
+      ['migration_signature', 'TEXT'],
+    ];
+    for (const [name, type] of additions) {
+      if (!columns.has(name)) this.db.exec(`ALTER TABLE tokens ADD COLUMN ${name} ${type}`);
+    }
   }
 
   _prepareStatements() {
@@ -76,10 +92,12 @@ class TokenRegistry {
         INSERT INTO tokens
           (mint, symbol, name, decimals, fdv, market_cap, liquidity, price,
            pool_address, pool_base_vault, pool_quote_vault,
-           is_active, source, added_at, updated_at, meta_json, creation_time)
+           is_active, source, added_at, updated_at, meta_json, creation_time,
+           migration_time, migration_time_source, migration_slot, migration_signature)
         VALUES (@mint, @symbol, @name, @decimals, @fdv, @market_cap, @liquidity, @price,
                 @pool_address, @pool_base_vault, @pool_quote_vault,
-                1, @source, @added_at, @updated_at, @meta_json, @creation_time)
+                1, @source, @added_at, @updated_at, @meta_json, @creation_time,
+                @migration_time, @migration_time_source, @migration_slot, @migration_signature)
         ON CONFLICT(mint) DO UPDATE SET
           symbol = COALESCE(excluded.symbol, tokens.symbol),
           name = COALESCE(excluded.name, tokens.name),
@@ -88,10 +106,17 @@ class TokenRegistry {
           market_cap = COALESCE(excluded.market_cap, tokens.market_cap),
           liquidity = COALESCE(excluded.liquidity, tokens.liquidity),
           price = COALESCE(excluded.price, tokens.price),
+          pool_address = COALESCE(excluded.pool_address, tokens.pool_address),
+          pool_base_vault = COALESCE(excluded.pool_base_vault, tokens.pool_base_vault),
+          pool_quote_vault = COALESCE(excluded.pool_quote_vault, tokens.pool_quote_vault),
           is_active = 1,
           updated_at = excluded.updated_at,
           meta_json = COALESCE(excluded.meta_json, tokens.meta_json),
-          creation_time = COALESCE(excluded.creation_time, tokens.creation_time)
+          creation_time = COALESCE(excluded.creation_time, tokens.creation_time),
+          migration_time = COALESCE(excluded.migration_time, tokens.migration_time),
+          migration_time_source = COALESCE(excluded.migration_time_source, tokens.migration_time_source),
+          migration_slot = COALESCE(excluded.migration_slot, tokens.migration_slot),
+          migration_signature = COALESCE(excluded.migration_signature, tokens.migration_signature)
       `),
 
       // Used by TokenWatchdog._check via tokenRegistry.stmts.update.run(...)
@@ -121,6 +146,16 @@ class TokenRegistry {
           pool_address = ?,
           pool_base_vault = ?,
           pool_quote_vault = ?,
+          updated_at = ?
+        WHERE mint = ?
+      `),
+
+      setMigration: this.db.prepare(`
+        UPDATE tokens SET
+          migration_time = COALESCE(?, migration_time),
+          migration_time_source = COALESCE(?, migration_time_source),
+          migration_slot = COALESCE(?, migration_slot),
+          migration_signature = COALESCE(?, migration_signature),
           updated_at = ?
         WHERE mint = ?
       `),
@@ -164,18 +199,23 @@ class TokenRegistry {
   /**
    * Add (or re-activate) a token. Fetches metadata via tokenMeta helper.
    * @param {string} mint
-   * @param {{symbol?:string, source?:string}} opts
+   * @param {{symbol?:string, source?:string, meta?:object, creationTime?:number,
+   *   poolAddress?:string, poolBaseVault?:string, poolQuoteVault?:string,
+   *   migrationTime?:number, migrationTimeSource?:string, migrationSlot?:number,
+   *   migrationSignature?:string}} opts
    * @returns {Promise<object>} the token row
    */
   async addToken(mint, opts = {}) {
     TokenRegistry.validateMint(mint);
 
     // Try to enrich with full meta; tolerate failures so user can still add a token
-    let meta = null;
-    try {
-      meta = await fetchTokenFullInfo(mint);
-    } catch (err) {
-      console.warn(`[TokenRegistry] meta fetch failed for ${mint}: ${err.message}`);
+    let meta = opts.meta || null;
+    if (!meta) {
+      try {
+        meta = await fetchTokenFullInfo(mint);
+      } catch (err) {
+        console.warn(`[TokenRegistry] meta fetch failed for ${mint}: ${err.message}`);
+      }
     }
 
     const now = Date.now();
@@ -188,32 +228,38 @@ class TokenRegistry {
       market_cap: meta?.marketCap ?? null,
       liquidity: meta?.liquidity ?? null,
       price: meta?.price ?? null,
-      pool_address: null,
-      pool_base_vault: null,
-      pool_quote_vault: null,
+      pool_address: opts.poolAddress || null,
+      pool_base_vault: opts.poolBaseVault || null,
+      pool_quote_vault: opts.poolQuoteVault || null,
       source: opts.source || 'manual',
       added_at: now,
       updated_at: now,
       meta_json: meta ? JSON.stringify({ ...meta, _birdeyeError: undefined }) : null,
-      creation_time: null,  // filled below
+      creation_time: Number.isFinite(Number(opts.creationTime)) ? Number(opts.creationTime) : null,
+      migration_time: Number.isFinite(Number(opts.migrationTime)) ? Number(opts.migrationTime) : null,
+      migration_time_source: opts.migrationTimeSource || null,
+      migration_slot: Number.isFinite(Number(opts.migrationSlot)) ? Number(opts.migrationSlot) : null,
+      migration_signature: opts.migrationSignature || null,
     };
 
     // v3.19: 获取代币创建时间（Birdeye token_security）
-    try {
-      const creationInfo = await fetchTokenCreationTime(mint);
-      if (creationInfo?.creationTime) {
-        row.creation_time = creationInfo.creationTime * 1000; // unix seconds → ms
+    if (!row.creation_time) {
+      try {
+        const creationInfo = await fetchTokenCreationTime(mint);
+        if (creationInfo?.creationTime) {
+          row.creation_time = creationInfo.creationTime * 1000;
+        }
+      } catch (err) {
+        // non-critical, skip
       }
-    } catch (err) {
-      // non-critical, skip
     }
 
     // Preserve existing pool info on re-add
     const existing = this.stmts.get.get(mint);
     if (existing) {
-      row.pool_address = existing.pool_address || null;
-      row.pool_base_vault = existing.pool_base_vault || null;
-      row.pool_quote_vault = existing.pool_quote_vault || null;
+      row.pool_address = row.pool_address || existing.pool_address || null;
+      row.pool_base_vault = row.pool_base_vault || existing.pool_base_vault || null;
+      row.pool_quote_vault = row.pool_quote_vault || existing.pool_quote_vault || null;
       // keep original added_at
       row.added_at = existing.added_at || now;
     }
@@ -255,6 +301,20 @@ class TokenRegistry {
     );
     const fresh = this.stmts.get.get(mint);
     if (fresh) this.cache.set(mint, fresh);
+  }
+
+  recordMigration(mint, info = {}) {
+    this.stmts.setMigration.run(
+      info.migrationTime || null,
+      info.migrationTimeSource || null,
+      info.slot || info.migrationSlot || null,
+      info.signature || info.migrationSignature || null,
+      Date.now(),
+      mint,
+    );
+    const fresh = this.stmts.get.get(mint);
+    if (fresh?.is_active) this.cache.set(mint, fresh);
+    return fresh || null;
   }
 
   /**

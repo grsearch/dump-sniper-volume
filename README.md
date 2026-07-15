@@ -1,5 +1,18 @@
 # Dump Sniper
 
+## Pump.fun Graduation Discovery
+
+The service discovers successful Pump.fun graduations without a webhook:
+
+- Helius WebSocket logs provide the low-latency path; the migration wallet is polled every 5 seconds to fill gaps.
+- A transaction is accepted only when it contains the official Pump `migrate` discriminator and targets the official PumpSwap program.
+- Mint, pool, vaults, chain `blockTime`, slot, and signature are read from the confirmed transaction and saved in `tokens`.
+- Default admission requires FDV `$30,000-$1,000,000`, liquidity at least `$5,000`, revoked mint/freeze authorities, and creation age no more than 4 hours.
+- Discovery does not require 24-hour volume because newly migrated market data is incomplete. `TokenWatchdog` still applies its periodic filters afterward.
+- Passing discovery only adds the token to monitoring. The Activity Flow buy strategy remains unchanged.
+
+Configuration is under `PUMP_DISCOVERY_*` in `.env.example`. Set `PUMP_DISCOVERY_ENABLED=false` to disable it.
+
 Solana / Pump.fun 短线交易机器人。当前默认买入策略是 **Activity Flow 1m volume-ratio**：不再看大砸单，也不再用 5s/15s/30s 多窗口反转确认。
 
 ## 当前买入策略

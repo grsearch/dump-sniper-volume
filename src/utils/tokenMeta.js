@@ -57,6 +57,40 @@ async function fetchTokenMarketFromBirdeye(mint) {
 }
 
 /**
+ * Fetch authority and creation metadata used to screen newly migrated tokens.
+ * Birdeye has used both camelCase and snake_case fields over time, so normalize
+ * the response here instead of leaking provider-specific names to callers.
+ */
+async function fetchTokenSecurityFromBirdeye(mint) {
+  const url = `${config.birdeye.baseUrl}/defi/token_security`;
+  const headers = {
+    'X-API-KEY': config.birdeye.apiKey,
+    'x-chain': 'solana',
+    accept: 'application/json',
+  };
+  const { data } = await axios.get(url, {
+    headers,
+    params: { address: mint },
+    timeout: 8000,
+  });
+  if (!data?.success || !data?.data) {
+    throw new Error(`Birdeye token_security failed: ${JSON.stringify(data)}`);
+  }
+
+  const d = data.data;
+  const normalizeAuthority = (value) => {
+    if (value == null || value === false || value === '' || value === 'null') return null;
+    return String(value);
+  };
+  return {
+    mintAuthority: normalizeAuthority(d.mintAuthority ?? d.mint_authority),
+    freezeAuthority: normalizeAuthority(d.freezeAuthority ?? d.freeze_authority),
+    creationTime: d.creationTime ?? d.mintTime ?? d.creation_time ?? null,
+    creationSlot: d.creationSlot ?? d.mintSlot ?? d.creation_slot ?? null,
+  };
+}
+
+/**
  * 获取代币创建时间。
  * 优先用 Birdeye token_security，失败时回退到 Helius Enhanced Transactions API。
  * 返回 { creationTime: unix_seconds, creationSlot: number } 或 null。
@@ -164,6 +198,7 @@ module.exports = {
   fetchTokenMarketOnly,
   fetchTokenAssetFromHelius,
   fetchTokenMarketFromBirdeye,
+  fetchTokenSecurityFromBirdeye,
   fetchTokenCreationTime,
   fetchTokenFullInfo,
 };
