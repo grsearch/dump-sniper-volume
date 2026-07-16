@@ -53,7 +53,95 @@ async function fetchTokenMarketFromBirdeye(mint) {
     price: d.price ?? null,
     priceChange24h: d.priceChange24hPercent ?? null,
     volume24h: d.v24hUSD ?? null,
+    marketSource: 'birdeye',
   };
+}
+
+function finitePositive(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function selectDexScreenerPair(pairs, mint, poolAddress = null) {
+  const candidates = (Array.isArray(pairs) ? pairs : []).filter((pair) => (
+    pair?.chainId === 'solana' &&
+    pair?.baseToken?.address === mint
+  ));
+  if (candidates.length === 0) return null;
+
+  if (poolAddress) {
+    const exact = candidates.find((pair) => pair.pairAddress === poolAddress);
+    if (exact) return exact;
+  }
+
+  return candidates.sort((a, b) => (
+    (finitePositive(b?.liquidity?.usd) || 0) -
+    (finitePositive(a?.liquidity?.usd) || 0)
+  ))[0];
+}
+
+function normalizeDexScreenerPair(pair) {
+  if (!pair) return null;
+  const fdv = finitePositive(pair.fdv);
+  const marketCap = finitePositive(pair.marketCap);
+  const liquidity = finitePositive(pair.liquidity?.usd);
+  const price = finitePositive(pair.priceUsd);
+  const effectiveFdv = fdv || marketCap;
+  if (!effectiveFdv || !liquidity) return null;
+
+  return {
+    symbol: pair.baseToken?.symbol || null,
+    name: pair.baseToken?.name || null,
+    fdv: effectiveFdv,
+    marketCap,
+    liquidity,
+    price,
+    priceChange24h: Number.isFinite(Number(pair.priceChange?.h24))
+      ? Number(pair.priceChange.h24)
+      : null,
+    volume24h: finitePositive(pair.volume?.h24),
+    pairAddress: pair.pairAddress || null,
+    pairCreatedAt: Number.isFinite(Number(pair.pairCreatedAt))
+      ? Number(pair.pairCreatedAt)
+      : null,
+    dexId: pair.dexId || null,
+    marketSource: 'dexscreener',
+    fetchedAt: Date.now(),
+  };
+}
+
+/**
+ * DEX Screener supports up to 30 comma-separated token addresses per request.
+ * Return one preferred Solana pair per mint, favoring the registry pool when known.
+ */
+async function fetchTokenMarketsFromDexScreener(tokens) {
+  const entries = (Array.isArray(tokens) ? tokens : [])
+    .map((token) => (
+      typeof token === 'string'
+        ? { mint: token, poolAddress: null }
+        : { mint: token?.mint, poolAddress: token?.poolAddress || token?.pool_address || null }
+    ))
+    .filter((token) => token.mint);
+  if (entries.length === 0) return new Map();
+  if (entries.length > 30) throw new Error('DEX Screener batch supports at most 30 token addresses');
+
+  const addresses = entries.map((token) => token.mint).join(',');
+  const url = `https://api.dexscreener.com/tokens/v1/solana/${addresses}`;
+  const { data } = await axios.get(url, {
+    headers: { accept: 'application/json' },
+    timeout: 8000,
+  });
+  if (!Array.isArray(data)) {
+    throw new Error(`DEX Screener tokens response invalid: ${JSON.stringify(data)}`);
+  }
+
+  const markets = new Map();
+  for (const entry of entries) {
+    const pair = selectDexScreenerPair(data, entry.mint, entry.poolAddress);
+    const market = normalizeDexScreenerPair(pair);
+    if (market) markets.set(entry.mint, market);
+  }
+  return markets;
 }
 
 /**
@@ -196,9 +284,12 @@ async function fetchTokenFullInfo(mint) {
 
 module.exports = {
   fetchTokenMarketOnly,
+  fetchTokenMarketsFromDexScreener,
   fetchTokenAssetFromHelius,
   fetchTokenMarketFromBirdeye,
   fetchTokenSecurityFromBirdeye,
   fetchTokenCreationTime,
   fetchTokenFullInfo,
+  selectDexScreenerPair,
+  normalizeDexScreenerPair,
 };

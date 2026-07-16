@@ -312,10 +312,10 @@
         <table id="tokenTable">
           <thead>
             <tr>
-              <th>Symbol</th><th>CA</th><th>FDV</th><th>LP</th><th>Price</th><th>24h Vol</th><th>添加时间</th><th>迁移 AGE</th><th>来源</th><th></th>
+              <th>Symbol</th><th>CA</th><th>FDV</th><th>LP</th><th>Price</th><th>24h Vol</th><th>行情更新</th><th>添加时间</th><th>迁移 AGE</th><th>来源</th><th></th>
             </tr>
           </thead>
-          <tbody id="tokenTbody"><tr><td colspan="10" class="empty">尚未添加任何代币</td></tr></tbody>
+          <tbody id="tokenTbody"><tr><td colspan="11" class="empty">尚未添加任何代币</td></tr></tbody>
         </table>
       </div>
       <div id="tokenPagination" class="pagination" style="display:none;"></div>
@@ -511,7 +511,7 @@ function renderTokenPage() {
   const fc = $('ageFilterCount');
   if (fc) fc.textContent = ageFilterHours > 0 ? tokens.length + ' 条' : '';
   if (tokens.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">尚未添加任何代币</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">尚未添加任何代币</td></tr>';
     $('tokenPagination').style.display = 'none';
     return;
   }
@@ -527,6 +527,7 @@ function renderTokenPage() {
       <td class="mono">${fmtMoney(t.liquidity)}</td>
       <td class="mono">${t.price ? Number(t.price).toExponential(3) : '-'}</td>
       <td class="mono">${fmtMoney(t.meta_json ? (JSON.parse(t.meta_json).volume24h || null) : null)}</td>
+      <td class="mono" style="font-size:11px;">${fmtMarketAge(t.market_updated_at, t.market_source)}</td>
       <td class="mono" style="font-size:11px;">${fmtTime(t.added_at)}</td>
       <td class="mono" style="font-size:11px;">${fmtAge(t.migration_time)}</td>
       <td><span class="pill ${t.source === 'webhook' ? 'live' : 'dry'}">${t.source || 'manual'}</span></td>
@@ -953,6 +954,14 @@ function fmtAge(migrationTime) {
     const ageHr = ageH % 24;
     if (ageD < 30) return ageD + 'd' + ageHr + 'h';
     return Math.floor(ageD / 30) + 'mo';
+  }
+  function fmtMarketAge(updatedAt, source) {
+    if (!updatedAt) return '<span style="color:var(--danger)" title="尚未成功刷新行情">未更新</span>';
+    const ageMs = Math.max(0, Date.now() - Number(updatedAt));
+    const ageSec = Math.floor(ageMs / 1000);
+    const label = ageSec < 60 ? ageSec + 's' : Math.floor(ageSec / 60) + 'm';
+    const color = ageMs > 180000 ? 'var(--danger)' : 'var(--ok)';
+    return `<span style="color:${color}" title="${escapeHtml(source || 'unknown')}">${label}</span>`;
   }
   function escapeHtml(s) {
   if (!s) return '';

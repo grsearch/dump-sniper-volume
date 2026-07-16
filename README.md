@@ -13,6 +13,13 @@ The service discovers successful Pump.fun graduations without a webhook:
 
 Configuration is under `PUMP_DISCOVERY_*` in `.env.example`. Set `PUMP_DISCOVERY_ENABLED=false` to disable it.
 
+Monitoring-list FDV, LP, price, and 24h volume are refreshed every minute through
+the batched DEX Screener token endpoint, with Birdeye as a fallback. The dashboard
+shows the age and source of the last successful market refresh. Webhooks may send
+`migrationTime`/`migration_time` (seconds, milliseconds, or ISO time); when an
+older webhook row has no migration time, the selected DEX pair creation time is
+used to backfill its migration AGE.
+
 Solana / Pump.fun 短线交易机器人。当前默认买入策略是 **Activity Flow 1m volume-ratio**：不再看大砸单，也不再用 5s/15s/30s 多窗口反转确认。
 
 ## 当前买入策略
@@ -144,6 +151,7 @@ MIN_FDV_USD=15000
 MAX_FDV_USD=1000000
 MIN_LIQUIDITY_USD=3000
 WATCHDOG_CHECK_INTERVAL_MS=60000
+WATCHDOG_MARKET_STALE_MS=180000
 MAX_TOKEN_AGE_MS=86400000
 MAX_MINT_AGE_HOURS=0
 NEW_COIN_AGE_THRESHOLD_MS=0

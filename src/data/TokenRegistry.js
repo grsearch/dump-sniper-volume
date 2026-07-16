@@ -14,8 +14,8 @@
  *   - addToken() fetches symbol/decimals/FDV from Helius DAS + Birdeye via
  *     tokenMeta helper
  *   - tokenRegistry.db is exposed so TradeLogger can share the same DB handle
- *   - .cache is an in-memory Map for hot lookups; .stmts is the prepared-statement
- *     map TokenWatchdog pokes directly to refresh FDV
+ *   - .cache is an in-memory Map for hot lookups
+ *   - updateMarket() persists provider data and refreshes the hot cache
  */
 
 const path = require('path');
@@ -63,6 +63,8 @@ class TokenRegistry {
         source TEXT,
         added_at INTEGER,
         updated_at INTEGER,
+        market_updated_at INTEGER,
+        market_source TEXT,
         meta_json TEXT,
         creation_time INTEGER,
         migration_time INTEGER,
@@ -80,6 +82,8 @@ class TokenRegistry {
       ['migration_time_source', 'TEXT'],
       ['migration_slot', 'INTEGER'],
       ['migration_signature', 'TEXT'],
+      ['market_updated_at', 'INTEGER'],
+      ['market_source', 'TEXT'],
     ];
     for (const [name, type] of additions) {
       if (!columns.has(name)) this.db.exec(`ALTER TABLE tokens ADD COLUMN ${name} ${type}`);
@@ -92,11 +96,13 @@ class TokenRegistry {
         INSERT INTO tokens
           (mint, symbol, name, decimals, fdv, market_cap, liquidity, price,
            pool_address, pool_base_vault, pool_quote_vault,
-           is_active, source, added_at, updated_at, meta_json, creation_time,
+           is_active, source, added_at, updated_at, market_updated_at, market_source,
+           meta_json, creation_time,
            migration_time, migration_time_source, migration_slot, migration_signature)
         VALUES (@mint, @symbol, @name, @decimals, @fdv, @market_cap, @liquidity, @price,
                 @pool_address, @pool_base_vault, @pool_quote_vault,
-                1, @source, @added_at, @updated_at, @meta_json, @creation_time,
+                1, @source, @added_at, @updated_at, @market_updated_at, @market_source,
+                @meta_json, @creation_time,
                 @migration_time, @migration_time_source, @migration_slot, @migration_signature)
         ON CONFLICT(mint) DO UPDATE SET
           symbol = COALESCE(excluded.symbol, tokens.symbol),
@@ -111,6 +117,8 @@ class TokenRegistry {
           pool_quote_vault = COALESCE(excluded.pool_quote_vault, tokens.pool_quote_vault),
           is_active = 1,
           updated_at = excluded.updated_at,
+          market_updated_at = COALESCE(excluded.market_updated_at, tokens.market_updated_at),
+          market_source = COALESCE(excluded.market_source, tokens.market_source),
           meta_json = COALESCE(excluded.meta_json, tokens.meta_json),
           creation_time = COALESCE(excluded.creation_time, tokens.creation_time),
           migration_time = COALESCE(excluded.migration_time, tokens.migration_time),
@@ -134,6 +142,22 @@ class TokenRegistry {
           updated_at = ?,
           meta_json = ?
         WHERE mint = ?
+      `),
+
+      updateMarket: this.db.prepare(`
+        UPDATE tokens SET
+          symbol = COALESCE(@symbol, symbol),
+          name = COALESCE(@name, name),
+          decimals = COALESCE(@decimals, decimals),
+          fdv = COALESCE(@fdv, fdv),
+          market_cap = COALESCE(@market_cap, market_cap),
+          liquidity = COALESCE(@liquidity, liquidity),
+          price = COALESCE(@price, price),
+          updated_at = @updated_at,
+          market_updated_at = @market_updated_at,
+          market_source = @market_source,
+          meta_json = @meta_json
+        WHERE mint = @mint
       `),
 
       get: this.db.prepare('SELECT * FROM tokens WHERE mint = ?'),
@@ -235,6 +259,13 @@ class TokenRegistry {
       source: opts.source || 'manual',
       added_at: now,
       updated_at: now,
+      market_updated_at: meta && (
+        meta.fdv != null ||
+        meta.marketCap != null ||
+        meta.liquidity != null ||
+        meta.price != null
+      ) ? Number(meta.fetchedAt) || now : null,
+      market_source: meta?.marketSource || null,
       meta_json: meta ? JSON.stringify({ ...meta, _birdeyeError: undefined }) : null,
       creation_time: Number.isFinite(Number(opts.creationTime)) ? Number(opts.creationTime) : null,
       migration_time: Number.isFinite(Number(opts.migrationTime)) ? Number(opts.migrationTime) : null,
@@ -269,6 +300,60 @@ class TokenRegistry {
     const fresh = this.stmts.get.get(mint);
     if (fresh) this.cache.set(mint, fresh);
     return fresh;
+  }
+
+  updateMarket(mint, market = {}) {
+    const existing = this.stmts.get.get(mint);
+    if (!existing) return null;
+
+    let previousMeta = {};
+    try {
+      previousMeta = existing.meta_json ? JSON.parse(existing.meta_json) : {};
+    } catch (_) {}
+
+    const marketUpdatedAt = Number.isFinite(Number(market.fetchedAt))
+      ? Number(market.fetchedAt)
+      : Date.now();
+    const mergedMeta = {
+      ...previousMeta,
+      ...market,
+      fetchedAt: marketUpdatedAt,
+      marketSource: market.marketSource || existing.market_source || null,
+    };
+    delete mergedMeta._birdeyeError;
+
+    this.stmts.updateMarket.run({
+      mint,
+      symbol: market.symbol || null,
+      name: market.name || null,
+      decimals: market.decimals != null && Number.isFinite(Number(market.decimals))
+        ? Number(market.decimals)
+        : null,
+      fdv: market.fdv != null && Number.isFinite(Number(market.fdv)) && Number(market.fdv) >= 0
+        ? Number(market.fdv)
+        : null,
+      market_cap: market.marketCap != null &&
+        Number.isFinite(Number(market.marketCap)) &&
+        Number(market.marketCap) >= 0
+        ? Number(market.marketCap)
+        : null,
+      liquidity: market.liquidity != null &&
+        Number.isFinite(Number(market.liquidity)) &&
+        Number(market.liquidity) >= 0
+        ? Number(market.liquidity)
+        : null,
+      price: market.price != null && Number.isFinite(Number(market.price)) && Number(market.price) >= 0
+        ? Number(market.price)
+        : null,
+      updated_at: Date.now(),
+      market_updated_at: marketUpdatedAt,
+      market_source: market.marketSource || existing.market_source || 'unknown',
+      meta_json: JSON.stringify(mergedMeta),
+    });
+
+    const fresh = this.stmts.get.get(mint);
+    if (fresh?.is_active) this.cache.set(mint, fresh);
+    return fresh || null;
   }
 
   /**

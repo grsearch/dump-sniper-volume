@@ -7,6 +7,7 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 const { config } = require('../config');
 const TokenRegistry = require('../data/TokenRegistry');
+const { extractMigrationInfo } = require('../utils/migrationTime');
 
 class Server {
   constructor({
@@ -105,7 +106,8 @@ class Server {
         if (!this._validateWebhookSecret(req)) {
           return res.status(401).json({ ok: false, error: 'invalid webhook secret' });
         }
-        const { network, address, symbol } = req.body || {};
+        const payload = req.body || {};
+        const { network, address, symbol } = payload;
         if (network && network.toLowerCase() !== 'solana') {
           return res.status(400).json({ ok: false, error: 'only solana network supported' });
         }
@@ -121,7 +123,11 @@ class Server {
         // Max token rotation: if at capacity, evict lowest-value tokens
         const evicted = await this._evictIfNeeded(address);
 
-        const token = await this.tokenRegistry.addToken(address, { symbol, source: 'webhook' });
+        const token = await this.tokenRegistry.addToken(address, {
+          symbol,
+          source: 'webhook',
+          ...extractMigrationInfo(payload),
+        });
         if (this.onTokenListChanged) this.onTokenListChanged();
         if (this.onTokenAdded) this.onTokenAdded(token);
         this.broadcast({ type: 'tokenAdded', token });
@@ -199,6 +205,7 @@ class Server {
             const token = await this.tokenRegistry.addToken(t.address, {
               symbol: t.symbol,
               source: 'batch',
+              ...extractMigrationInfo(t, 'batch_payload'),
             });
             results.push(token);
             if (this.onTokenAdded) this.onTokenAdded(token);
