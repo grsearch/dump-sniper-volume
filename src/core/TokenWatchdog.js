@@ -43,10 +43,17 @@ class TokenWatchdog {
     this.noBuyRemoveMs = parseInt(process.env.NO_BUY_REMOVE_MS || '86400000', 10);
     this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '86400000', 10);
 
-    this.checkIntervalMs = Math.max(
+    const configuredCheckIntervalMs = Math.max(
       10_000,
       parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '60000', 10),
     );
+    this.checkIntervalMs = Math.min(60_000, configuredCheckIntervalMs);
+    if (configuredCheckIntervalMs > this.checkIntervalMs) {
+      console.warn(
+        `[TokenWatchdog] WATCHDOG_CHECK_INTERVAL_MS=${configuredCheckIntervalMs} is obsolete; ` +
+        'clamped to 60000ms',
+      );
+    }
     this.marketStaleMs = Math.max(
       this.checkIntervalMs * 3,
       parseInt(process.env.WATCHDOG_MARKET_STALE_MS || '180000', 10),
@@ -191,12 +198,16 @@ class TokenWatchdog {
 
       for (const token of batch) {
         const market = markets.get(token.mint);
-        if (!market) {
+        if (market) this._backfillWebhookMigration(token, market);
+        const marketComplete = (
+          Number(market?.fdv) > 0 &&
+          Number(market?.liquidity) > 0
+        );
+        if (!marketComplete) {
           fallback.push(token);
           continue;
         }
         this.tokenRegistry.updateMarket(token.mint, market);
-        this._backfillWebhookMigration(token, market);
         refreshed++;
       }
 

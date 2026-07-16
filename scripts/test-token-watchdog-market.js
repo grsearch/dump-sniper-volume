@@ -87,9 +87,23 @@ assert.deepStrictEqual(
     pairAddress: preferredPool,
     pairCreatedAt: 1_700_000_000_000,
     dexId: 'pumpswap',
+    marketComplete: true,
     marketSource: 'dexscreener',
     fetchedAt: 0,
   },
+);
+const incompletePair = {
+  chainId: 'solana',
+  pairAddress: preferredPool,
+  baseToken: { address: mint, symbol: 'TEST', name: 'Test' },
+  liquidity: { usd: 4_000 },
+  pairCreatedAt: 1_700_000_000_000,
+  dexId: 'pumpswap',
+};
+assert.strictEqual(
+  normalizeDexScreenerPair(incompletePair, mint).marketComplete,
+  false,
+  'pair creation metadata must survive even when FDV is not available yet',
 );
 
 (async () => {
@@ -128,6 +142,8 @@ assert.deepStrictEqual(
     removeToken: () => { removed = true; },
   };
 
+  const previousCheckInterval = process.env.WATCHDOG_CHECK_INTERVAL_MS;
+  process.env.WATCHDOG_CHECK_INTERVAL_MS = '900000';
   const watchdog = new TokenWatchdog({
     tokenRegistry: registry,
     positionManager: { hasOpenPosition: () => false },
@@ -135,24 +151,37 @@ assert.deepStrictEqual(
     fetchMarkets: async () => new Map([[
       mint,
       {
-        fdv: 2_000,
+        fdv: null,
         liquidity: 4_000,
-        price: 0.000002,
-        volume24h: 50_000,
         pairCreatedAt: now - 10 * 60_000,
+        marketComplete: false,
         marketSource: 'dexscreener',
         fetchedAt: now,
       },
     ]]),
-    fetchMarket: async () => null,
+    fetchMarket: async () => ({
+      fdv: 2_000,
+      liquidity: 4_000,
+      price: 0.000002,
+      volume24h: 50_000,
+      marketSource: 'birdeye',
+      fetchedAt: now,
+    }),
   });
+  if (previousCheckInterval == null) delete process.env.WATCHDOG_CHECK_INTERVAL_MS;
+  else process.env.WATCHDOG_CHECK_INTERVAL_MS = previousCheckInterval;
+  assert.strictEqual(
+    watchdog.checkIntervalMs,
+    60_000,
+    'legacy 15-minute watchdog configuration must be clamped to one minute',
+  );
   watchdog.minFdVUsd = 15_000;
   watchdog.minLiquidityUsd = 3_000;
   watchdog.minVolume24hUsd = 0;
   watchdog.noBuyRemoveMs = 0;
 
   await watchdog._check();
-  assert.strictEqual(token.market_source, 'dexscreener');
+  assert.strictEqual(token.market_source, 'birdeye');
   assert.strictEqual(token.migration_time, now - 10 * 60_000);
   assert.strictEqual(token.migration_time_source, 'dexscreener_pairCreatedAt');
   assert.strictEqual(removed, true, 'fresh FDV below the threshold must remove the token');

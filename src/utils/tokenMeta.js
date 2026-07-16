@@ -65,7 +65,10 @@ function finitePositive(value) {
 function selectDexScreenerPair(pairs, mint, poolAddress = null) {
   const candidates = (Array.isArray(pairs) ? pairs : []).filter((pair) => (
     pair?.chainId === 'solana' &&
-    pair?.baseToken?.address === mint
+    (
+      pair?.baseToken?.address === mint ||
+      pair?.quoteToken?.address === mint
+    )
   ));
   if (candidates.length === 0) return null;
 
@@ -74,24 +77,30 @@ function selectDexScreenerPair(pairs, mint, poolAddress = null) {
     if (exact) return exact;
   }
 
-  return candidates.sort((a, b) => (
+  const basePairs = candidates.filter((pair) => pair?.baseToken?.address === mint);
+  const preferred = basePairs.length > 0 ? basePairs : candidates;
+  return preferred.sort((a, b) => (
     (finitePositive(b?.liquidity?.usd) || 0) -
     (finitePositive(a?.liquidity?.usd) || 0)
   ))[0];
 }
 
-function normalizeDexScreenerPair(pair) {
+function normalizeDexScreenerPair(pair, mint = pair?.baseToken?.address) {
   if (!pair) return null;
-  const fdv = finitePositive(pair.fdv);
-  const marketCap = finitePositive(pair.marketCap);
+  const isBaseToken = pair.baseToken?.address === mint;
+  const fdv = isBaseToken ? finitePositive(pair.fdv) : null;
+  const marketCap = isBaseToken ? finitePositive(pair.marketCap) : null;
   const liquidity = finitePositive(pair.liquidity?.usd);
-  const price = finitePositive(pair.priceUsd);
+  const price = isBaseToken ? finitePositive(pair.priceUsd) : null;
   const effectiveFdv = fdv || marketCap;
-  if (!effectiveFdv || !liquidity) return null;
+  const pairCreatedAt = Number.isFinite(Number(pair.pairCreatedAt))
+    ? Number(pair.pairCreatedAt)
+    : null;
+  if (!pair.pairAddress && !pairCreatedAt && !effectiveFdv && !liquidity) return null;
 
   return {
-    symbol: pair.baseToken?.symbol || null,
-    name: pair.baseToken?.name || null,
+    symbol: isBaseToken ? pair.baseToken?.symbol || null : pair.quoteToken?.symbol || null,
+    name: isBaseToken ? pair.baseToken?.name || null : pair.quoteToken?.name || null,
     fdv: effectiveFdv,
     marketCap,
     liquidity,
@@ -101,10 +110,9 @@ function normalizeDexScreenerPair(pair) {
       : null,
     volume24h: finitePositive(pair.volume?.h24),
     pairAddress: pair.pairAddress || null,
-    pairCreatedAt: Number.isFinite(Number(pair.pairCreatedAt))
-      ? Number(pair.pairCreatedAt)
-      : null,
+    pairCreatedAt,
     dexId: pair.dexId || null,
+    marketComplete: Boolean(effectiveFdv && liquidity),
     marketSource: 'dexscreener',
     fetchedAt: Date.now(),
   };
@@ -138,7 +146,7 @@ async function fetchTokenMarketsFromDexScreener(tokens) {
   const markets = new Map();
   for (const entry of entries) {
     const pair = selectDexScreenerPair(data, entry.mint, entry.poolAddress);
-    const market = normalizeDexScreenerPair(pair);
+    const market = normalizeDexScreenerPair(pair, entry.mint);
     if (market) markets.set(entry.mint, market);
   }
   return markets;

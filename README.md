@@ -18,7 +18,9 @@ the batched DEX Screener token endpoint, with Birdeye as a fallback. The dashboa
 shows the age and source of the last successful market refresh. Webhooks may send
 `migrationTime`/`migration_time` (seconds, milliseconds, or ISO time); when an
 older webhook row has no migration time, the selected DEX pair creation time is
-used to backfill its migration AGE.
+used to backfill its migration AGE even when that pair does not yet expose complete
+FDV/LP data. Legacy `WATCHDOG_CHECK_INTERVAL_MS` values above one minute are clamped
+to `60000`.
 
 Solana / Pump.fun 短线交易机器人。当前默认买入策略是 **Activity Flow 1m volume-ratio**：不再看大砸单，也不再用 5s/15s/30s 多窗口反转确认。
 
