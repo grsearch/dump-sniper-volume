@@ -3,6 +3,28 @@
 const PUMP_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const PUMP_AMM_PROGRAM_ID = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
 const MIGRATE_DISCRIMINATOR = Buffer.from([155, 234, 231, 146, 236, 158, 162, 30]);
+const MIGRATE_V2_DISCRIMINATOR = Buffer.from([187, 203, 18, 31, 206, 237, 254, 41]);
+
+const MIGRATION_LAYOUTS = [
+  {
+    version: 'v1',
+    discriminator: MIGRATE_DISCRIMINATOR,
+    mintIndex: 2,
+    pumpAmmIndex: 8,
+    poolIndex: 9,
+    baseVaultIndex: 17,
+    quoteVaultIndex: 18,
+  },
+  {
+    version: 'v2',
+    discriminator: MIGRATE_V2_DISCRIMINATOR,
+    mintIndex: 2,
+    pumpAmmIndex: 9,
+    poolIndex: 10,
+    baseVaultIndex: 18,
+    quoteVaultIndex: 19,
+  },
+];
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
@@ -103,15 +125,15 @@ function parsePumpMigrationTransaction(transactionResult, opts = {}) {
     } catch (_) {
       continue;
     }
-    if (data.length < MIGRATE_DISCRIMINATOR.length ||
-        !data.subarray(0, MIGRATE_DISCRIMINATOR.length).equals(MIGRATE_DISCRIMINATOR)) {
-      continue;
-    }
+    const layout = MIGRATION_LAYOUTS.find(({ discriminator }) =>
+      data.length >= discriminator.length &&
+      data.subarray(0, discriminator.length).equals(discriminator));
+    if (!layout) continue;
 
     const accounts = (instruction.accounts || []).map((account) => resolveKey(account, accountKeys));
-    const mint = accounts[2];
-    const pumpAmm = accounts[8];
-    const poolAddress = accounts[9];
+    const mint = accounts[layout.mintIndex];
+    const pumpAmm = accounts[layout.pumpAmmIndex];
+    const poolAddress = accounts[layout.poolIndex];
     if (!isLikelyPublicKey(mint) || pumpAmm !== PUMP_AMM_PROGRAM_ID || !isLikelyPublicKey(poolAddress)) {
       continue;
     }
@@ -120,8 +142,13 @@ function parsePumpMigrationTransaction(transactionResult, opts = {}) {
     return {
       mint,
       poolAddress,
-      poolBaseVault: isLikelyPublicKey(accounts[17]) ? accounts[17] : null,
-      poolQuoteVault: isLikelyPublicKey(accounts[18]) ? accounts[18] : null,
+      poolBaseVault: isLikelyPublicKey(accounts[layout.baseVaultIndex])
+        ? accounts[layout.baseVaultIndex]
+        : null,
+      poolQuoteVault: isLikelyPublicKey(accounts[layout.quoteVaultIndex])
+        ? accounts[layout.quoteVaultIndex]
+        : null,
+      migrationVersion: layout.version,
       signature: opts.signature || null,
       slot: Number(transactionResult.slot) || null,
       migrationTime: Number.isFinite(blockTime) && blockTime > 0
@@ -139,6 +166,7 @@ module.exports = {
   PUMP_PROGRAM_ID,
   PUMP_AMM_PROGRAM_ID,
   MIGRATE_DISCRIMINATOR,
+  MIGRATE_V2_DISCRIMINATOR,
   decodeBase58,
   decodeInstructionData,
   parsePumpMigrationTransaction,

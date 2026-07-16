@@ -6,6 +6,7 @@ const {
   PUMP_PROGRAM_ID,
   PUMP_AMM_PROGRAM_ID,
   MIGRATE_DISCRIMINATOR,
+  MIGRATE_V2_DISCRIMINATOR,
   decodeBase58,
   parsePumpMigrationTransaction,
 } = require('../src/utils/pumpMigrationParser');
@@ -40,6 +41,12 @@ function migrationAccounts() {
   return accounts;
 }
 
+function migrationV2Accounts() {
+  const accounts = migrationAccounts();
+  accounts.splice(8, 0, '11111111111111111111111111111111');
+  return accounts;
+}
+
 function parsedTransaction(overrides = {}) {
   const instruction = {
     programId: PUMP_PROGRAM_ID,
@@ -68,6 +75,20 @@ assert.strictEqual(parsed.poolQuoteVault, key('W'));
 assert.strictEqual(parsed.slot, 123456);
 assert.strictEqual(parsed.migrationTime, 1_700_000_000_000);
 assert.strictEqual(parsed.migrationTimeSource, 'blockTime');
+assert.strictEqual(parsed.migrationVersion, 'v1');
+
+const parsedV2 = parsePumpMigrationTransaction(parsedTransaction({
+  instruction: {
+    accounts: migrationV2Accounts(),
+    data: encodeBase58(MIGRATE_V2_DISCRIMINATOR),
+  },
+}));
+assert(parsedV2, 'official migrate_v2 instruction should be detected');
+assert.strictEqual(parsedV2.mint, key('M'));
+assert.strictEqual(parsedV2.poolAddress, key('P'));
+assert.strictEqual(parsedV2.poolBaseVault, key('V'));
+assert.strictEqual(parsedV2.poolQuoteVault, key('W'));
+assert.strictEqual(parsedV2.migrationVersion, 'v2');
 
 const wrongData = Buffer.from(MIGRATE_DISCRIMINATOR);
 wrongData[0] ^= 0xff;
@@ -80,6 +101,15 @@ wrongAmmAccounts[8] = key('Q');
 assert.strictEqual(parsePumpMigrationTransaction(parsedTransaction({
   instruction: { accounts: wrongAmmAccounts },
 })), null, 'migrate must target the official PumpSwap program');
+
+const wrongV2AmmAccounts = migrationV2Accounts();
+wrongV2AmmAccounts[9] = key('Q');
+assert.strictEqual(parsePumpMigrationTransaction(parsedTransaction({
+  instruction: {
+    accounts: wrongV2AmmAccounts,
+    data: encodeBase58(MIGRATE_V2_DISCRIMINATOR),
+  },
+})), null, 'migrate_v2 must target the official PumpSwap program at its shifted index');
 
 const compiledAccounts = migrationAccounts();
 const accountKeys = [PUMP_PROGRAM_ID, ...compiledAccounts];
@@ -126,6 +156,12 @@ discovery.settings = {
   marketRetries: 1,
   marketRetryMs: 1,
 };
+
+assert.strictEqual(
+  discovery._hasMigrationHint(['Program log: Instruction: MigrateV2']),
+  true,
+  'websocket prefilter must accept MigrateV2 logs',
+);
 
 assert.strictEqual(
   discovery._getRejection({ market: { fdv: 20_000, liquidity: 3_500 } }),

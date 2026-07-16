@@ -212,7 +212,7 @@ class PumpGraduationDiscovery extends EventEmitter {
   _hasMigrationHint(logs) {
     if (!Array.isArray(logs)) return false;
     return logs.some((line) =>
-      /Instruction:\s*Migrate\b/i.test(line) ||
+      /Instruction:\s*Migrate(?:V2)?\b/i.test(line) ||
       /MigrateFunds|CreatePool|InitializePool/i.test(line),
     );
   }
