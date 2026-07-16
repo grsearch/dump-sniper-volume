@@ -7,8 +7,8 @@ The service discovers successful Pump.fun graduations without a webhook:
 - Helius WebSocket logs provide the low-latency path; the migration wallet is polled every 5 seconds to fill gaps.
 - A transaction is accepted only when it contains the official Pump `migrate` discriminator and targets the official PumpSwap program.
 - Mint, pool, vaults, chain `blockTime`, slot, and signature are read from the confirmed transaction and saved in `tokens`.
-- All token sources use the same market thresholds: FDV `$15,000-$1,000,000` and liquidity at least `$3,000`. Pump graduation admission also requires revoked mint/freeze authorities and creation age no more than 4 hours.
-- Discovery does not require 24-hour volume because newly migrated market data is incomplete. `TokenWatchdog` still applies its periodic filters afterward.
+- All token sources use the same market thresholds: FDV `$15,000-$1,000,000` and liquidity at least `$3,000`.
+- Pump graduation admission checks only FDV and liquidity. It records the confirmed migration time and does not request or filter on mint creation age.
 - Passing discovery only adds the token to monitoring. The Activity Flow buy strategy remains unchanged.
 
 Configuration is under `PUMP_DISCOVERY_*` in `.env.example`. Set `PUMP_DISCOVERY_ENABLED=false` to disable it.
@@ -50,6 +50,7 @@ Legacy dumpSignal: suppressed
 - 紧急止损和稳定期紧急止损：关闭。
 - TIMEOUT 卖出：关闭。
 - 加仓：默认最多加仓 1 次；价格相对第一笔入场价下跌 `20%` 后，新的合格信号才允许加仓。同币任一仓位触发自动退出时，全部仓位按顺序逐笔卖出。
+- 卖出冷静期：实际平仓完成后，同币 `5 分钟` 内禁止再次买入；多仓分批卖出时从最后一笔完成卖出重新计时。
 
 ## 监控列表过滤
 
@@ -58,7 +59,8 @@ TokenWatchdog 默认每 1 分钟巡检一次 FDV 和 LP：
 - FDV 必须在 `$15,000 ~ $1,000,000`
 - Birdeye LP 必须 `>= $3,000`
 - 24h 交易量必须 `>= $5,000`
-- 创建时间超过 `4h` 的代币会从监控列表移除；已有持仓会保留监控直到平仓
+- AGE 从 Pump 迁移时间开始计算；迁移超过 `24h` 的代币会被移除，已有持仓会保留监控直到平仓
+- 迁移时间未知时 AGE 显示未知并跳过 AGE 移除，不使用 mint 创建时间或添加时间猜测
 - 监控列表上限默认 `500` 个；只有新增代币后超过该上限才会触发驱逐
 
 ## 数据留存
@@ -136,13 +138,13 @@ MAX_HOLD_MS=0
 ADDON_ENABLED=1
 ADDON_DROP_PCT=20
 
-REBUY_COOLDOWN_MS=0
+REBUY_COOLDOWN_MS=300000
 TOKEN_MAX_AGE_MS=0
 MIN_FDV_USD=15000
 MAX_FDV_USD=1000000
 MIN_LIQUIDITY_USD=3000
 WATCHDOG_CHECK_INTERVAL_MS=60000
-MAX_TOKEN_AGE_MS=14400000
+MAX_TOKEN_AGE_MS=86400000
 MAX_MINT_AGE_HOURS=0
 NEW_COIN_AGE_THRESHOLD_MS=0
 MAX_WATCHED_TOKENS=500

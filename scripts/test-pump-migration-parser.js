@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('assert');
+const Module = require('module');
 const {
   PUMP_PROGRAM_ID,
   PUMP_AMM_PROGRAM_ID,
@@ -106,4 +107,93 @@ assert(parsePumpMigrationTransaction(compiled), 'compiled account indexes should
 assert.deepStrictEqual(decodeBase58('1'), Buffer.from([0]));
 assert.deepStrictEqual(decodeBase58('2'), Buffer.from([1]));
 
-console.log('Pump migration parser tests passed');
+const originalLoad = Module._load;
+Module._load = function loadWithDependencyStubs(request, parent, isMain) {
+  if (request === 'dotenv') return { config() {} };
+  if (request === 'axios') return { get: async () => ({}), post: async () => ({ data: {} }) };
+  if (request === 'ws') return class WebSocketStub {};
+  return originalLoad.call(this, request, parent, isMain);
+};
+const PumpGraduationDiscovery = require('../src/core/PumpGraduationDiscovery');
+const TokenWatchdog = require('../src/core/TokenWatchdog');
+Module._load = originalLoad;
+
+const discovery = Object.create(PumpGraduationDiscovery.prototype);
+discovery.settings = {
+  minFdvUsd: 15_000,
+  maxFdvUsd: 1_000_000,
+  minLiquidityUsd: 3_000,
+  marketRetries: 1,
+  marketRetryMs: 1,
+};
+
+assert.strictEqual(
+  discovery._getRejection({ market: { fdv: 20_000, liquidity: 3_500 } }),
+  null,
+  'discovery must accept valid FDV/LP without security or creation-time data',
+);
+assert.strictEqual(
+  discovery._getRejection({ market: { fdv: 14_999, liquidity: 3_500 } }).code,
+  'fdv_low',
+);
+assert.strictEqual(
+  discovery._getRejection({ market: { fdv: 20_000, liquidity: 2_999 } }).code,
+  'liquidity_low',
+);
+
+const watchdog = Object.create(TokenWatchdog.prototype);
+const now = 1_800_000_000_000;
+assert.strictEqual(
+  watchdog._getMigrationAgeMs({ creation_time: now - 7 * 24 * 3600_000, migration_time: now - 60_000 }, now),
+  60_000,
+  'AGE must start from migration even when mint creation is much older',
+);
+assert.strictEqual(
+  watchdog._getMigrationAgeMs({ creation_time: now - 7 * 24 * 3600_000 }, now),
+  null,
+  'missing migration time must remain unknown instead of falling back to creation time',
+);
+
+(async () => {
+  let marketCalls = 0;
+  discovery.fetchMarket = async () => {
+    marketCalls++;
+    return { fdv: 20_000, liquidity: 3_500 };
+  };
+  const screening = await discovery._fetchScreeningData(key('M'));
+  assert.deepStrictEqual(screening, { market: { fdv: 20_000, liquidity: 3_500 } });
+  assert.strictEqual(marketCalls, 1);
+
+  let addOptions = null;
+  discovery.tokenRegistry = {
+    getToken: () => null,
+    addToken: async (_mint, opts) => {
+      addOptions = opts;
+      return { mint: key('M'), symbol: 'TEST' };
+    },
+  };
+  discovery.settings.marketInitialDelayMs = 0;
+  discovery._fetchScreeningData = async () => screening;
+  discovery.fetchAsset = async () => ({ symbol: 'TEST' });
+  discovery.onBeforeAdd = null;
+  discovery.onTokenAdded = null;
+  discovery.emit = () => {};
+  await discovery._screenAndAdd({
+    mint: key('M'),
+    poolAddress: key('P'),
+    poolBaseVault: key('V'),
+    poolQuoteVault: key('W'),
+    migrationTime: now - 60_000,
+    migrationTimeSource: 'blockTime',
+    slot: 123456,
+    signature: 'migration-signature',
+    detectionPath: 'test',
+  });
+  assert.strictEqual(addOptions.fetchCreationTime, false, 'discovery must not fetch mint creation age');
+  assert.strictEqual(addOptions.migrationTime, now - 60_000);
+  console.log('Pump migration and discovery policy tests passed');
+  process.exit(0);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

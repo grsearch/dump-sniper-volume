@@ -160,10 +160,10 @@ class TokenRegistry {
         WHERE mint = ?
       `),
 
-      // v3.35: 移除 creation_time 超过 maxAgeMs 的活跃代币
+      // Monitoring AGE is measured from Pump migration, not mint creation.
       removeStaleByAge: this.db.prepare(`
         UPDATE tokens SET is_active = 0, updated_at = ?
-        WHERE is_active = 1 AND creation_time IS NOT NULL AND creation_time < ?
+        WHERE is_active = 1 AND migration_time IS NOT NULL AND migration_time < ?
       `),
 
       // v3.17.20: 查询某个 pool_address 是否已被另一个活跃 mint 占用（防签名串，图8）
@@ -200,6 +200,7 @@ class TokenRegistry {
    * Add (or re-activate) a token. Fetches metadata via tokenMeta helper.
    * @param {string} mint
    * @param {{symbol?:string, source?:string, meta?:object, creationTime?:number,
+   *   fetchCreationTime?:boolean,
    *   poolAddress?:string, poolBaseVault?:string, poolQuoteVault?:string,
    *   migrationTime?:number, migrationTimeSource?:string, migrationSlot?:number,
    *   migrationSignature?:string}} opts
@@ -243,7 +244,7 @@ class TokenRegistry {
     };
 
     // v3.19: 获取代币创建时间（Birdeye token_security）
-    if (!row.creation_time) {
+    if (!row.creation_time && opts.fetchCreationTime !== false) {
       try {
         const creationInfo = await fetchTokenCreationTime(mint);
         if (creationInfo?.creationTime) {
@@ -343,7 +344,7 @@ class TokenRegistry {
   }
 
   /**
-   * v3.35: 移除创建时间超过 maxAgeMs 的活跃代币。
+   * 移除迁移时间超过 maxAgeMs 的活跃代币。迁移时间未知时跳过。
    * 返回被移除的数量。
    */
   removeStaleByAge(maxAgeMs = 0) {
@@ -354,11 +355,11 @@ class TokenRegistry {
     if (removed > 0) {
       // 清除缓存中对应的条目
       for (const [mint, token] of this.cache) {
-        if (token.creation_time && token.creation_time < cutoff) {
+        if (token.migration_time && token.migration_time < cutoff) {
           this.cache.delete(mint);
         }
       }
-      console.log(`[TokenRegistry] 🕐 Removed ${removed} tokens older than ${Math.round(maxAgeMs / 3600000)}h`);
+      console.log(`[TokenRegistry] 🕐 Removed ${removed} tokens migrated more than ${Math.round(maxAgeMs / 3600000)}h ago`);
     }
     return removed;
   }

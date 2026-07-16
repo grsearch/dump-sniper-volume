@@ -7,7 +7,6 @@ const { config } = require('../config');
 const {
   fetchTokenAssetFromHelius,
   fetchTokenMarketFromBirdeye,
-  fetchTokenSecurityFromBirdeye,
 } = require('../utils/tokenMeta');
 const { parsePumpMigrationTransaction } = require('../utils/pumpMigrationParser');
 const { getMonitor } = require('../monitor/HealthMonitor');
@@ -56,7 +55,6 @@ class PumpGraduationDiscovery extends EventEmitter {
     );
     this.migrationWallet = opts.migrationWallet || config.programs.pumpMigrationWallet;
     this.fetchMarket = opts.fetchMarket || fetchTokenMarketFromBirdeye;
-    this.fetchSecurity = opts.fetchSecurity || fetchTokenSecurityFromBirdeye;
     this.fetchAsset = opts.fetchAsset || fetchTokenAssetFromHelius;
     this.rpcRequest = opts.rpcRequest || this._rpcRequest.bind(this);
 
@@ -96,9 +94,7 @@ class PumpGraduationDiscovery extends EventEmitter {
     });
     console.log(
       `[PumpDiscovery] enabled: FDV $${this.settings.minFdvUsd}-${this.settings.maxFdvUsd}, ` +
-        `liquidity >= $${this.settings.minLiquidityUsd}, ` +
-        `maxAge=${this.settings.maxTokenAgeMs > 0 ? `${this.settings.maxTokenAgeMs / 3_600_000}h` : 'off'}, ` +
-        `authorities=${this.settings.requireRevokedAuthorities ? 'revoked' : 'unchecked'}`,
+        `liquidity >= $${this.settings.minLiquidityUsd}, market-only screening`,
     );
 
     this._connectWebSocket();
@@ -348,11 +344,10 @@ class PumpGraduationDiscovery extends EventEmitter {
     }
 
     const evicted = this.onBeforeAdd ? await this.onBeforeAdd(migration.mint) : [];
-    const creationTime = toMilliseconds(screening.security.creationTime);
     const token = await this.tokenRegistry.addToken(migration.mint, {
       source: 'pump_graduation',
       meta: { ...asset, ...screening.market, fetchedAt: Date.now() },
-      creationTime,
+      fetchCreationTime: false,
       poolAddress: migration.poolAddress,
       poolBaseVault: migration.poolBaseVault,
       poolQuoteVault: migration.poolQuoteVault,
@@ -375,33 +370,29 @@ class PumpGraduationDiscovery extends EventEmitter {
 
   async _fetchScreeningData(mint) {
     let lastMarketError = null;
-    let lastSecurityError = null;
     const attempts = Math.max(1, this.settings.marketRetries);
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      const [marketResult, securityResult] = await Promise.allSettled([
-        this.fetchMarket(mint),
-        this.fetchSecurity(mint),
-      ]);
-      const market = marketResult.status === 'fulfilled' ? marketResult.value : null;
-      const security = securityResult.status === 'fulfilled' ? securityResult.value : null;
-      lastMarketError = marketResult.status === 'rejected' ? marketResult.reason : null;
-      lastSecurityError = securityResult.status === 'rejected' ? securityResult.reason : null;
+      let market = null;
+      try {
+        market = await this.fetchMarket(mint);
+        lastMarketError = null;
+      } catch (err) {
+        lastMarketError = err;
+      }
 
       const hasMarket = finiteNumber(market?.fdv) > 0 && finiteNumber(market?.liquidity) > 0;
-      const hasSecurity = !this.settings.requireRevokedAuthorities || security != null;
-      if (hasMarket && hasSecurity) return { market, security };
+      if (hasMarket) return { market };
       if (attempt < attempts) await sleep(Math.max(250, this.settings.marketRetryMs));
     }
 
-    const details = [lastMarketError?.message, lastSecurityError?.message].filter(Boolean).join('; ');
+    const details = lastMarketError?.message || '';
     throw new Error(`screening data unavailable for ${mint}${details ? `: ${details}` : ''}`);
   }
 
-  _getRejection({ market, security }) {
+  _getRejection({ market }) {
     const fdv = finiteNumber(market?.fdv);
     const liquidity = finiteNumber(market?.liquidity);
-    const volume24h = finiteNumber(market?.volume24h);
     if (fdv == null) return { code: 'fdv_missing', message: 'FDV unavailable' };
     if (fdv < this.settings.minFdvUsd) {
       return { code: 'fdv_low', message: `FDV $${Math.round(fdv)} < $${this.settings.minFdvUsd}` };
@@ -413,33 +404,6 @@ class PumpGraduationDiscovery extends EventEmitter {
       return {
         code: 'liquidity_low',
         message: `liquidity $${Math.round(liquidity || 0)} < $${this.settings.minLiquidityUsd}`,
-      };
-    }
-    if (this.settings.minVolume24hUsd > 0 && (volume24h == null || volume24h < this.settings.minVolume24hUsd)) {
-      return {
-        code: 'volume_low',
-        message: `24h volume $${Math.round(volume24h || 0)} < $${this.settings.minVolume24hUsd}`,
-      };
-    }
-    if (this.settings.requireRevokedAuthorities) {
-      if (!security) return { code: 'security_missing', message: 'authority data unavailable' };
-      if (security.mintAuthority) {
-        return { code: 'mint_authority', message: `mint authority active: ${security.mintAuthority}` };
-      }
-      if (security.freezeAuthority) {
-        return { code: 'freeze_authority', message: `freeze authority active: ${security.freezeAuthority}` };
-      }
-    }
-
-    const creationTime = toMilliseconds(security?.creationTime);
-    if (this.settings.maxTokenAgeMs > 0 && !creationTime) {
-      return { code: 'token_age_missing', message: 'token creation time unavailable' };
-    }
-    if (this.settings.maxTokenAgeMs > 0 && creationTime && Date.now() - creationTime > this.settings.maxTokenAgeMs) {
-      const ageHours = (Date.now() - creationTime) / 3_600_000;
-      return {
-        code: 'token_too_old',
-        message: `token age ${ageHours.toFixed(1)}h > ${this.settings.maxTokenAgeMs / 3_600_000}h`,
       };
     }
     return null;

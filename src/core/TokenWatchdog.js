@@ -49,7 +49,7 @@ class TokenWatchdog {
       : config.strategy.minLiquidityUsd;
 
     // Monitoring-list age limit. Open positions are retained until they close.
-    this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '14400000', 10);
+    this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '86400000', 10);
 
     this._pendingExitMints = new Set();
     this._checkInterval = null;
@@ -109,6 +109,12 @@ class TokenWatchdog {
     } finally {
       this._checking = false;
     }
+  }
+
+  _getMigrationAgeMs(token, now = Date.now()) {
+    const migrationTime = Number(token?.migration_time);
+    if (!Number.isFinite(migrationTime) || migrationTime <= 0) return null;
+    return now - migrationTime;
   }
 
   stop() {
@@ -259,13 +265,12 @@ class TokenWatchdog {
         }
       }
 
-      // v3.32d: 代币年龄过滤 — 用 creation_time（币创建时间）
-      //   入场处也用 creation_time (MAX_MINT_AGE_HOURS)，保持一致
-      //   creation_time 为 null 时跳过（还没回填，不阻塞）
-      if (this.maxTokenAgeMs > 0 && token.creation_time && token.creation_time > 0) {
-        const tokenAge = now - token.creation_time;
+      // Monitoring AGE starts at Pump migration. Unknown migration time is not
+      // guessed from mint creation or add time; it is simply skipped.
+      const tokenAge = this._getMigrationAgeMs(token, now);
+      if (this.maxTokenAgeMs > 0 && tokenAge != null) {
         if (tokenAge >= this.maxTokenAgeMs) {
-          reasons.push(`token_too_old(${Math.round(tokenAge / 3600000)}h >= ${this.maxTokenAgeMs / 3600000}h)`);
+          reasons.push(`migration_too_old(${Math.round(tokenAge / 3600000)}h >= ${this.maxTokenAgeMs / 3600000}h)`);
         }
       }
 

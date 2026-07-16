@@ -159,6 +159,7 @@ const config = {
 
     // 风控（v3.17 默认 maxConcurrent 5）
     cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '0', 10),
+    rebuyCooldownMs: parseInt(process.env.REBUY_COOLDOWN_MS || '300000', 10),
     maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS || '10', 10),
 
     // v3.17.6: 同砸单去重时间窗（毫秒）
@@ -403,9 +404,6 @@ const config = {
     minFdvUsd: parseFloat(process.env.MIN_FDV_USD || '15000'),
     maxFdvUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
     minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '3000'),
-    minVolume24hUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_VOLUME_24H_USD || '0'),
-    maxTokenAgeMs: parseInt(process.env.PUMP_DISCOVERY_MAX_TOKEN_AGE_MS || process.env.MAX_TOKEN_AGE_MS || '14400000', 10),
-    requireRevokedAuthorities: (process.env.PUMP_DISCOVERY_REQUIRE_REVOKED_AUTHORITIES ?? 'true').toLowerCase() === 'true',
   },
 
   // ============ Priority fees ============

@@ -2174,7 +2174,7 @@ class PositionManager extends EventEmitter {
       } else if (isTimeout) {
         rebuyCooldownMs = parseInt(process.env.TIMEOUT_REBUY_COOLDOWN_MS || '86400000', 10); // 24h
       } else {
-        rebuyCooldownMs = parseInt(process.env.REBUY_COOLDOWN_MS || '0', 10);
+        rebuyCooldownMs = config.strategy.rebuyCooldownMs;
       }
       if (rebuyCooldownMs > 0) {
         this.signalEngine._exitCooldowns.set(pos.mint, Date.now() + rebuyCooldownMs);

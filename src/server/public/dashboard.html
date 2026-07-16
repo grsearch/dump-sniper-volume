@@ -312,7 +312,7 @@
         <table id="tokenTable">
           <thead>
             <tr>
-              <th>Symbol</th><th>CA</th><th>FDV</th><th>LP</th><th>Price</th><th>24h Vol</th><th>添加时间</th><th>AGE</th><th>来源</th><th></th>
+              <th>Symbol</th><th>CA</th><th>FDV</th><th>LP</th><th>Price</th><th>24h Vol</th><th>添加时间</th><th>迁移 AGE</th><th>来源</th><th></th>
             </tr>
           </thead>
           <tbody id="tokenTbody"><tr><td colspan="10" class="empty">尚未添加任何代币</td></tr></tbody>
@@ -492,7 +492,7 @@ async function refreshTokens() {
   const ageFilterHours = parseInt($('ageFilter')?.value || '0');
   if (ageFilterHours > 0) {
     const cutoff = Date.now() - ageFilterHours * 3600000;
-    const filteredCount = _allTokens.filter(t => t.is_active && t.creation_time && t.creation_time >= cutoff).length;
+    const filteredCount = _allTokens.filter(t => t.is_active && t.migration_time && t.migration_time >= cutoff).length;
     $('tokenCountMeta').textContent = filteredCount + ' new24h / ' + activeCount + ' active / ' + _allTokens.length + ' total';
   } else {
     $('tokenCountMeta').textContent = activeCount + ' active / ' + _allTokens.length + ' total';
@@ -506,7 +506,7 @@ function renderTokenPage() {
   let tokens = _allTokens;
   if (ageFilterHours > 0) {
     const cutoff = Date.now() - ageFilterHours * 3600000;
-    tokens = tokens.filter(t => t.is_active && t.creation_time && t.creation_time >= cutoff);
+    tokens = tokens.filter(t => t.is_active && t.migration_time && t.migration_time >= cutoff);
   }
   const fc = $('ageFilterCount');
   if (fc) fc.textContent = ageFilterHours > 0 ? tokens.length + ' 条' : '';
@@ -528,7 +528,7 @@ function renderTokenPage() {
       <td class="mono">${t.price ? Number(t.price).toExponential(3) : '-'}</td>
       <td class="mono">${fmtMoney(t.meta_json ? (JSON.parse(t.meta_json).volume24h || null) : null)}</td>
       <td class="mono" style="font-size:11px;">${fmtTime(t.added_at)}</td>
-      <td class="mono" style="font-size:11px;">${fmtAge(t.creation_time)}</td>
+      <td class="mono" style="font-size:11px;">${fmtAge(t.migration_time)}</td>
       <td><span class="pill ${t.source === 'webhook' ? 'live' : 'dry'}">${t.source || 'manual'}</span></td>
       <td>${t.is_active ? `<button class="btn btn-sm btn-danger" onclick="removeToken('${t.mint}')">移除</button>` : '<span class="neutral">已移除</span>'}</td>
     </tr>`).join('');
@@ -940,9 +940,9 @@ function fmtMoney(n) {
   if (n >= 1e3) return '$' + (n / 1e3).toFixed(2) + 'K';
   return '$' + Number(n).toFixed(2);
 }
-function fmtAge(creationTime) {
-    if (!creationTime) return '<span style="color:var(--text-dim)">-</span>';
-    const ageMs = Date.now() - creationTime;
+function fmtAge(migrationTime) {
+    if (!migrationTime) return '<span style="color:var(--text-dim)">-</span>';
+    const ageMs = Date.now() - migrationTime;
     if (ageMs < 0) return '-';
     const ageMin = Math.floor(ageMs / 60000);
     if (ageMin < 60) return ageMin + 'm';

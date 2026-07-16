@@ -24,7 +24,7 @@ const PumpGraduationDiscovery = require('./core/PumpGraduationDiscovery');
 const monitor = getMonitor();
 
 async function main() {
-  const maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '14400000', 10);
+  const maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '86400000', 10);
   const watchdogCheckIntervalMs = parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '60000', 10);
   const watchdogFdvRange = config.strategy.maxFdVUsd > 0
     ? `$${config.strategy.minFdVUsd}-$${config.strategy.maxFdVUsd}`
@@ -58,14 +58,15 @@ async function main() {
       `hold>=${config.strategy.flowReversalExitMinHoldMs}ms)`
     : 'Flow exit: disabled');
   console.log(`Legacy dumpSignal: ${config.activityFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
+  console.log(`Rebuy cooldown: ${config.strategy.rebuyCooldownMs > 0 ? config.strategy.rebuyCooldownMs / 60_000 + 'min after close' : 'disabled'}`);
   console.log(
     `Watchdog: FDV=${watchdogFdvRange}, liquidity>=$${config.strategy.minLiquidityUsd}, ` +
-      `maxAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 3_600_000) + 'h' : 'disabled'} ` +
+      `migrationAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 3_600_000) + 'h' : 'disabled'} ` +
       `(check every ${watchdogCheckIntervalMs / 60_000}min)`,
   );
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct < 0 ? config.strategy.emergencyStopLossPct + '%' : 'disabled'}`);
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);
-  console.log(`Add-on: disabled (one position per mint)`);
+  console.log(`Add-on: ${process.env.ADDON_ENABLED !== '0' ? `enabled once after ${process.env.ADDON_DROP_PCT || '20'}% drop` : 'disabled'}`);
   console.log(`Executor: Pump AMM SDK direct (no Jupiter)`);
   console.log(`Pump graduation discovery: ${config.pumpDiscovery.enabled ? 'enabled' : 'disabled'}`);
   console.log('================================================');
@@ -887,8 +888,12 @@ async function main() {
     server.broadcast({ type: 'positionOpened', position: pos }),
   );
   positionManager.on('closed', (pos) => {
-    // v3.17.15: 卖出后设置冷却，防止同一根K线买卖
+    // Start cooldown from confirmed close. Sequential add-on exits extend the
+    // same mint cooldown from the latest completed sale.
     signalEngine.lastTriggerTs.set(pos.mint, Date.now());
+    if (config.strategy.rebuyCooldownMs > 0) {
+      signalEngine._exitCooldowns.set(pos.mint, Date.now() + config.strategy.rebuyCooldownMs);
+    }
     server.broadcast({ type: 'positionClosed', position: pos });
   });
 

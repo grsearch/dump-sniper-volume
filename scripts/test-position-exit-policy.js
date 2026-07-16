@@ -15,6 +15,7 @@ Module._load = function loadWithDotenvStub(request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 const PositionManager = require('../src/core/PositionManager');
+const { config } = require('../src/config');
 Module._load = originalLoad;
 
 function position(id, mint, overrides = {}) {
@@ -63,6 +64,7 @@ function rsiSnapshot(live, overrides = {}) {
 
 function run() {
   const mint = 'TestMint111111111111111111111111111111111';
+  assert.strictEqual(config.strategy.rebuyCooldownMs, 300_000, 'default post-sale cooldown must be 5 minutes');
 
   {
     const manager = managerWith(position('p1', mint), position('p2', mint));

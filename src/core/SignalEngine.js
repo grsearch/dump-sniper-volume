@@ -439,13 +439,13 @@ class SignalEngine extends EventEmitter {
       }
     }
 
-    // v3.32d: 币龄上限过滤 — creation_time 已在 registry 缓存, 零 RPC
+    // Optional hot-path age filter uses Pump migration time, matching Watchdog.
     const maxAgeH = parseFloat(process.env.MAX_MINT_AGE_HOURS || '0'); // 0=禁用
     if (maxAgeH > 0 && this.tokenRegistry) {
       const tokenInfo = this.tokenRegistry.getToken(mint);
-      const ct = tokenInfo?.creation_time; // ms
-      // ct 为 null(还没回填) → 不进 if, 自动放行(保速度, 不阻塞热路径等数据)
-      if (ct && (Date.now() - ct) > maxAgeH * 3600 * 1000) {
+      const migrationTime = tokenInfo?.migration_time; // ms
+      // Unknown migration time is allowed; never substitute mint creation time.
+      if (migrationTime && (Date.now() - migrationTime) > maxAgeH * 3600 * 1000) {
         monitor.inc('SignalEngine.rejectedOldMint', 1, 'SignalEngine');
         this._logReject(signal, `mint age > ${maxAgeH}h`);
         return;
@@ -465,11 +465,10 @@ class SignalEngine extends EventEmitter {
       return;
     }
 
-    // 7. v3.17.20: 关闭加仓 — 同一代币已有持仓或正在买入时，新信号直接拒绝
-    //    （用户需求：不再对同币加仓，避免单币过度集中 + 重复买在下跌途中）
-    // v3.24: 同币卖出后冷却检查 — 避免短时间重复买入同一币
+    // 7. Same-mint controls: post-sale cooldown, in-flight buy lock, then the
+    // configured one-time add-on rule for an existing position.
     {
-      const rebuyCooldownMs = parseInt(process.env.REBUY_COOLDOWN_MS || '0', 10);
+      const rebuyCooldownMs = config.strategy.rebuyCooldownMs;
       const exitCooldown = rebuyCooldownMs > 0 ? this._exitCooldowns.get(mint) : 0;
       if (exitCooldown && Date.now() < exitCooldown) {
         monitor.inc('SignalEngine.rejectedRebuyCooldown', 1, 'SignalEngine');
