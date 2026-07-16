@@ -37,6 +37,7 @@ function managerWith(...positions) {
   const manager = Object.create(PositionManager.prototype);
   manager.positions = new Map();
   manager.byMint = new Map();
+  manager._rsiExitSkipLogAt = new Map();
   manager._exitCalls = [];
   manager._exit = function mockExit(pos, price, reason) {
     if (pos.exiting) return;
@@ -86,6 +87,13 @@ function run() {
     );
     assert.strictEqual(manager.handleRsiForExit(mint, 1, rsiSnapshot(95)), false);
     assert.strictEqual(manager._exitCalls.length, 0, 'armed trailing must suppress RSI for the whole mint');
+    assert.strictEqual(manager._rsiExitSkipLogAt.get(mint).reason, 'trailing_armed');
+  }
+
+  {
+    const manager = managerWith(position('p1', mint, { stabilizing: true }));
+    assert.strictEqual(manager.handleRsiForExit(mint, 1, rsiSnapshot(95)), false);
+    assert.strictEqual(manager._rsiExitSkipLogAt.get(mint).reason, 'stabilizing');
   }
 
   {
@@ -95,6 +103,7 @@ function run() {
       false,
     );
     assert.strictEqual(manager._exitCalls.length, 0, 'RSI needs the configured completed-bar minimum');
+    assert.strictEqual(manager._rsiExitSkipLogAt.get(mint).reason, 'insufficient_bars');
   }
 
   {

@@ -67,6 +67,7 @@ class PositionManager extends EventEmitter {
     this._sellInProgress = new Set(); // 正在卖出的 mint
     this._tickCount = 0;  // v3.26: tick counter for PoolStateCache price check
     this._flowExitEvents = new Map(); // mint -> recent BUY/SELL swaps while holding
+    this._rsiExitSkipLogAt = new Map(); // mint -> { ts, reason }; throttle diagnostic logs
 
     this.positions = new Map(); // positionId → position obj
     this.byMint = new Map();    // mint → Set<positionId> (v3.17.13: 同币多仓)
@@ -353,6 +354,7 @@ class PositionManager extends EventEmitter {
     if (pids.size === 0) {
       this.byMint.delete(mint);
       this._flowExitEvents.delete(mint);
+      this._rsiExitSkipLogAt.delete(mint);
     }
   }
 
@@ -394,10 +396,34 @@ class PositionManager extends EventEmitter {
    * 每笔 swap 更新 RSI 后调用。RSI 使用当前 1 分钟实时值；移动止盈一旦
    * 在同币任一仓位上激活，便接管整组仓位，后续不再走 RSI 超买退出。
    */
+  _logRsiExitSkip(mint, active, snapshot, reason, details = '') {
+    const now = Date.now();
+    const last = this._rsiExitSkipLogAt.get(mint);
+    const throttleMs = 5000;
+    if (last && last.reason === reason && now - last.ts < throttleMs) return;
+    this._rsiExitSkipLogAt.set(mint, { ts: now, reason });
+
+    const liveRsi = snapshot?.rsi1mLive == null ? NaN : Number(snapshot.rsi1mLive);
+    const closedRsi = snapshot?.rsi1mClosed == null ? NaN : Number(snapshot.rsi1mClosed);
+    const bars = Number(snapshot?.rsi1mClosedBars || 0);
+    const symbol = active?.[0]?.symbol || mint.slice(0, 6);
+    console.log(
+      `[PositionManager] RSI_EXIT_SKIPPED ${symbol} ` +
+        `live=${Number.isFinite(liveRsi) ? liveRsi.toFixed(1) : 'n/a'} ` +
+        `closed=${Number.isFinite(closedRsi) ? closedRsi.toFixed(1) : 'n/a'} ` +
+        `bars=${bars} positions=${active?.length || 0} reason=${reason}` +
+        `${details ? ` ${details}` : ''}`,
+    );
+    monitor.inc(`PositionManager.rsi1mExitSkipped.${reason}`, 1, 'PositionManager');
+  }
+
   handleRsiForExit(mint, price, snapshot) {
     const s = config.strategy;
     if (!s.rsi1mExitEnabled || !Number.isFinite(s.rsi1mExitThreshold)) return false;
-    if (!mint || !Number.isFinite(price) || price <= 0 || !snapshot) return false;
+    if (!mint || !snapshot) return false;
+
+    const liveRsi = snapshot.rsi1mLive == null ? NaN : Number(snapshot.rsi1mLive);
+    const isOverbought = Number.isFinite(liveRsi) && liveRsi > s.rsi1mExitThreshold;
 
     const pids = this.byMint.get(mint);
     if (!pids || pids.size === 0) return false;
@@ -410,17 +436,42 @@ class PositionManager extends EventEmitter {
     }
     if (active.length === 0) return false;
 
+    if (!Number.isFinite(price) || price <= 0) {
+      if (isOverbought) this._logRsiExitSkip(mint, active, snapshot, 'accepted_price_unavailable');
+      return false;
+    }
+
     // 不在买入对账或稳定期内抢先卖，避免 tokenAmount/entryPrice 尚未可靠。
-    if (active.some((pos) => (!pos.reconciled && !pos.dryRun) || pos.stabilizing)) return false;
+    if (active.some((pos) => !pos.reconciled && !pos.dryRun)) {
+      if (isOverbought) this._logRsiExitSkip(mint, active, snapshot, 'not_reconciled');
+      return false;
+    }
+    if (active.some((pos) => pos.stabilizing)) {
+      if (isOverbought) this._logRsiExitSkip(mint, active, snapshot, 'stabilizing');
+      return false;
+    }
 
     // “移动止盈先激活”按同币整组判断，而不是只看当前遍历到的仓位。
-    if (active.some((pos) => pos.trailingArmed)) return false;
+    if (active.some((pos) => pos.trailingArmed)) {
+      if (isOverbought) this._logRsiExitSkip(mint, active, snapshot, 'trailing_armed');
+      return false;
+    }
 
     const minBars = Math.max(1, config.activityFlow.rsi1mMinBars || 1);
     const completedBars = Number(snapshot.rsi1mClosedBars || 0);
-    const liveRsi = Number(snapshot.rsi1mLive);
-    if (completedBars < minBars || !Number.isFinite(liveRsi)) return false;
-    if (liveRsi <= s.rsi1mExitThreshold) return false;
+    if (completedBars < minBars) {
+      if (isOverbought) {
+        this._logRsiExitSkip(
+          mint,
+          active,
+          snapshot,
+          'insufficient_bars',
+          `need=${minBars}`,
+        );
+      }
+      return false;
+    }
+    if (!isOverbought) return false;
 
     console.log(
       `[PositionManager] RSI_1M_EXIT ${active[0].symbol || mint.slice(0, 6)} ` +
