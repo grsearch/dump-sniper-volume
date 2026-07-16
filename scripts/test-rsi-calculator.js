@@ -43,13 +43,27 @@ function run() {
   calculator.feedTrade(mint, 44.6, 100, 'buy', 7 * minute + 10_000, 50);
   let snapshot = calculator.snapshot(mint);
   approx(snapshot.rsi1m, 62.5);
+  approx(snapshot.rsi1mLive, 62.5);
+  assert.strictEqual(snapshot.rsi1mClosed, null, 'closed RSI needs eight completed 1-minute closes');
+  assert.strictEqual(snapshot.rsi1mClosedBars, 7);
   assert.strictEqual(snapshot.bucketCount1m, 8);
 
   // The live candle's latest price is its close. Its high-volume first trade must not turn RSI into VWAP RSI.
   calculator.feedTrade(mint, 45.6, 1, 'buy', 7 * minute + 50_000, 50);
   snapshot = calculator.snapshot(mint);
   approx(snapshot.rsi1m, 80.76923076923077);
+  approx(snapshot.rsi1mLive, 80.76923076923077);
+  assert.strictEqual(snapshot.rsi1mClosed, null);
   assert.strictEqual(snapshot.bucketCount1m, 8);
+
+  // Once the minute closes, preserve its RSI separately while the new live bar changes.
+  calculator.feedTick(mint, 45.3, 8 * minute + 10_000);
+  snapshot = calculator.snapshot(mint);
+  approx(snapshot.rsi1mClosed, referenceRsi([...closes, 45.6], 7));
+  approx(snapshot.rsi1mLive, referenceRsi([...closes, 45.6, 45.3], 7));
+  assert.strictEqual(snapshot.rsi1mClosedBars, 8);
+  assert.strictEqual(snapshot.rsi1mLiveClose, 45.3);
+  assert.strictEqual(snapshot.rsi1mLastClosedClose, 45.6);
 
   const sparse = new RsiCalculator({ period60: 7, maxBuckets: 120 });
   sparse.feedTick('sparse', 10, 0);
@@ -60,7 +74,9 @@ function run() {
   const longCloses = Array.from({ length: 300 }, (_, index) =>
     100 + Math.sin(index / 7) * 4 + index * 0.01);
   longCloses.forEach((price, index) => longRun.feedTick('long', price, index * minute + 50_000));
-  approx(longRun.snapshot('long').rsi1m, referenceRsi(longCloses, 7));
+  const longSnapshot = longRun.snapshot('long');
+  approx(longSnapshot.rsi1mLive, referenceRsi(longCloses, 7));
+  approx(longSnapshot.rsi1mClosed, referenceRsi(longCloses.slice(0, -1), 7));
 
   console.log('RsiCalculator TradingView 1m RSI self-test: PASS');
 }

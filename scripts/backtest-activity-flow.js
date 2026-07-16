@@ -87,8 +87,12 @@ function passesEntry(cfg, s5, s15, s30, s60, event) {
     if (s60.buySellRatio < cfg.minRatio1m) return false;
     if (cfg.rsi1mEnabled) {
       const minBars = Math.max(cfg.rsi1mPeriod + 1, cfg.rsi1mMinBars);
-      if (event.rsi1mBars < minBars || !Number.isFinite(event.rsi1m)) return false;
-      if (event.rsi1m >= cfg.rsi1mMax) return false;
+      if (
+        event.rsi1mBars < minBars ||
+        !Number.isFinite(event.rsi1mClosed) ||
+        !Number.isFinite(event.rsi1mLive)
+      ) return false;
+      if (event.rsi1mClosed >= cfg.rsi1mMax || event.rsi1mLive >= cfg.rsi1mMax) return false;
     }
     if (s5.buyCount < cfg.confirmMinBuyTrades5s) return false;
     if (s5.uniqueBuyers < cfg.confirmMinUniqueBuyers5s) return false;
@@ -187,6 +191,16 @@ function simulateExit(events, entryIdx, model) {
       if (drawdownPct >= model.trailingDrawdownPct) {
         return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'TRAILING_STOP' };
       }
+    }
+
+    if (
+      model.rsiExitEnabled &&
+      !trailingArmed &&
+      ev.rsi1mBars >= model.rsiExitMinBars &&
+      Number.isFinite(ev.rsi1mLive) &&
+      ev.rsi1mLive > model.rsiExitThreshold
+    ) {
+      return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'RSI_1M_EXIT' };
     }
   }
 
@@ -358,8 +372,10 @@ function main() {
     for (const event of events) {
       rsi.feedTick(mint, event.price, event.ts);
       const snapshot = rsi.snapshot(mint);
-      event.rsi1m = snapshot?.rsi1m ?? null;
-      event.rsi1mBars = snapshot?.bucketCount1m || 0;
+      event.rsi1m = snapshot?.rsi1mLive ?? null;
+      event.rsi1mLive = snapshot?.rsi1mLive ?? null;
+      event.rsi1mClosed = snapshot?.rsi1mClosed ?? null;
+      event.rsi1mBars = snapshot?.rsi1mClosedBars || 0;
     }
   }
 
@@ -367,6 +383,9 @@ function main() {
     takeProfitPct: envNumber('BT_TAKE_PROFIT_PCT', config.strategy.takeProfitPct),
     trailingActivatePct: envNumber('BT_TRAILING_ACTIVATE_PCT', config.strategy.trailingActivatePct),
     trailingDrawdownPct: envNumber('BT_TRAILING_DRAWDOWN_PCT', config.strategy.trailingDrawdownPct),
+    rsiExitEnabled: String(process.env.BT_RSI_1M_EXIT_ENABLED ?? config.strategy.rsi1mExitEnabled).toLowerCase() === 'true',
+    rsiExitThreshold: envNumber('BT_RSI_1M_EXIT_THRESHOLD', config.strategy.rsi1mExitThreshold),
+    rsiExitMinBars: config.activityFlow.rsi1mMinBars,
     stopLossPct: envNumber('BT_STOP_LOSS_PCT', config.strategy.emergencyStopLossPct),
     maxHoldMs: envNumber('BT_MAX_HOLD_MS', config.strategy.maxHoldMs),
     cooldownMs: Number(process.env.BT_COOLDOWN_MS ?? config.activityFlow.cooldownMs ?? 0),

@@ -17,6 +17,9 @@
  *   C) Wilder's smoothing: 用 α=1/period 平均涨跌幅,而非简单 SMA
  *   D) 多时间尺度: 同时维护 1s + 5s 两套 RSI,联合判断
  *
+ * 1 分钟 RSI 单独使用每分钟最后成交价作为 close，不使用 VWAP；同时
+ * 输出上一根已收盘 RSI 和当前实时 RSI，供入场过滤避免未收盘值回画。
+ *
  * 使用:
  *   const rsi = new RsiCalculator();
  *   priceTracker.on('update', ({mint, price}) => rsi.feedTick(mint, price));
@@ -283,6 +286,17 @@ class RsiCalculator {
     );
   }
 
+  _closedRsi1m(s) {
+    if (
+      s.rsi1mSeedChanges < this.period60 ||
+      !Number.isFinite(s.rsi1mAvgGain) ||
+      !Number.isFinite(s.rsi1mAvgLoss)
+    ) {
+      return null;
+    }
+    return this._rsiFromAverages(s.rsi1mAvgGain, s.rsi1mAvgLoss);
+  }
+
   _trim(s) {
     if (s.buckets1s.length > this.maxBuckets) {
       s.buckets1s.splice(0, s.buckets1s.length - this.maxBuckets);
@@ -369,8 +383,11 @@ class RsiCalculator {
     const rsi1s = this._wildersRsi(prices1s, this.period1);
     const rsi5s = this._wildersRsi(prices5s, this.period5);
     const rsi30s = this._wildersRsi(prices30s, this.period30);
-    const rsi1m = this._currentRsi1m(s);
-    if (rsi1s == null && rsi5s == null && rsi30s == null && rsi1m == null) return null;
+    const rsi1mLive = this._currentRsi1m(s);
+    const rsi1mClosed = this._closedRsi1m(s);
+    if (rsi1s == null && rsi5s == null && rsi30s == null && rsi1mLive == null && rsi1mClosed == null) {
+      return null;
+    }
 
     // RSI 上拐: 当前 RSI vs 3 秒前 RSI 的差(正数 = RSI 在涨 = 反弹起点)
     let rsi1sSlope = null;
@@ -385,12 +402,18 @@ class RsiCalculator {
       rsi1s,
       rsi5s,
       rsi30s,
-      rsi1m,
+      // rsi1m remains an alias for the live value for backward compatibility.
+      rsi1m: rsi1mLive,
+      rsi1mLive,
+      rsi1mClosed,
       rsi1sSlope,
       bucketCount1s: s.buckets1s.length,
       bucketCount5s: s.buckets5s.length,
       bucketCount30s: s.buckets30s.length,
       bucketCount1m: s.buckets60s.length,
+      rsi1mClosedBars: s.rsi1mCloseCount,
+      rsi1mLiveClose: s.rsi1mCurrentClose,
+      rsi1mLastClosedClose: s.rsi1mFinalClose,
       lastPrice: s.lastPrice,
       lastPoolQuoteSol: s.lastPoolQuoteSol,
       poolHealthy: s.lastPoolQuoteSol == null

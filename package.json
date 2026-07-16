@@ -15,6 +15,7 @@
     "backtest:activity": "node scripts/backtest-activity-flow.js",
     "optimize:activity": "node scripts/optimize-activity-flow.js",
     "test:rsi": "node scripts/test-rsi-calculator.js",
+    "test:exit-policy": "node scripts/test-position-exit-policy.js",
     "test:pump-discovery": "node scripts/test-pump-migration-parser.js",
     "fill-pools": "node scripts/fill-pools.js",
     "verify-pools": "node scripts/verify-pools.js",

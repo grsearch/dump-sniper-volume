@@ -36,12 +36,16 @@ async function main() {
   console.log(`TP: +${config.strategy.takeProfitPct}% (immediate, no confirm)`);
   console.log(`Trailing: arm at +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% (priority: TP > trailing)`);
   console.log(
+    `RSI exit: ${config.strategy.rsi1mExitEnabled ? `1m RSI(${config.activityFlow.rsi1mPeriod}) > ${config.strategy.rsi1mExitThreshold}` : 'off'} ` +
+      `(disabled after trailing arms)`,
+  );
+  console.log(
     `Entry: ACTIVITY_FLOW ` +
       `(${config.activityFlow.entryMode}: 1m volume>=${config.activityFlow.minVolume1mSol.toFixed(2)}SOL ` +
       `(~$${Math.round(config.activityFlow.minVolume1mUsd)}), buy/sell>=${config.activityFlow.minRatio1m}, ` +
       `trades>=${config.activityFlow.minTrades1m}, ` +
       `${config.activityFlow.rsi1mEnabled
-        ? `RSI(${config.activityFlow.rsi1mPeriod},1m)<${config.activityFlow.rsi1mMax}`
+        ? `RSI(${config.activityFlow.rsi1mPeriod},1m) closed/live<${config.activityFlow.rsi1mMax}`
         : 'RSI disabled'}; ` +
       `5s buyers>=${config.activityFlow.confirmMinUniqueBuyers5s}, ` +
       `topBuyer<=${Math.round(config.activityFlow.confirmMaxBuyerShare5s * 100)}%, ` +
@@ -55,7 +59,7 @@ async function main() {
     : 'Flow exit: disabled');
   console.log(`Legacy dumpSignal: ${config.activityFlow.replaceDumpSignal ? 'suppressed' : 'allowed fallback'}`);
   console.log(
-    `Watchdog: FDV=${watchdogFdvRange}, LP>=${config.strategy.minLpSol} SOL, ` +
+    `Watchdog: FDV=${watchdogFdvRange}, liquidity>=$${config.strategy.minLiquidityUsd}, ` +
       `maxAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 3_600_000) + 'h' : 'disabled'} ` +
       `(check every ${watchdogCheckIntervalMs / 60_000}min)`,
   );
@@ -149,21 +153,29 @@ async function main() {
     }
     setInterval(() => rsiCalculator.cleanup(), 60_000);
 
-    // v3.17.42: 从price_samples预热RSI — 重启后立即有30s桶数据
-    //   取最近5min的samples喂给RsiCalculator，避免重启后4min内RSI过滤失效
+    // Rebuild RSI from captured swaps. The lookback is a maximum, not a token-age
+    // requirement: a newly migrated token uses every minute that actually exists.
     try {
-      const warmupMinutes = Math.max(12, config.activityFlow.rsi1mPeriod + 3);
+      const warmupMinutes = Math.max(
+        config.activityFlow.rsi1mPeriod + 1,
+        config.activityFlow.rsi1mWarmupMaxMinutes,
+      );
       const warmupStart = Date.now() - warmupMinutes * 60_000;
       const warmupRows = tradeLogger.db.prepare(`
-        SELECT mint, ts, price FROM price_samples 
-        WHERE ts > ? ORDER BY ts ASC
+        SELECT mint, ts, price
+        FROM swap_events
+        WHERE ts > ? AND price > 0
+        ORDER BY ts ASC, id ASC
       `).all(warmupStart);
       let fed = 0;
       for (const r of warmupRows) {
-        rsiCalculator.feedTick(r.mint, r.price, r.ts);
+        rsiCalculator.feedTick(r.mint, Number(r.price), Number(r.ts));
         fed++;
       }
-      console.log(`[main] RSI warmup: fed ${fed} price_samples from last ${warmupMinutes}min`);
+      console.log(
+        `[main] RSI warmup: fed ${fed} swap events from up to ${warmupMinutes}min ` +
+          '(new tokens use available history only)',
+      );
     } catch (e) {
       console.warn('[main] RSI warmup failed:', e.message);
     }
@@ -250,7 +262,7 @@ async function main() {
       const pos = positionManager.positions.get(pid);
       if (pos && !pos.exiting) {
         const px = positionManager.priceTracker.getPrice(sig.mint) || pos.entryPrice;
-        positionManager._exit(pos, px, 'COMPETITOR_FOLLOW_SELL');
+        positionManager._exitForCondition(pos, px, 'COMPETITOR_FOLLOW_SELL');
       }
     }
   });
@@ -643,6 +655,11 @@ async function main() {
       } else {
         rsiCalculator.feedTick(mint, price, ts);
       }
+
+      // RSI 超买退出必须在本笔 swap 已进入 RSI 后立即检查。PriceTracker 的
+      // 同币仓位检查已在上面的 update() 中完成，因此移动止盈拥有优先权。
+      const acceptedPrice = priceTracker.getPrice(mint);
+      positionManager.handleRsiForExit(mint, acceptedPrice, rsiCalculator.snapshot(mint));
     }
   });
 

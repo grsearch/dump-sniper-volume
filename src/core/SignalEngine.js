@@ -305,24 +305,40 @@ class SignalEngine extends EventEmitter {
     if (signal._activityFlow && config.activityFlow.rsi1mEnabled) {
       const minBars = Math.max(config.activityFlow.rsi1mPeriod + 1, config.activityFlow.rsi1mMinBars);
       const snap = this.rsiCalculator ? this.rsiCalculator.snapshot(mint) : null;
-      if (!snap || !Number.isFinite(snap.rsi1m) || snap.bucketCount1m < minBars) {
+      const rsi1mLive = snap?.rsi1mLive;
+      const rsi1mClosed = snap?.rsi1mClosed;
+      const closedBars = snap?.rsi1mClosedBars || 0;
+      if (
+        !snap ||
+        !Number.isFinite(rsi1mLive) ||
+        !Number.isFinite(rsi1mClosed) ||
+        closedBars < minBars
+      ) {
         monitor.inc('SignalEngine.rejectedRsi1mNotReady', 1, 'SignalEngine');
         this._logReject(
           signal,
-          `RSI_1M_NOT_READY: bars=${snap?.bucketCount1m || 0}/${minBars}`,
+          `RSI_1M_NOT_READY: closedBars=${closedBars}/${minBars} ` +
+            `closed=${Number.isFinite(rsi1mClosed) ? rsi1mClosed.toFixed(1) : 'n/a'} ` +
+            `live=${Number.isFinite(rsi1mLive) ? rsi1mLive.toFixed(1) : 'n/a'}`,
         );
         return;
       }
-      if (snap.rsi1m >= config.activityFlow.rsi1mMax) {
+      if (rsi1mClosed >= config.activityFlow.rsi1mMax || rsi1mLive >= config.activityFlow.rsi1mMax) {
         monitor.inc('SignalEngine.rejectedRsi1mHigh', 1, 'SignalEngine');
         this._logReject(
           signal,
-          `RSI_1M_HIGH: RSI(${config.activityFlow.rsi1mPeriod},1m)=` +
-            `${snap.rsi1m.toFixed(1)} >= ${config.activityFlow.rsi1mMax}`,
+          `RSI_1M_HIGH: RSI(${config.activityFlow.rsi1mPeriod},1m) ` +
+            `closed=${rsi1mClosed.toFixed(1)} live=${rsi1mLive.toFixed(1)} ` +
+            `max=${config.activityFlow.rsi1mMax}`,
         );
         return;
       }
-      signal._rsi1m = snap.rsi1m;
+      signal._rsi1m = rsi1mLive;
+      signal._rsi1mLive = rsi1mLive;
+      signal._rsi1mClosed = rsi1mClosed;
+      signal._rsi1mClosedBars = closedBars;
+      signal._rsi1mLiveClose = snap.rsi1mLiveClose;
+      signal._rsi1mLastClosedClose = snap.rsi1mLastClosedClose;
     }
 
     // v3.17.38: 在任何过滤判断之前,先取"砸单前 RSI"
@@ -751,7 +767,11 @@ class SignalEngine extends EventEmitter {
       ? `activity_flow_1m: ${flow.s60.tradeCount}tx/${flow.s60.volumeSol.toFixed(2)}SOL ` +
         `buy=${flow.s60.buySol.toFixed(2)} sell=${flow.s60.sellSol.toFixed(2)} ` +
         `r=${flow.s60.buySellRatio.toFixed(2)} ` +
-        `rsi1m=${Number.isFinite(signal._rsi1m) ? signal._rsi1m.toFixed(1) : 'n/a'}`
+        `rsi1m_closed=${Number.isFinite(signal._rsi1mClosed) ? signal._rsi1mClosed.toFixed(1) : 'n/a'} ` +
+        `rsi1m_live=${Number.isFinite(signal._rsi1mLive) ? signal._rsi1mLive.toFixed(1) : 'n/a'} ` +
+        `closed_bars=${signal._rsi1mClosedBars || 0} ` +
+        `close=${Number.isFinite(signal._rsi1mLiveClose) ? signal._rsi1mLiveClose : 'n/a'} ` +
+        `prev_close=${Number.isFinite(signal._rsi1mLastClosedClose) ? signal._rsi1mLastClosedClose : 'n/a'}`
       : null;
 
     // v3.10: 先 emit buyOrder（让 Executor 立即开始工作），再异步写 DB
@@ -765,6 +785,11 @@ class SignalEngine extends EventEmitter {
       rsi1sPreDump: signal._rsi1sPreDump,
       rsi30sPreDump: signal._rsi30sPreDump,
       rsi1m: signal._rsi1m,
+      rsi1mLive: signal._rsi1mLive,
+      rsi1mClosed: signal._rsi1mClosed,
+      rsi1mClosedBars: signal._rsi1mClosedBars,
+      rsi1mLiveClose: signal._rsi1mLiveClose,
+      rsi1mLastClosedClose: signal._rsi1mLastClosedClose,
       preVol5m: signal._preVol5m,
       dumpDepth: signal._dumpDepth,
     });

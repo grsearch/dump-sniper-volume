@@ -6,17 +6,16 @@
  * 定时巡检任务：
  *   1) 监控超时：代币被收录后超过 MAX_WATCH_DURATION_MS，自动移除（有仓先卖再移除）
  *   2) FDV 下限：监控期间 FDV < MIN_FDV_USD，自动移除（数据来自 Birdeye，USD 计价）
- *   3) LP 下限：监控期间池子 SOL 余额 < MIN_LP_SOL，自动移除（数据来自链上 PoolStateCache，SOL 计价）
+ *   3) LP 下限：监控期间 Birdeye 流动性 < MIN_LIQUIDITY_USD，自动移除（USD 计价）
  *
  * ⚠️ 单位注意：
  *    - FDV 来自 Birdeye，USD 计价
- *    - LP 来自链上池子 quote vault 余额，SOL 计价（比 Birdeye 的 liquidity 字段更准确）
- *    - Pump 新币在 Birdeye 的 liquidity 数据经常为 0 或极低，不可靠
+ *    - LP 来自 Birdeye liquidity，与 PumpDiscovery 使用同一美元阈值
  */
 
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
-const { fetchTokenMarketOnly, fetchTokenFullInfo } = require('../utils/tokenMeta');
+const { fetchTokenMarketOnly } = require('../utils/tokenMeta');
 
 const monitor = getMonitor();
 monitor.registerModule('TokenWatchdog', { staleMs: 300_000, label: 'Token Watchdog' });
@@ -26,17 +25,14 @@ class TokenWatchdog {
    * @param {object} opts
    * @param {import('../data/TokenRegistry')} opts.tokenRegistry
    * @param {import('./PositionManager')} opts.positionManager
-   * @param {import('./PoolStateCache')} [opts.poolStateCache] - 用于读取链上池子 SOL 余额
    * @param {function} opts.onTokenRemoved - 代币被移除后的回调
    */
-  constructor({ tokenRegistry, positionManager, poolStateCache, tradeLogger, onTokenRemoved }) {
+  constructor({ tokenRegistry, positionManager, tradeLogger, onTokenRemoved }) {
     this.tokenRegistry = tokenRegistry;
     this.positionManager = positionManager;
-    this.poolStateCache = poolStateCache;
     this.onTokenRemoved = onTokenRemoved;
 
-    // v3.17.20: 默认值改从 config.strategy 读（config 已设默认 FDV=$20000, LP=5000 SOL,
-    //   maxWatch=0）。这样不在 .env 显式设置时也能默认开启 FDV/LP 巡检。
+    // Defaults come from config.strategy so FDV/LP checks stay enabled without explicit env values.
     //   显式 env 变量仍可覆盖（env 优先）。
     this.maxWatchDurationMs = process.env.MAX_WATCH_DURATION_MS != null
       ? parseInt(process.env.MAX_WATCH_DURATION_MS, 10)
@@ -48,9 +44,9 @@ class TokenWatchdog {
     this.maxFdVUsd = process.env.MAX_FDV_USD != null
       ? parseFloat(process.env.MAX_FDV_USD)
       : (config.strategy.maxFdVUsd || 0);
-    this.minLpSol = process.env.MIN_LP_SOL != null
-      ? parseFloat(process.env.MIN_LP_SOL)
-      : config.strategy.minLpSol;
+    this.minLiquidityUsd = process.env.MIN_LIQUIDITY_USD != null
+      ? parseFloat(process.env.MIN_LIQUIDITY_USD)
+      : config.strategy.minLiquidityUsd;
 
     // Monitoring-list age limit. Open positions are retained until they close.
     this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '14400000', 10);
@@ -62,10 +58,6 @@ class TokenWatchdog {
     this.checkIntervalMs = Math.max(
       10_000,
       parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '60000', 10),
-    );
-    this.lpRefreshConcurrency = Math.max(
-      1,
-      parseInt(process.env.WATCHDOG_LP_REFRESH_CONCURRENCY || '5', 10),
     );
 
     // v3.17.13: Birdeye 熔断 — 连续失败后跳过调用，避免 _check 卡死
@@ -82,7 +74,7 @@ class TokenWatchdog {
     if (this.maxWatchDurationMs > 0) features.push(`maxWatch=${this.maxWatchDurationMs / 60000}min`);
     if (this.minFdVUsd > 0) features.push(`minFDV=$${this.minFdVUsd}`);
     if (this.maxFdVUsd > 0) features.push(`maxFDV=$${this.maxFdVUsd}`);
-    if (this.minLpSol > 0) features.push(`minLP=${this.minLpSol} SOL`);
+    if (this.minLiquidityUsd > 0) features.push(`minLiquidity=$${this.minLiquidityUsd}`);
     if (this.minVolume24hUsd > 0) features.push(`minVol24h=$${this.minVolume24hUsd}`);
     if (this.noBuyRemoveMs > 0) features.push(`noBuyRemove=${this.noBuyRemoveMs / 3600000}h`);
     if (this.maxTokenAgeMs > 0) features.push(`maxAge=${this.maxTokenAgeMs / 3600000}h`);
@@ -92,7 +84,7 @@ class TokenWatchdog {
   }
 
   start() {
-    if (this.maxWatchDurationMs <= 0 && this.minFdVUsd <= 0 && this.maxFdVUsd <= 0 && this.minLpSol <= 0 && this.minVolume24hUsd <= 0 && this.noBuyRemoveMs <= 0 && this.maxTokenAgeMs <= 0) return;
+    if (this.maxWatchDurationMs <= 0 && this.minFdVUsd <= 0 && this.maxFdVUsd <= 0 && this.minLiquidityUsd <= 0 && this.minVolume24hUsd <= 0 && this.noBuyRemoveMs <= 0 && this.maxTokenAgeMs <= 0) return;
 
     this._checkInterval = setInterval(() => this._runCheck(), this.checkIntervalMs);
 
@@ -126,63 +118,10 @@ class TokenWatchdog {
     }
   }
 
-  /**
-   * 从 PoolStateCache 读取池子实际 SOL 余额
-   */
-  _getPoolQuoteSol(token) {
-    if (!this.poolStateCache || !token.pool_address) return null;
-    const cached = this.poolStateCache.get(token.pool_address);
-    return this._poolQuoteSolFromState(cached);
-  }
-
-  _poolQuoteSolFromState(state) {
-    if (!state) return null;
-    // Pump AMM SDK swapSolanaState 返回 poolQuoteAmount (lamports BN)
-    const lamports = state.poolQuoteAmount;
-    if (lamports == null) return null;
-    // BN or number
-    const val = typeof lamports === 'object' && lamports.toNumber ? lamports.toNumber() : Number(lamports);
-    return val / 1e9; // lamports → SOL
-  }
-
-  async _refreshPoolQuotes(tokens) {
-    const quotes = new Map();
-    if (this.minLpSol <= 0 || !this.poolStateCache) return quotes;
-
-    const targets = tokens.filter((token) => token.pool_address);
-    if (targets.length === 0) return quotes;
-
-    let cursor = 0;
-    let refreshed = 0;
-    let unavailable = 0;
-    const worker = async () => {
-      while (cursor < targets.length) {
-        const token = targets[cursor++];
-        const state = await this.poolStateCache.refreshOne(token.pool_address);
-        const poolSol = this._poolQuoteSolFromState(
-          state || this.poolStateCache.get(token.pool_address),
-        );
-        if (poolSol == null) {
-          unavailable++;
-          continue;
-        }
-        quotes.set(token.mint, poolSol);
-        refreshed++;
-      }
-    };
-
-    const workerCount = Math.min(this.lpRefreshConcurrency, targets.length);
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    monitor.set('TokenWatchdog.lpRefreshed', refreshed, 'TokenWatchdog');
-    monitor.set('TokenWatchdog.lpUnavailable', unavailable, 'TokenWatchdog');
-    return quotes;
-  }
-
   async _check() {
     monitor.beat('TokenWatchdog', 'check');
     const now = Date.now();
     const activeTokens = this.tokenRegistry.listActive();
-    const poolQuoteByMint = await this._refreshPoolQuotes(activeTokens);
     let removed = 0;
     let fdvRefreshed = 0;
 
@@ -197,19 +136,7 @@ class TokenWatchdog {
         }
       }
 
-      // 2) LP 下限（链上 PoolStateCache，秒级，不依赖 Birdeye）
-      //    优先用链上数据，比 Birdeye 快得多且更准确
-      const poolSol = poolQuoteByMint.has(token.mint)
-        ? poolQuoteByMint.get(token.mint)
-        : this._getPoolQuoteSol(token);
-      let latestLp = token.liquidity;
-      if (poolSol != null) latestLp = poolSol;
-
-      if (this.minLpSol > 0) {
-        if (poolSol != null && poolSol < this.minLpSol) {
-          reasons.push(`lp_too_low(${poolSol.toFixed(2)} SOL < ${this.minLpSol} SOL)`);
-        }
-      }
+      let liquidityUsd = token.liquidity;
 
       // 3) FDV 下限（Birdeye，USD）— 只对有仓位的代币查 FDV，减少 API 调用
       let fdv = token.fdv;
@@ -218,12 +145,12 @@ class TokenWatchdog {
       // pool and metadata writes. Both positioned and unpositioned tokens are
       // refreshed at the configured one-minute watchdog cadence.
       const lastFdvCheckAt = this._lastFdvCheckAt.get(token.mint) || 0;
-      const fdvFilterEnabled = this.minFdVUsd > 0 || this.maxFdVUsd > 0;
-      const needFdVCheck = fdvFilterEnabled && now - lastFdvCheckAt >= this.checkIntervalMs;
+      const marketFilterEnabled = this.minFdVUsd > 0 || this.maxFdVUsd > 0 || this.minLiquidityUsd > 0;
+      const needMarketCheck = marketFilterEnabled && now - lastFdvCheckAt >= this.checkIntervalMs;
 
       const birdeyeAvailable = !this._birdeyeCircuitOpen || Date.now() >= this._birdeyeCircuitOpenUntil;
 
-      if (needFdVCheck && birdeyeAvailable) {
+      if (needMarketCheck && birdeyeAvailable) {
         this._lastFdvCheckAt.set(token.mint, now);
         try {
           const freshInfo = await fetchTokenMarketOnly(token.mint);
@@ -250,7 +177,7 @@ class TokenWatchdog {
             this._birdeyeConsecutiveFails = 0;
             this._birdeyeCircuitOpen = false;
             if (freshInfo.fdv != null) fdv = freshInfo.fdv;
-            if (freshInfo.liquidity != null && freshInfo.liquidity > 0) latestLp = freshInfo.liquidity;
+            if (freshInfo.liquidity != null) liquidityUsd = freshInfo.liquidity;
             // 更新缓存
             this.tokenRegistry.stmts.update.run(
               freshInfo.symbol || token.symbol,
@@ -258,7 +185,7 @@ class TokenWatchdog {
               freshInfo.decimals ?? token.decimals,
               fdv,
               freshInfo.marketCap ?? token.market_cap,
-              latestLp,
+              liquidityUsd,
               freshInfo.price ?? token.price,
               Date.now(),
               JSON.stringify(freshInfo),
@@ -288,6 +215,19 @@ class TokenWatchdog {
       // v3.17.20: FDV 上限检查 — 大盘币不是 snipe 目标，移除监控
       if (this.maxFdVUsd > 0 && fdv != null && fdv > 0 && fdv > this.maxFdVUsd) {
         reasons.push(`fdv_too_high($${Math.round(fdv)} > $${this.maxFdVUsd})`);
+      }
+
+      // Birdeye liquidity is USD-denominated and refreshed with FDV every minute.
+      const normalizedLiquidityUsd = Number(liquidityUsd);
+      if (
+        this.minLiquidityUsd > 0 &&
+        liquidityUsd != null &&
+        Number.isFinite(normalizedLiquidityUsd) &&
+        normalizedLiquidityUsd < this.minLiquidityUsd
+      ) {
+        reasons.push(
+          `liquidity_too_low($${Math.round(normalizedLiquidityUsd)} < $${this.minLiquidityUsd})`,
+        );
       }
 
       // v3.17.41: 24h 交易量下限 — 流动性太差的币不值得监控

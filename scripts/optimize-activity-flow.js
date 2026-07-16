@@ -39,6 +39,8 @@ const FALLBACK = {
     flowExitMinHoldMs: 10_000,
     trailingActivatePct: 40,
     trailingDrawdownPct: 10,
+    rsiExitEnabled: true,
+    rsiExitThreshold: 80,
     takeProfitPct: 100,
     stopLossPct: 0,
     maxHoldMs: 0,
@@ -200,6 +202,8 @@ function loadRuntime() {
         flowExitMinHoldMs: config.strategy.flowReversalExitMinHoldMs,
         trailingActivatePct: config.strategy.trailingActivatePct,
         trailingDrawdownPct: config.strategy.trailingDrawdownPct,
+        rsiExitEnabled: config.strategy.rsi1mExitEnabled,
+        rsiExitThreshold: config.strategy.rsi1mExitThreshold,
         takeProfitPct: config.strategy.takeProfitPct,
         stopLossPct: config.strategy.emergencyStopLossPct,
         maxHoldMs: config.strategy.maxHoldMs,
@@ -349,16 +353,18 @@ function prepareMint(events, segmentIndex, rsi1mPeriod = 7) {
   events.sort((a, b) => (a.ts - b.ts) || (a.id - b.id));
   const buyPrefix = new Float64Array(events.length + 1);
   const sellPrefix = new Float64Array(events.length + 1);
-  const rsi1m = new Float64Array(events.length);
-  const rsi1mBars = new Uint16Array(events.length);
+  const rsi1mLive = new Float64Array(events.length);
+  const rsi1mClosed = new Float64Array(events.length);
+  const rsi1mBars = new Uint32Array(events.length);
   const rsi = new RsiCalculator({ period60: rsi1mPeriod });
   for (let i = 0; i < events.length; i += 1) {
     buyPrefix[i + 1] = buyPrefix[i] + (events[i].side === 'BUY' ? events[i].solVolume : 0);
     sellPrefix[i + 1] = sellPrefix[i] + (events[i].side === 'SELL' ? events[i].solVolume : 0);
     rsi.feedTick(events[i].mint, events[i].price, events[i].ts);
     const snapshot = rsi.snapshot(events[i].mint);
-    rsi1m[i] = Number.isFinite(snapshot?.rsi1m) ? snapshot.rsi1m : NaN;
-    rsi1mBars[i] = snapshot?.bucketCount1m || 0;
+    rsi1mLive[i] = Number.isFinite(snapshot?.rsi1mLive) ? snapshot.rsi1mLive : NaN;
+    rsi1mClosed[i] = Number.isFinite(snapshot?.rsi1mClosed) ? snapshot.rsi1mClosed : NaN;
+    rsi1mBars[i] = snapshot?.rsi1mClosedBars || 0;
   }
   return {
     mint: events[0].mint,
@@ -368,7 +374,8 @@ function prepareMint(events, segmentIndex, rsi1mPeriod = 7) {
     events,
     w5: computeWindows(events, 5_000, true),
     w60: computeWindows(events, 60_000, false),
-    rsi1m,
+    rsi1mLive,
+    rsi1mClosed,
     rsi1mBars,
     buyPrefix,
     sellPrefix,
@@ -528,8 +535,15 @@ function passesEntry(data, idx, candidate, solPriceUsd) {
   if (s60.buySellRatio < candidate.entryMinRatio1m) return false;
   if (candidate.entryRsi1mEnabled) {
     const minBars = Math.max(candidate.entryRsi1mPeriod + 1, candidate.entryRsi1mMinBars);
-    if (data.rsi1mBars[idx] < minBars || !Number.isFinite(data.rsi1m[idx])) return false;
-    if (data.rsi1m[idx] >= candidate.entryRsi1mMax) return false;
+    if (
+      data.rsi1mBars[idx] < minBars ||
+      !Number.isFinite(data.rsi1mClosed[idx]) ||
+      !Number.isFinite(data.rsi1mLive[idx])
+    ) return false;
+    if (
+      data.rsi1mClosed[idx] >= candidate.entryRsi1mMax ||
+      data.rsi1mLive[idx] >= candidate.entryRsi1mMax
+    ) return false;
   }
   if (s5.buyCount < candidate.entryMinBuyTrades5s) return false;
   if (s5.uniqueBuyers < candidate.entryMinUniqueBuyers5s) return false;
@@ -624,6 +638,15 @@ function simulateExit(data, entryIdx, splitEnd, candidate, options) {
       if (drawdownPct >= candidate.trailingDrawdownPct && ev.ts - hwmTs >= candidate.trailingMinHwmAgeMs) {
         return makeTrade(data, entryIdx, i, 'TRAILING_STOP', candidate, options);
       }
+    }
+    if (
+      candidate.rsiExitEnabled &&
+      !trailingArmed &&
+      data.rsi1mBars[i] >= candidate.entryRsi1mMinBars &&
+      Number.isFinite(data.rsi1mLive[i]) &&
+      data.rsi1mLive[i] > candidate.rsiExitThreshold
+    ) {
+      return makeTrade(data, entryIdx, i, 'RSI_1M_EXIT', candidate, options);
     }
   }
 
@@ -832,6 +855,8 @@ function envBlock(candidate) {
     `FLOW_REVERSAL_EXIT_MIN_HOLD_MS=${candidate.flowExitMinHoldMs}`,
     `TRAILING_ACTIVATE_PCT=${candidate.trailingActivatePct}`,
     `TRAILING_DRAWDOWN_PCT=${candidate.trailingDrawdownPct}`,
+    `RSI_1M_EXIT_ENABLED=${candidate.rsiExitEnabled}`,
+    `RSI_1M_EXIT_THRESHOLD=${candidate.rsiExitThreshold}`,
     `TAKE_PROFIT_PCT=${candidate.takeProfitPct}`,
     `EMERGENCY_STOP_LOSS_PCT=${candidate.stopLossPct}`,
     'STABILIZATION_EMERGENCY_DRAWDOWN_PCT=0',
@@ -870,7 +895,8 @@ function writeReports(output, runtime, args) {
     'entryMinBuyTrades5s', 'entryMinUniqueBuyers5s', 'entryMinRatio5s',
     'entryMaxBuyerShare5s', 'entryMaxRise5sPct', 'entryMaxSingleBuyImpactPct',
     'flowExitRatio', 'flowExitMinVolumeSol', 'flowExitMinHoldMs',
-    'trailingActivatePct', 'trailingDrawdownPct', 'takeProfitPct', 'stopLossPct', 'maxHoldMs',
+    'trailingActivatePct', 'trailingDrawdownPct', 'rsiExitEnabled', 'rsiExitThreshold',
+    'takeProfitPct', 'stopLossPct', 'maxHoldMs',
     'trainTrades', 'trainNetSol', 'validationTrades', 'validationNetSol', 'testTrades', 'testNetSol',
     'testProfitFactor', 'testMaxDrawdownSol',
   ];
@@ -881,7 +907,8 @@ function writeReports(output, runtime, args) {
       c.entryMinBuyTrades5s, c.entryMinUniqueBuyers5s, c.entryMinRatio5s,
       c.entryMaxBuyerShare5s, c.entryMaxRise5sPct, c.entryMaxSingleBuyImpactPct,
       c.flowExitRatio, c.flowExitMinVolumeSol, c.flowExitMinHoldMs,
-      c.trailingActivatePct, c.trailingDrawdownPct, c.takeProfitPct, c.stopLossPct, c.maxHoldMs,
+      c.trailingActivatePct, c.trailingDrawdownPct, c.rsiExitEnabled, c.rsiExitThreshold,
+      c.takeProfitPct, c.stopLossPct, c.maxHoldMs,
       item.train.trades, item.train.netSol, item.validation.trades, item.validation.netSol,
       item.test.trades, item.test.netSol, item.test.profitFactor, item.test.maxDrawdownSol,
     ];
@@ -1183,6 +1210,35 @@ function selfTest() {
   assert.strictEqual(result.trades, 1, 'healthy flow should enter and close once');
   assert.strictEqual(result.reasons.FLOW_REVERSAL_EXIT, 1, 'healthy flow should use flow reversal exit');
   assert.strictEqual(result.tradeRows[0].mint, 'HEALTHY', 'spike mint must be rejected');
+
+  const rsiData = {
+    events: [
+      { mint: 'RSI_EXIT', symbol: 'RSI', price: 100, ts: base },
+      { mint: 'RSI_EXIT', symbol: 'RSI', price: 105, ts: base + 10_000 },
+    ],
+    rsi1mBars: Uint32Array.from([8, 8]),
+    rsi1mLive: Float64Array.from([40, 80.1]),
+  };
+  const rsiOptions = { positionSol: 1, costBps: 0, priorityFeeSol: 0 };
+  const rsiCandidate = {
+    ...FALLBACK.baseline,
+    id: 'rsi-exit-test',
+    flowExitEnabled: false,
+    stabilizationMs: 0,
+    trailingActivatePct: 40,
+    takeProfitPct: 100,
+  };
+  const rsiTrade = simulateExit(rsiData, 0, base + 30_000, rsiCandidate, rsiOptions);
+  assert.strictEqual(rsiTrade.reason, 'RSI_1M_EXIT', 'live RSI >80 should exit before trailing arms');
+
+  const trailingFirst = simulateExit(
+    rsiData,
+    0,
+    base + 30_000,
+    { ...rsiCandidate, trailingActivatePct: 5 },
+    rsiOptions,
+  );
+  assert.strictEqual(trailingFirst, null, 'armed trailing should suppress the RSI exit');
 
   const migrationRows = [
     { id: 20, mint: 'MIGRATION', signer: 'S1', side: 'SELL', solVolume: 2, price: 1e-12, priceBefore: 1e-12, priceChangePct: 0, poolQuoteAfter: 100, poolAddress: 'CURVE', ts: base },

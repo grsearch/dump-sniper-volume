@@ -242,7 +242,7 @@ class PositionManager extends EventEmitter {
           `r=${st1m.sellBuyRatio.toFixed(2)} volume=${st1m.volumeSol.toFixed(2)}SOL`,
       );
       monitor.inc('PositionManager.flowReversalExit', 1, 'PositionManager');
-      this._exit(pos, price, 'FLOW_REVERSAL_EXIT');
+      this._exitForCondition(pos, price, 'FLOW_REVERSAL_EXIT');
       return;
     }
 
@@ -275,7 +275,7 @@ class PositionManager extends EventEmitter {
         `15s=${st15.sellSol.toFixed(2)}/${st15.buySol.toFixed(2)}SOL r=${st15.sellBuyRatio.toFixed(2)}`,
     );
     monitor.inc('PositionManager.flowReversalExit', 1, 'PositionManager');
-    this._exit(pos, price, 'FLOW_REVERSAL_EXIT');
+    this._exitForCondition(pos, price, 'FLOW_REVERSAL_EXIT');
   }
 
   // v3.17.40b: 加仓策略 — 自最近一笔买入价跌15%以上才允许加仓
@@ -283,8 +283,7 @@ class PositionManager extends EventEmitter {
   //   第1次加仓后：当前价 < 加仓entryPrice * 0.85 → 允许第2次加仓
   //   最多加仓2次（同币3仓）
   canAddOn(mint) {
-    // v3.26: 重新开启加仓 — 距首仓价跌20%以上允许加仓一次
-    //   加仓和首仓独立运行，互不干扰（无 ADDON_CASCADE）
+    // 距首仓价跌 20% 以上允许加仓一次；退出时同币仓位统一串行卖出。
     const addonEnabled = process.env.ADDON_ENABLED !== '0';
     if (!addonEnabled) return { allowed: false, reason: 'addon_disabled' };
 
@@ -303,6 +302,8 @@ class PositionManager extends EventEmitter {
     for (const pid of pids) {
       const pos = this.positions.get(pid);
       if (!pos) continue;
+      if (pos.exiting) return { allowed: false, reason: 'group_exit_in_progress' };
+      if (pos.status === 'stuck') return { allowed: false, reason: 'stuck_position' };
       if (!firstPos || pos.openedAt < firstPos.openedAt) {
         firstPos = pos;
       }
@@ -373,6 +374,63 @@ class PositionManager extends EventEmitter {
     console.log(
       `[PositionManager] _exitAllByMint ${mint.slice(0, 8)}: triggered ${count} exits (${reason})`,
     );
+  }
+
+  /**
+   * 自动退出条件统一入口。同币存在加仓时，任一仓位触发都会让全部仓位
+   * 进入现有的同币串行卖出队列；单仓行为保持不变。
+   */
+  _exitForCondition(pos, price, reason) {
+    if (!pos || pos.exiting) return;
+    const pids = this.byMint.get(pos.mint);
+    if (pids && pids.size > 1) {
+      this._exitAllByMint(pos.mint, price, reason);
+      return;
+    }
+    this._exit(pos, price, reason);
+  }
+
+  /**
+   * 每笔 swap 更新 RSI 后调用。RSI 使用当前 1 分钟实时值；移动止盈一旦
+   * 在同币任一仓位上激活，便接管整组仓位，后续不再走 RSI 超买退出。
+   */
+  handleRsiForExit(mint, price, snapshot) {
+    const s = config.strategy;
+    if (!s.rsi1mExitEnabled || !Number.isFinite(s.rsi1mExitThreshold)) return false;
+    if (!mint || !Number.isFinite(price) || price <= 0 || !snapshot) return false;
+
+    const pids = this.byMint.get(mint);
+    if (!pids || pids.size === 0) return false;
+
+    const active = [];
+    for (const pid of pids) {
+      const pos = this.positions.get(pid);
+      if (!pos || pos.exiting || pos.status === 'stuck') continue;
+      active.push(pos);
+    }
+    if (active.length === 0) return false;
+
+    // 不在买入对账或稳定期内抢先卖，避免 tokenAmount/entryPrice 尚未可靠。
+    if (active.some((pos) => (!pos.reconciled && !pos.dryRun) || pos.stabilizing)) return false;
+
+    // “移动止盈先激活”按同币整组判断，而不是只看当前遍历到的仓位。
+    if (active.some((pos) => pos.trailingArmed)) return false;
+
+    const minBars = Math.max(1, config.activityFlow.rsi1mMinBars || 1);
+    const completedBars = Number(snapshot.rsi1mClosedBars || 0);
+    const liveRsi = Number(snapshot.rsi1mLive);
+    if (completedBars < minBars || !Number.isFinite(liveRsi)) return false;
+    if (liveRsi <= s.rsi1mExitThreshold) return false;
+
+    console.log(
+      `[PositionManager] RSI_1M_EXIT ${active[0].symbol || mint.slice(0, 6)} ` +
+        `live=${liveRsi.toFixed(1)} > ${s.rsi1mExitThreshold}, ` +
+        `closed=${Number.isFinite(snapshot.rsi1mClosed) ? snapshot.rsi1mClosed.toFixed(1) : 'n/a'}, ` +
+        `bars=${completedBars}, positions=${active.length}`,
+    );
+    monitor.inc('PositionManager.rsi1mExit', 1, 'PositionManager');
+    this._exitAllByMint(mint, price, 'RSI_1M_EXIT');
+    return true;
   }
 
   openPositionCount() {
@@ -981,7 +1039,7 @@ class PositionManager extends EventEmitter {
       // 不进入 stabilization，直接卖出
       pos.reconciled = true;
       pos.reconciledAt = Date.now();
-      this._exit(pos, pos.entryPrice, 'RECONCILE_RUG');
+      this._exitForCondition(pos, pos.entryPrice, 'RECONCILE_RUG');
       return;
     }
 
@@ -1070,7 +1128,7 @@ class PositionManager extends EventEmitter {
         );
         // v3.19: exit_reason 带 timeout 时长，区分不同梯度
         const timeoutMin = Math.round(timeoutMs / 60000);
-        this._exit(pos, lastPrice, `TIMEOUT_${timeoutMin}M`);
+        this._exitForCondition(pos, lastPrice, `TIMEOUT_${timeoutMin}M`);
       }
 
       // v3.18: EARLY_LOW_PEAK_CUT — 死币早砍,连续时间覆盖
@@ -1100,7 +1158,7 @@ class PositionManager extends EventEmitter {
             ' peak=' + peakPnlPct.toFixed(1) + '% age=' + ageMin.toFixed(1) + 'min'
           );
           monitor.inc('PositionManager.earlyLowPeakCut', 1, 'PositionManager');
-          this._exit(pos, lastPrice, 'EARLY_LOW_PEAK_CUT');
+          this._exitForCondition(pos, lastPrice, 'EARLY_LOW_PEAK_CUT');
           continue;
         }
       } // end EARLY_LOW_PEAK_CUT
@@ -1601,7 +1659,7 @@ class PositionManager extends EventEmitter {
             `drawdown ${drawdownFromMax.toFixed(2)}% from stabilization peak ` +
             `(sampleMax=${sampleMax.toExponential(3)}, current=${price.toExponential(3)}, pnl=${pnlPct.toFixed(2)}%)`,
         );
-        this._exit(pos, price, 'EMERGENCY_STOP');
+        this._exitForCondition(pos, price, 'EMERGENCY_STOP');
         return;
       }
 
@@ -1669,7 +1727,7 @@ class PositionManager extends EventEmitter {
         `[PositionManager] 🚨 EMERGENCY_STOP ${pos.symbol || pos.mint.slice(0, 6)} ` +
           `pnl=${pnlPct.toFixed(2)}% (age=${(posAge/1000).toFixed(0)}s)`,
       );
-      this._exit(pos, price, 'EMERGENCY_STOP');
+      this._exitForCondition(pos, price, 'EMERGENCY_STOP');
       return;
     }
 
@@ -1750,7 +1808,7 @@ class PositionManager extends EventEmitter {
               `trailingArmed=false, age=${(posAge/1000).toFixed(0)}s`,
           );
           monitor.inc('PositionManager.smartStop', 1, 'PositionManager');
-          this._exit(pos, price, 'SMART_STOP');
+          this._exitForCondition(pos, price, 'SMART_STOP');
           return;
         }
       }
@@ -1774,7 +1832,7 @@ class PositionManager extends EventEmitter {
               ' price=' + price.toExponential(3) + ' break=' + breakPct + '% trailingArmed=false age=' + (posAge/1000).toFixed(0) + 's',
           );
           monitor.inc('PositionManager.rangeStop', 1, 'PositionManager');
-          this._exit(pos, price, 'RANGE_STOP');
+          this._exitForCondition(pos, price, 'RANGE_STOP');
           return;
         }
       }
@@ -1810,7 +1868,7 @@ class PositionManager extends EventEmitter {
                 ' trailingArmed=false age=' + (posAge/1000).toFixed(0) + 's samples=' + maRows.length,
             );
             monitor.inc('PositionManager.trendStop', 1, 'PositionManager');
-            this._exit(pos, price, 'TREND_STOP');
+            this._exitForCondition(pos, price, 'TREND_STOP');
             return;
           }
         }
@@ -1840,7 +1898,7 @@ class PositionManager extends EventEmitter {
                 ' threshold=' + w.pnlPct + '% trailingArmed=false',
             );
             monitor.inc('PositionManager.timedTp', 1, 'PositionManager');
-            this._exit(pos, price, 'TIMED_TP');
+            this._exitForCondition(pos, price, 'TIMED_TP');
             return;
           }
         }
@@ -1949,7 +2007,7 @@ class PositionManager extends EventEmitter {
     //      - trailing 激活后从高点回撤 TRAILING_DRAWDOWN_PCT → trailing 卖出
     //    所以先检查 TP，再检查 trailing，两者不冲突。
 
-    // v3.17.40: 加仓策略改为每仓独立卖出，不再做合计盈亏判断
+    // 各仓独立计算条件；任一仓触发后，同币全部仓位进入串行卖出队列。
 
     // 3a. 固定止盈：到 TAKE_PROFIT_PCT 立即卖
     //   v3.17.40: 加价格确认 — 如果 pnlPct 单 tick 暴涨超过 TP 阈值 15% 以上，
@@ -1970,7 +2028,7 @@ class PositionManager extends EventEmitter {
           `[PositionManager] ✅ TAKE_PROFIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
             `pnl=${pnlPct.toFixed(2)}% >= ${tpPct}% (jump=${pnlJump.toFixed(2)}%${pos._tpConfirmPending ? ', confirmed' : ''})`,
         );
-        this._exit(pos, price, 'TAKE_PROFIT');
+        this._exitForCondition(pos, price, 'TAKE_PROFIT');
         return;
       }
     } else {
@@ -1996,7 +2054,7 @@ class PositionManager extends EventEmitter {
             `peakPnl=${peakPnlPct.toFixed(2)}% → currentPnl=${pnlPct.toFixed(2)}% ` +
             `(drawdown ${drawdownPct.toFixed(2)}% from armedHwm, hwmAge=${hwmAge}ms)`,
         );
-        this._exit(pos, price, 'TRAILING_STOP');
+        this._exitForCondition(pos, price, 'TRAILING_STOP');
         return;
       }
     }
@@ -2020,7 +2078,7 @@ class PositionManager extends EventEmitter {
           `[PositionManager] 🛡️ DEFENSE_STOP_LOSS ${pos.symbol || pos.mint.slice(0, 6)} ` +
             `pnl=${pnlPct.toFixed(2)}% <= ${defenseStopLossPct}%`,
         );
-        this._exit(pos, price, 'DEFENSE_STOP_LOSS');
+        this._exitForCondition(pos, price, 'DEFENSE_STOP_LOSS');
         return;
       }
 
@@ -2053,7 +2111,7 @@ class PositionManager extends EventEmitter {
               `pnl=${pnlPct.toFixed(2)}%, drawdown=${defenseDrawdown.toFixed(2)}% from defenseHwm ` +
               `(held ${(posAgeMs/60000).toFixed(1)}min)`,
           );
-          this._exit(pos, price, 'DEFENSE_TRAILING_STOP');
+          this._exitForCondition(pos, price, 'DEFENSE_TRAILING_STOP');
           return;
         }
       }
@@ -2070,7 +2128,7 @@ class PositionManager extends EventEmitter {
               `[PositionManager] 🛡️ DEFENSE_TIMEOUT_PROFIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
                 `pnl=${pnlPct.toFixed(2)}% > 0 at ${(posAgeMs/60000).toFixed(1)}min → immediate sell`,
             );
-            this._exit(pos, price, 'DEFENSE_TIMEOUT_PROFIT');
+            this._exitForCondition(pos, price, 'DEFENSE_TIMEOUT_PROFIT');
             return;
           } else {
             console.log(
@@ -2549,8 +2607,7 @@ class PositionManager extends EventEmitter {
       feeSol,
     });
 
-    // v3.26: 加仓和首仓独立运行，不级联卖出
-    // 每个仓位独立 TP/trailing/stop，互不干扰
+    // 同币加仓仓位在触发阶段已经统一进入串行卖出队列，这里只完成当前仓位结算。
   }
 
   _scheduleRetryOrStuck(pos, triggerPrice, errMsg) {

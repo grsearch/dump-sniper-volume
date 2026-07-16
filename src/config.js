@@ -68,6 +68,11 @@ const config = {
     trailingDrawdownPct: parseFloat(process.env.TRAILING_DRAWDOWN_PCT || '10'),
     trailingMinHwmAgeMs: parseInt(process.env.TRAILING_MIN_HWM_AGE_MS || '2000', 10),
 
+    // RSI 超买退出：使用当前未收盘的 1 分钟 RSI，便于在 swap 到达时立即响应。
+    // 一旦同币任一仓位已经激活移动止盈，RSI 退出让位于移动止盈。
+    rsi1mExitEnabled: (process.env.RSI_1M_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    rsi1mExitThreshold: parseFloat(process.env.RSI_1M_EXIT_THRESHOLD || '80'),
+
     // v3.17.6: Stabilization 期 —— reconcile 完成后等价格稳定，再开始 trailing 追踪
     //   原理：砸盘后 + 我们自买入 → 池子价格剧烈波动 + 虚高 5-10%
     //         如果 reconcile 完成立刻开始追 HWM，第一个 tick 就是虚高瞬态值
@@ -192,10 +197,9 @@ const config = {
     //   v3.17.20: 用户明确不要"监控超时退出"（不要 6 小时到期退出），保持 0
     maxWatchDurationMs: parseInt(process.env.MAX_WATCH_DURATION_MS || '0', 10),
     // v3.17.20: FDV lower bound in USD; refreshed once per minute by TokenWatchdog.
-    minFdVUsd: parseFloat(process.env.MIN_FDV_USD || '20000'),
-    // v3.17.20: LP 下限（SOL），低于此值自动移除监控（默认开启 5000 SOL）
-    //   用链上池子 quote vault 的实际 SOL 余额，不依赖 Birdeye（新币数据不准）
-    minLpSol: parseFloat(process.env.MIN_LP_SOL || '0'),
+    minFdVUsd: parseFloat(process.env.MIN_FDV_USD || '15000'),
+    // Birdeye liquidity in USD. Shared by discovery admission and watchdog removal.
+    minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '3000'),
     // v3.17.20: FDV 上限（USD），设 0 禁用（不因 FDV 过大移除监控）
     maxFdVUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
   },
@@ -221,6 +225,7 @@ const config = {
     rsi1mPeriod: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_PERIOD || '7', 10),
     rsi1mMax: parseFloat(process.env.ACTIVITY_FLOW_RSI_1M_MAX || '50'),
     rsi1mMinBars: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_MIN_BARS || '8', 10),
+    rsi1mWarmupMaxMinutes: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_WARMUP_MAX_MINUTES || '120', 10),
     confirmMinBuyTrades5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_TRADES_5S || '4', 10),
     confirmMinUniqueBuyers5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_UNIQUE_BUYERS_5S || '3', 10),
     confirmMinRatio5s: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_SELL_RATIO_5S || '1.10'),
@@ -395,9 +400,9 @@ const config = {
     marketRetries: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRIES || '8', 10),
     marketRetryMs: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRY_MS || '3000', 10),
     maxConcurrentChecks: parseInt(process.env.PUMP_DISCOVERY_MAX_CONCURRENT_CHECKS || '3', 10),
-    minFdvUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_FDV_USD || process.env.MIN_FDV_USD || '20000'),
-    maxFdvUsd: parseFloat(process.env.PUMP_DISCOVERY_MAX_FDV_USD || process.env.MAX_FDV_USD || '1000000'),
-    minLiquidityUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_LIQUIDITY_USD || '5000'),
+    minFdvUsd: parseFloat(process.env.MIN_FDV_USD || '15000'),
+    maxFdvUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
+    minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '3000'),
     minVolume24hUsd: parseFloat(process.env.PUMP_DISCOVERY_MIN_VOLUME_24H_USD || '0'),
     maxTokenAgeMs: parseInt(process.env.PUMP_DISCOVERY_MAX_TOKEN_AGE_MS || process.env.MAX_TOKEN_AGE_MS || '14400000', 10),
     requireRevokedAuthorities: (process.env.PUMP_DISCOVERY_REQUIRE_REVOKED_AUTHORITIES ?? 'true').toLowerCase() === 'true',
