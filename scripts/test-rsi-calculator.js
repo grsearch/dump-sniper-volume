@@ -78,6 +78,38 @@ function run() {
   approx(longSnapshot.rsi1mLive, referenceRsi(longCloses, 7));
   approx(longSnapshot.rsi1mClosed, referenceRsi(longCloses.slice(0, -1), 7));
 
+  const scaleReset = new RsiCalculator({ period60: 7, priceScaleResetRatio: 100 });
+  const beforeMigration = [1, 1.02, 1.01, 1.04, 1.03, 1.05, 1.06, 1.08];
+  beforeMigration.forEach((price, index) =>
+    scaleReset.feedTick('scale-reset', price, index * minute + 50_000));
+  assert(scaleReset.snapshot('scale-reset').rsi1mLive != null);
+
+  const afterMigration = [
+    1.10e-6, 1.12e-6, 1.11e-6, 1.14e-6,
+    1.13e-6, 1.16e-6, 1.18e-6, 1.17e-6,
+  ];
+  scaleReset.feedTick('scale-reset', afterMigration[0], 8 * minute + 50_000);
+  assert.strictEqual(
+    scaleReset.snapshot('scale-reset'),
+    null,
+    'a migration-scale price discontinuity must discard contaminated RSI history',
+  );
+  afterMigration.slice(1).forEach((price, index) =>
+    scaleReset.feedTick('scale-reset', price, (index + 9) * minute + 50_000));
+  const resetSnapshot = scaleReset.snapshot('scale-reset');
+  approx(resetSnapshot.rsi1mLive, referenceRsi(afterMigration, 7));
+  assert.strictEqual(resetSnapshot.rsi1mClosedBars, 7);
+
+  const belowThreshold = new RsiCalculator({ period60: 7, priceScaleResetRatio: 100 });
+  beforeMigration.forEach((price, index) =>
+    belowThreshold.feedTick('below-threshold', price, index * minute + 50_000));
+  belowThreshold.feedTick('below-threshold', 106, 8 * minute + 50_000);
+  assert.strictEqual(
+    belowThreshold.snapshot('below-threshold').rsi1mClosedBars,
+    8,
+    'price changes below the configured ratio must not reset RSI history',
+  );
+
   console.log('RsiCalculator TradingView 1m RSI self-test: PASS');
 }
 

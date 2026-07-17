@@ -45,6 +45,7 @@ class PumpGraduationDiscovery extends EventEmitter {
     super();
     this.tokenRegistry = opts.tokenRegistry;
     this.onBeforeAdd = opts.onBeforeAdd || null;
+    this.onMigrationDetected = opts.onMigrationDetected || null;
     this.onTokenAdded = opts.onTokenAdded || null;
     this.settings = { ...config.pumpDiscovery, ...(opts.settings || {}) };
     this.rpcUrl = opts.rpcUrl || config.helius.rpcUrl;
@@ -290,6 +291,13 @@ class PumpGraduationDiscovery extends EventEmitter {
   }
 
   _enqueueCandidate(migration) {
+    if (this.onMigrationDetected) {
+      try {
+        this.onMigrationDetected(migration);
+      } catch (err) {
+        console.warn(`[PumpDiscovery] migration callback failed: ${err.message}`);
+      }
+    }
     if (this.seenMints.has(migration.mint) || this.queuedMints.has(migration.mint)) return;
     this.queuedMints.add(migration.mint);
     this.candidateQueue.push(migration);

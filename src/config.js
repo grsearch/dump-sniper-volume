@@ -227,6 +227,7 @@ const config = {
     rsi1mMax: parseFloat(process.env.ACTIVITY_FLOW_RSI_1M_MAX || '50'),
     rsi1mMinBars: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_MIN_BARS || '8', 10),
     rsi1mWarmupMaxMinutes: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_WARMUP_MAX_MINUTES || '120', 10),
+    rsiPriceScaleResetRatio: parseFloat(process.env.RSI_PRICE_SCALE_RESET_RATIO || '100'),
     confirmMinBuyTrades5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_TRADES_5S || '4', 10),
     confirmMinUniqueBuyers5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_UNIQUE_BUYERS_5S || '3', 10),
     confirmMinRatio5s: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_SELL_RATIO_5S || '1.10'),

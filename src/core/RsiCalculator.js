@@ -59,6 +59,7 @@ class RsiCalculator {
     bucketMs30 = 30000,
     bucketMs60 = 60000,
     maxBuckets = 120,
+    priceScaleResetRatio = 100,
   } = {}) {
     this.period1 = period1;
     this.period5 = period5;
@@ -71,6 +72,7 @@ class RsiCalculator {
     this.bucketMs30 = bucketMs30;
     this.bucketMs60 = bucketMs60;
     this.maxBuckets = maxBuckets;
+    this.priceScaleResetRatio = Math.max(1, Number(priceScaleResetRatio) || 100);
 
     // mint → { buckets1s, buckets5s, buckets30s, buckets60s, lastPrice }
     this.state = new Map();
@@ -82,8 +84,8 @@ class RsiCalculator {
    */
   feedTick(mint, price, ts = Date.now()) {
     if (!Number.isFinite(price) || price <= 0) return;
-    const s = this._stateOf(mint);
-    s.lastPrice = price;
+    const s = this._prepareStateForPrice(mint, price, ts);
+    if (!s) return;
     this._updateRsi1mState(s, price, ts);
     this._touchBucket(s.buckets1s, price, 0, ts, this.bucketMs1);
     this._touchBucket(s.buckets5s, price, 0, ts, this.bucketMs5);
@@ -101,7 +103,8 @@ class RsiCalculator {
   feedTrade(mint, price, solVolume, side, ts = Date.now(), poolQuoteSol = null) {
     if (!Number.isFinite(price) || price <= 0) return;
     if (!Number.isFinite(solVolume) || solVolume <= 0) solVolume = 0.001; // 给最低权重避免被 forward-fill 覆盖
-    const s = this._stateOf(mint);
+    const s = this._prepareStateForPrice(mint, price, ts);
+    if (!s) return;
 
     // v3.17.38: 在新 trade 写入桶之前,缓存当前 snapshot
     // 用于下游(SignalEngine)取"砸单前 RSI"
@@ -125,7 +128,6 @@ class RsiCalculator {
       s._snapshotBeforeFeed = null;
     }
 
-    s.lastPrice = price;
     this._updateRsi1mState(s, price, ts);
     this._touchBucket(s.buckets1s, price, solVolume, ts, this.bucketMs1);
     this._touchBucket(s.buckets5s, price, solVolume, ts, this.bucketMs5);
@@ -143,6 +145,7 @@ class RsiCalculator {
         buckets30s: [],
         buckets60s: [],
         lastPrice: null,
+        lastTs: null,
         lastPoolQuoteSol: null,
         rsi1mCurrentIdx: null,
         rsi1mCurrentClose: null,
@@ -156,6 +159,31 @@ class RsiCalculator {
       };
       this.state.set(mint, s);
     }
+    return s;
+  }
+
+  _prepareStateForPrice(mint, price, ts) {
+    let s = this._stateOf(mint);
+    const eventTs = Number(ts);
+    if (Number.isFinite(s.lastTs) && Number.isFinite(eventTs) && eventTs < s.lastTs) {
+      return null;
+    }
+
+    const previousPrice = Number(s.lastPrice);
+    if (Number.isFinite(previousPrice) && previousPrice > 0) {
+      const ratio = Math.max(previousPrice, price) / Math.min(previousPrice, price);
+      if (ratio >= this.priceScaleResetRatio) {
+        this.state.delete(mint);
+        s = this._stateOf(mint);
+        console.warn(
+          `[RsiCalculator] PRICE_SCALE_RESET ${mint.slice(0, 8)} ` +
+            `ratio=${ratio.toExponential(2)} previous=${previousPrice} current=${price} ts=${eventTs}`,
+        );
+      }
+    }
+
+    s.lastPrice = price;
+    s.lastTs = Number.isFinite(eventTs) ? eventTs : Date.now();
     return s;
   }
 
@@ -498,8 +526,12 @@ class RsiCalculator {
   /**
    * 清理某个 mint 的状态 (代币被移除时调用)
    */
-  reset(mint) {
-    this.state.delete(mint);
+  reset(mint, reason = 'manual') {
+    const removed = this.state.delete(mint);
+    if (removed) {
+      console.warn(`[RsiCalculator] RESET ${mint.slice(0, 8)} reason=${reason}`);
+    }
+    return removed;
   }
 
   /**

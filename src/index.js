@@ -143,7 +143,10 @@ async function main() {
   const RsiCalculator = require('./core/RsiCalculator');
   const rsiMode = process.env.RSI_FILTER || 'off';
   const rsiCalculator = (rsiMode === 'peak' || rsiMode === 'slope' || rsiMode === 'off')
-    ? new RsiCalculator({ period60: config.activityFlow.rsi1mPeriod })
+    ? new RsiCalculator({
+      period60: config.activityFlow.rsi1mPeriod,
+      priceScaleResetRatio: config.activityFlow.rsiPriceScaleResetRatio,
+    })
     : null;
   // v3.17.30: 即使 RSI_FILTER=off 也需要 RsiCalculator (RECENT_PUMP 用 buckets 数据)
   // 只有完全不需要 RSI 数据时才设 null
@@ -313,6 +316,9 @@ async function main() {
   const pumpDiscovery = new PumpGraduationDiscovery({
     tokenRegistry,
     onBeforeAdd: (mint) => server._evictIfNeeded(mint),
+    onMigrationDetected: (migration) => {
+      if (rsiCalculator) rsiCalculator.reset(migration.mint, 'pump_migration');
+    },
     onTokenAdded: async ({ token, migration, screening, evicted }) => {
       const mints = tokenRegistry.listActive().map((t) => t.mint);
       tickStream.updateSubscription(mints);

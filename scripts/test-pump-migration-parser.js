@@ -157,6 +157,23 @@ discovery.settings = {
   marketRetryMs: 1,
 };
 
+let detectedMigration = null;
+let migrationDetectionCount = 0;
+discovery.onMigrationDetected = (migration) => {
+  detectedMigration = migration;
+  migrationDetectionCount++;
+};
+discovery.seenMints = new Map();
+discovery.queuedMints = new Set();
+discovery.candidateQueue = [];
+discovery.running = false;
+discovery._enqueueCandidate({ mint: key('M'), migrationVersion: 'v2' });
+assert.strictEqual(detectedMigration.mint, key('M'));
+assert.strictEqual(detectedMigration.migrationVersion, 'v2');
+discovery._enqueueCandidate({ mint: key('M'), migrationVersion: 'v2' });
+assert.strictEqual(migrationDetectionCount, 2, 'confirmed migrations must reset RSI even when screening is deduplicated');
+assert.strictEqual(discovery.candidateQueue.length, 1, 'screening queue must remain deduplicated');
+
 assert.strictEqual(
   discovery._hasMigrationHint(['Program log: Instruction: MigrateV2']),
   true,
