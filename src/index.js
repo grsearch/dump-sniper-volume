@@ -64,6 +64,7 @@ async function main() {
       `migrationAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 3_600_000) + 'h' : 'disabled'} ` +
       `(check every ${watchdogCheckIntervalMs / 60_000}min)`,
   );
+  console.log(`Fixed stop loss: ${config.strategy.fixedStopLossPct < 0 ? config.strategy.fixedStopLossPct + '%' : 'disabled'}`);
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct < 0 ? config.strategy.emergencyStopLossPct + '%' : 'disabled'}`);
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);
   console.log(`Add-on: ${process.env.ADDON_ENABLED !== '0' ? `enabled once after ${process.env.ADDON_DROP_PCT || '20'}% drop` : 'disabled'}`);

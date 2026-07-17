@@ -181,7 +181,7 @@ function simulateExit(events, entryIdx, model) {
       return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'TAKE_PROFIT' };
     }
     if (model.stopLossPct < 0 && pnlPct <= model.stopLossPct) {
-      return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'STOP_LOSS' };
+      return { exitIdx: i, exitTs: ev.ts, pnlPct, reason: 'FIXED_STOP_LOSS' };
     }
 
     const peakPnlPct = ((hwm - entryPrice) / entryPrice) * 100;
@@ -386,7 +386,7 @@ function main() {
     rsiExitEnabled: String(process.env.BT_RSI_1M_EXIT_ENABLED ?? config.strategy.rsi1mExitEnabled).toLowerCase() === 'true',
     rsiExitThreshold: envNumber('BT_RSI_1M_EXIT_THRESHOLD', config.strategy.rsi1mExitThreshold),
     rsiExitMinBars: config.activityFlow.rsi1mMinBars,
-    stopLossPct: envNumber('BT_STOP_LOSS_PCT', config.strategy.emergencyStopLossPct),
+    stopLossPct: envNumber('BT_STOP_LOSS_PCT', config.strategy.fixedStopLossPct),
     maxHoldMs: envNumber('BT_MAX_HOLD_MS', config.strategy.maxHoldMs),
     cooldownMs: Number(process.env.BT_COOLDOWN_MS ?? config.activityFlow.cooldownMs ?? 0),
     positionSol: Number(process.env.BT_POSITION_SOL || config.strategy.positionSizeSol || 1),

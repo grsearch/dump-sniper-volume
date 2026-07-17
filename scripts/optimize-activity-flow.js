@@ -42,10 +42,9 @@ const FALLBACK = {
     rsiExitEnabled: true,
     rsiExitThreshold: 80,
     takeProfitPct: 100,
-    stopLossPct: 0,
+    stopLossPct: -30,
     maxHoldMs: 0,
     stabilizationMs: 5_000,
-    stopLossMinHoldMs: 30_000,
     trailingMinHwmAgeMs: 2_000,
   },
 };
@@ -205,10 +204,9 @@ function loadRuntime() {
         rsiExitEnabled: config.strategy.rsi1mExitEnabled,
         rsiExitThreshold: config.strategy.rsi1mExitThreshold,
         takeProfitPct: config.strategy.takeProfitPct,
-        stopLossPct: config.strategy.emergencyStopLossPct,
+        stopLossPct: config.strategy.fixedStopLossPct,
         maxHoldMs: config.strategy.maxHoldMs,
         stabilizationMs: config.strategy.stabilizationMs,
-        stopLossMinHoldMs: numberOr(process.env.EMERGENCY_STOP_GRACE_MS, 30_000),
         trailingMinHwmAgeMs: config.strategy.trailingMinHwmAgeMs,
       },
     };
@@ -620,6 +618,9 @@ function simulateExit(data, entryIdx, splitEnd, candidate, options) {
       }
     }
 
+    if (candidate.stopLossPct < 0 && rawPnlPct <= candidate.stopLossPct) {
+      return makeTrade(data, entryIdx, i, 'FIXED_STOP_LOSS', candidate, options);
+    }
     if (holdMs < candidate.stabilizationMs) continue;
     if (ev.price > hwm) {
       hwm = ev.price;
@@ -627,9 +628,6 @@ function simulateExit(data, entryIdx, splitEnd, candidate, options) {
     }
     if (candidate.takeProfitPct > 0 && rawPnlPct >= candidate.takeProfitPct) {
       return makeTrade(data, entryIdx, i, 'TAKE_PROFIT', candidate, options);
-    }
-    if (candidate.stopLossPct < 0 && holdMs >= candidate.stopLossMinHoldMs && rawPnlPct <= candidate.stopLossPct) {
-      return makeTrade(data, entryIdx, i, 'EMERGENCY_STOP', candidate, options);
     }
     const peakPnlPct = ((hwm - entry.price) / entry.price) * 100;
     if (candidate.trailingActivatePct > 0 && peakPnlPct >= candidate.trailingActivatePct) trailingArmed = true;
@@ -858,7 +856,7 @@ function envBlock(candidate) {
     `RSI_1M_EXIT_ENABLED=${candidate.rsiExitEnabled}`,
     `RSI_1M_EXIT_THRESHOLD=${candidate.rsiExitThreshold}`,
     `TAKE_PROFIT_PCT=${candidate.takeProfitPct}`,
-    `EMERGENCY_STOP_LOSS_PCT=${candidate.stopLossPct}`,
+    `FIXED_STOP_LOSS_PCT=${candidate.stopLossPct}`,
     'STABILIZATION_EMERGENCY_DRAWDOWN_PCT=0',
     `MAX_HOLD_MS=${candidate.maxHoldMs}`,
   ].join('\n');

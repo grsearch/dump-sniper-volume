@@ -3,6 +3,7 @@
 process.env.RSI_1M_EXIT_ENABLED = 'true';
 process.env.RSI_1M_EXIT_THRESHOLD = '80';
 process.env.ACTIVITY_FLOW_RSI_1M_MIN_BARS = '8';
+process.env.FIXED_STOP_LOSS_PCT = '-30';
 
 const assert = require('assert');
 const Module = require('module');
@@ -66,6 +67,39 @@ function rsiSnapshot(live, overrides = {}) {
 function run() {
   const mint = 'TestMint111111111111111111111111111111111';
   assert.strictEqual(config.strategy.rebuyCooldownMs, 300_000, 'default post-sale cooldown must be 5 minutes');
+  assert.strictEqual(config.strategy.fixedStopLossPct, -30);
+
+  {
+    const now = Date.now();
+    const first = position('p1', mint, {
+      entryPrice: 1,
+      highWaterMark: 1,
+      openedAt: now,
+      reconciledAt: now,
+      stabilizing: true,
+      _stabilizeSamples: [],
+    });
+    const second = position('p2', mint, { entryPrice: 1, highWaterMark: 1 });
+    const manager = managerWith(first, second);
+    manager._checkExit('p1', 0.7);
+    assert.deepStrictEqual(manager._exitCalls.map((x) => x.id), ['p1', 'p2']);
+    assert(manager._exitCalls.every((x) => x.reason === 'FIXED_STOP_LOSS'));
+  }
+
+  {
+    const now = Date.now();
+    const first = position('p1', mint, {
+      entryPrice: 1,
+      highWaterMark: 1,
+      openedAt: now,
+      reconciledAt: now,
+      stabilizing: true,
+      _stabilizeSamples: [],
+    });
+    const manager = managerWith(first);
+    manager._checkExit('p1', 0.7001);
+    assert.strictEqual(manager._exitCalls.length, 0, 'fixed stop must not trigger above -30%');
+  }
 
   {
     const manager = managerWith(position('p1', mint), position('p2', mint));

@@ -1657,6 +1657,17 @@ class PositionManager extends EventEmitter {
     pos._lastTickPrice = price;
     const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
 
+    // Absolute loss cap: no stabilization or legacy emergency-stop grace delay.
+    const fixedStopPct = config.strategy.fixedStopLossPct;
+    if (fixedStopPct < 0 && pnlPct <= fixedStopPct) {
+      console.warn(
+        `[PositionManager] FIXED_STOP_LOSS ${pos.symbol || pos.mint.slice(0, 6)} ` +
+          `pnl=${pnlPct.toFixed(2)}% threshold=${fixedStopPct}%`,
+      );
+      this._exitForCondition(pos, price, 'FIXED_STOP_LOSS');
+      return;
+    }
+
     // ============ v3.17.7 stabilization 期处理 ============
     // 期间只收集价格样本，不更新 HWM，不武装 trailing，不检查 TP
     // 期满时取样本中位数作为 stabilizedBaseline，过滤砸盘瞬态 + 自买入推高
