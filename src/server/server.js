@@ -358,6 +358,7 @@ class Server {
         config: {
           minSellSol: config.strategy.minSellSol,
           minPriceImpactPct: config.strategy.minPriceImpactPct,
+          fixedStopLossPct: config.strategy.fixedStopLossPct,
           positionSizeSol: config.strategy.positionSizeSol,
           takeProfitPct: config.strategy.takeProfitPct,
           maxHoldMs: config.strategy.maxHoldMs,

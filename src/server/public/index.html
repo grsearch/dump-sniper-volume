@@ -275,7 +275,7 @@
         <div class="status-item"><div class="label">监控代币</div><div class="value" id="stat-watched">-</div></div>
         <div class="status-item"><div class="label">当前持仓</div><div class="value" id="stat-open">-</div></div>
         <div class="status-item"><div class="label">触发卖单SOL</div><div class="value" id="stat-minSell">-</div></div>
-        <div class="status-item"><div class="label">触发跌幅</div><div class="value" id="stat-impact">-</div></div>
+        <div class="status-item"><div class="label">固定止损</div><div class="value" id="stat-impact">-</div></div>
         <div class="status-item"><div class="label">每笔仓位</div><div class="value" id="stat-size">-</div></div>
         <div class="status-item"><div class="label">止盈</div><div class="value" id="stat-tp">-</div></div>
         <div class="status-item"><div class="label">最大持仓</div><div class="value" id="stat-hold">-</div></div>
@@ -473,7 +473,9 @@ async function refreshStatus() {
   $('stat-watched').textContent = r.watchedTokens;
   $('stat-open').textContent = r.openPositions;
   $('stat-minSell').textContent = r.config.minSellSol + ' SOL';
-  $('stat-impact').textContent = '-' + r.config.minPriceImpactPct + '%';
+  $('stat-impact').textContent = r.config.fixedStopLossPct < 0
+    ? r.config.fixedStopLossPct + '%'
+    : '关闭';
   $('stat-size').textContent = r.config.positionSizeSol + ' SOL';
   $('stat-tp').textContent = '+' + r.config.takeProfitPct + '%';
   $('stat-hold').textContent = r.config.maxHoldMs / 1000 + 's';
@@ -484,6 +486,15 @@ let _allTokens = [];
 let _tokenPage = 1;
 const _tokenPageSize = 50;
 
+function migrationTimeForToken(token) {
+  const migrationTime = Number(token?.migration_time);
+  if (Number.isFinite(migrationTime) && migrationTime > 0) return migrationTime;
+  const addedAt = Number(token?.added_at);
+  return token?.source === 'pump_graduation' && Number.isFinite(addedAt) && addedAt > 0
+    ? addedAt
+    : null;
+}
+
 async function refreshTokens() {
   const r = await api('/api/tokens');
   if (!r.ok) return;
@@ -492,7 +503,10 @@ async function refreshTokens() {
   const ageFilterHours = parseInt($('ageFilter')?.value || '0');
   if (ageFilterHours > 0) {
     const cutoff = Date.now() - ageFilterHours * 3600000;
-    const filteredCount = _allTokens.filter(t => t.is_active && t.migration_time && t.migration_time >= cutoff).length;
+    const filteredCount = _allTokens.filter(t => {
+      const migrationTime = migrationTimeForToken(t);
+      return t.is_active && migrationTime && migrationTime >= cutoff;
+    }).length;
     $('tokenCountMeta').textContent = filteredCount + ' new24h / ' + activeCount + ' active / ' + _allTokens.length + ' total';
   } else {
     $('tokenCountMeta').textContent = activeCount + ' active / ' + _allTokens.length + ' total';
@@ -506,7 +520,10 @@ function renderTokenPage() {
   let tokens = _allTokens;
   if (ageFilterHours > 0) {
     const cutoff = Date.now() - ageFilterHours * 3600000;
-    tokens = tokens.filter(t => t.is_active && t.migration_time && t.migration_time >= cutoff);
+    tokens = tokens.filter(t => {
+      const migrationTime = migrationTimeForToken(t);
+      return t.is_active && migrationTime && migrationTime >= cutoff;
+    });
   }
   // Update filter count
   const fc = $('ageFilterCount');
@@ -530,7 +547,7 @@ function renderTokenPage() {
       <td class="mono">${fmtMoney(t.meta_json ? (JSON.parse(t.meta_json).volume24h || null) : null)}</td>
       <td class="mono" style="font-size:11px;">${fmtMarketAge(t.market_updated_at, t.market_source)}</td>
       <td class="mono" style="font-size:11px;">${fmtTime(t.added_at)}</td>
-      <td class="mono" style="font-size:11px;">${fmtAge(t.migration_time)}</td>
+      <td class="mono" style="font-size:11px;">${fmtAge(migrationTimeForToken(t))}</td>
       <td><span class="pill ${t.source === 'webhook' ? 'live' : 'dry'}">${t.source || 'manual'}</span></td>
       <td>${t.is_active ? `<button class="btn btn-sm btn-danger" onclick="removeToken('${t.mint}')">移除</button>` : '<span class="neutral">已移除</span>'}</td>
     </tr>`).join('');

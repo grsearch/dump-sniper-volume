@@ -142,8 +142,10 @@ class TokenWatchdog {
     return Number.isFinite(updatedAt) && updatedAt > 0 && now - updatedAt <= this.marketStaleMs;
   }
 
-  _backfillWebhookMigration(token, market) {
-    if (token?.migration_time || token?.source !== 'webhook') return;
+  _backfillMissingMigration(token, market) {
+    const hasExactMigrationTime = token?.migration_time &&
+      token?.migration_time_source !== 'pump_graduation_added_at_fallback';
+    if (hasExactMigrationTime) return;
     const migrationTime = normalizeUnixMs(market?.pairCreatedAt);
     if (!migrationTime) return;
     this.tokenRegistry.recordMigration(token.mint, {
@@ -198,7 +200,7 @@ class TokenWatchdog {
 
       for (const token of batch) {
         const market = markets.get(token.mint);
-        if (market) this._backfillWebhookMigration(token, market);
+        if (market) this._backfillMissingMigration(token, market);
         const marketComplete = (
           Number(market?.fdv) > 0 &&
           Number(market?.liquidity) > 0

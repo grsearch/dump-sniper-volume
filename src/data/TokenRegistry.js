@@ -24,6 +24,7 @@ const Database = require('better-sqlite3');
 const { PublicKey } = require('@solana/web3.js');
 const { config } = require('../config');
 const { fetchTokenFullInfo, fetchTokenCreationTime } = require('../utils/tokenMeta');
+const { normalizeUnixMs } = require('../utils/migrationTime');
 
 class TokenRegistry {
   constructor(dbPath = config.storage.dbPath) {
@@ -39,6 +40,7 @@ class TokenRegistry {
 
     this._initSchema();
     this._prepareStatements();
+    this._repairMissingPumpGraduationAges();
 
     // Hot in-memory cache: mint → row
     this.cache = new Map();
@@ -206,6 +208,21 @@ class TokenRegistry {
     for (const row of rows) this.cache.set(row.mint, row);
   }
 
+  _repairMissingPumpGraduationAges() {
+    const result = this.db.prepare(`
+      UPDATE tokens
+      SET migration_time = added_at,
+          migration_time_source = 'pump_graduation_added_at_fallback'
+      WHERE source = 'pump_graduation'
+        AND migration_time IS NULL
+        AND added_at IS NOT NULL
+        AND added_at > 0
+    `).run();
+    if (result.changes > 0) {
+      console.log(`[TokenRegistry] repaired missing migration AGE for ${result.changes} Pump graduation token(s)`);
+    }
+  }
+
   /** Static validator used by server.js endpoints */
   static validateMint(mint) {
     if (typeof mint !== 'string' || mint.length < 32 || mint.length > 44) {
@@ -244,6 +261,9 @@ class TokenRegistry {
     }
 
     const now = Date.now();
+    const source = opts.source || 'manual';
+    const suppliedMigrationTime = normalizeUnixMs(opts.migrationTime);
+    const migrationTime = suppliedMigrationTime || (source === 'pump_graduation' ? now : null);
     const row = {
       mint,
       symbol: opts.symbol || meta?.symbol || null,
@@ -256,7 +276,7 @@ class TokenRegistry {
       pool_address: opts.poolAddress || null,
       pool_base_vault: opts.poolBaseVault || null,
       pool_quote_vault: opts.poolQuoteVault || null,
-      source: opts.source || 'manual',
+      source,
       added_at: now,
       updated_at: now,
       market_updated_at: meta && (
@@ -268,8 +288,12 @@ class TokenRegistry {
       market_source: meta?.marketSource || null,
       meta_json: meta ? JSON.stringify({ ...meta, _birdeyeError: undefined }) : null,
       creation_time: Number.isFinite(Number(opts.creationTime)) ? Number(opts.creationTime) : null,
-      migration_time: Number.isFinite(Number(opts.migrationTime)) ? Number(opts.migrationTime) : null,
-      migration_time_source: opts.migrationTimeSource || null,
+      migration_time: migrationTime,
+      migration_time_source: opts.migrationTimeSource || (
+        !suppliedMigrationTime && migrationTime && source === 'pump_graduation'
+          ? 'pump_graduation_added_at_fallback'
+          : null
+      ),
       migration_slot: Number.isFinite(Number(opts.migrationSlot)) ? Number(opts.migrationSlot) : null,
       migration_signature: opts.migrationSignature || null,
     };
@@ -390,8 +414,9 @@ class TokenRegistry {
   }
 
   recordMigration(mint, info = {}) {
+    const migrationTime = normalizeUnixMs(info.migrationTime);
     this.stmts.setMigration.run(
-      info.migrationTime || null,
+      migrationTime,
       info.migrationTimeSource || null,
       info.slot || info.migrationSlot || null,
       info.signature || info.migrationSignature || null,

@@ -111,7 +111,7 @@ assert.strictEqual(
   const token = {
     mint,
     symbol: 'TEST',
-    source: 'webhook',
+    source: 'pump_graduation',
     pool_address: preferredPool,
     fdv: 40_000,
     liquidity: 20_000,
@@ -225,7 +225,7 @@ assert.strictEqual(
     'stale FDV/LP must not remove a token when both market providers fail',
   );
 
-  console.log('Token market refresh and webhook AGE tests passed');
+  console.log('Token market refresh and migration AGE tests passed');
   process.exit(0);
 })().catch((err) => {
   console.error(err);
