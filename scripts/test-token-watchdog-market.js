@@ -175,6 +175,11 @@ assert.strictEqual(
     60_000,
     'legacy 15-minute watchdog configuration must be clamped to one minute',
   );
+  assert.strictEqual(
+    watchdog.maxTokenAgeMs,
+    3_600_000,
+    'watchlist migration AGE limit must be 60 minutes',
+  );
   watchdog.minFdVUsd = 15_000;
   watchdog.minLiquidityUsd = 3_000;
   watchdog.minVolume24hUsd = 0;
@@ -185,6 +190,54 @@ assert.strictEqual(
   assert.strictEqual(token.migration_time, now - 10 * 60_000);
   assert.strictEqual(token.migration_time_source, 'dexscreener_pairCreatedAt');
   assert.strictEqual(removed, true, 'fresh FDV below the threshold must remove the token');
+
+  const agedToken = {
+    ...token,
+    fdv: 40_000,
+    liquidity: 20_000,
+    migration_time: now - 3_600_001,
+    market_updated_at: now,
+  };
+  let ageRemoved = false;
+  const ageRegistry = {
+    listActive: () => (ageRemoved ? [] : [agedToken]),
+    updateMarket: (_mint, market) => {
+      Object.assign(agedToken, {
+        fdv: market.fdv,
+        liquidity: market.liquidity,
+        market_updated_at: market.fetchedAt,
+      });
+      return agedToken;
+    },
+    recordMigration: () => agedToken,
+    removeToken: () => { ageRemoved = true; },
+  };
+  const ageWatchdog = new TokenWatchdog({
+    tokenRegistry: ageRegistry,
+    positionManager: { hasOpenPosition: () => false },
+    tradeLogger: null,
+    fetchMarkets: async () => new Map([[
+      mint,
+      {
+        fdv: 40_000,
+        liquidity: 20_000,
+        price: 0.00004,
+        volume24h: 50_000,
+        marketComplete: true,
+        marketSource: 'dexscreener',
+        fetchedAt: now,
+      },
+    ]]),
+    fetchMarket: async () => null,
+  });
+  ageWatchdog.minFdVUsd = 0;
+  ageWatchdog.maxFdVUsd = 0;
+  ageWatchdog.minLiquidityUsd = 0;
+  ageWatchdog.minVolume24hUsd = 0;
+  ageWatchdog.noBuyRemoveMs = 0;
+  ageWatchdog.maxWatchDurationMs = 0;
+  await ageWatchdog._check();
+  assert.strictEqual(ageRemoved, true, 'migration AGE above 60 minutes must remove the token');
 
   const staleToken = {
     ...token,

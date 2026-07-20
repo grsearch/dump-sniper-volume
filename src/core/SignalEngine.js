@@ -158,11 +158,123 @@ class SignalEngine extends EventEmitter {
     setTimeout(() => this.ourSignatures.delete(sig), 5 * 60_000);
   }
 
+  async _handleBurstPullbackSignal(signal, signalReceivedAt) {
+    const { mint, symbol, signature, ts, slot } = signal;
+    const now = Date.now();
+    const maxSignalAgeMs = config.burstPullback.maxSignalAgeMs;
+    if (!mint || !Number.isFinite(Number(signal.priceAfter)) || Number(signal.priceAfter) <= 0) {
+      this._logReject(signal, 'invalid burst-pullback signal');
+      return;
+    }
+    if (maxSignalAgeMs > 0 && ts && now - ts > maxSignalAgeMs) {
+      monitor.inc('SignalEngine.rejectedPushLag', 1, 'SignalEngine');
+      this._logReject(signal, 'signal stale: ' + (now - ts) + 'ms > ' + maxSignalAgeMs + 'ms');
+      return;
+    }
+    if (signature && this.ourSignatures.has(signature)) {
+      monitor.inc('SignalEngine.rejectedSelfTrigger', 1, 'SignalEngine');
+      this._logReject(signal, 'self-triggered');
+      return;
+    }
+
+    const lastTriggerAt = this.lastTriggerTs.get(mint) || 0;
+    if (lastTriggerAt && now - lastTriggerAt < config.burstPullback.cooldownMs) {
+      monitor.inc('SignalEngine.rejectedCooldown', 1, 'SignalEngine');
+      const remaining = Math.ceil(
+        (config.burstPullback.cooldownMs - (now - lastTriggerAt)) / 1000,
+      );
+      this._logReject(signal, 'event cooldown ' + remaining + 's remaining');
+      return;
+    }
+
+    const openCount = this.positionManager.openPositionCount();
+    const inflightCount = this.inflightBuys.size;
+    if (openCount + inflightCount >= config.strategy.maxConcurrentPositions) {
+      monitor.inc('SignalEngine.rejectedMaxConcurrent', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        'max concurrent (' + openCount + ' open + ' + inflightCount + ' inflight / ' +
+          config.strategy.maxConcurrentPositions + ')',
+      );
+      return;
+    }
+    if (this.inflightBuys.has(mint)) {
+      monitor.inc('SignalEngine.rejectedInflightBuy', 1, 'SignalEngine');
+      this._logReject(signal, 'buy in-flight');
+      return;
+    }
+    const mintOpenCount = this.positionManager.openPositionCountByMint
+      ? this.positionManager.openPositionCountByMint(mint)
+      : (this.positionManager.hasOpenPosition(mint) ? 1 : 0);
+    if (mintOpenCount > 0) {
+      monitor.inc('SignalEngine.rejectedAddonCondition', 1, 'SignalEngine');
+      this._logReject(signal, 'existing position; add-on disabled');
+      return;
+    }
+
+    const exitCooldown = this._exitCooldowns.get(mint) || 0;
+    if (exitCooldown > now) {
+      monitor.inc('SignalEngine.rejectedRebuyCooldown', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        'post-exit cooldown ' + Math.ceil((exitCooldown - now) / 1000) + 's remaining',
+      );
+      return;
+    }
+
+    const burst = signal._burst || {};
+    const reason =
+      'burst_pullback: volume_x=' + Number(burst.volumeMultiple || 0).toFixed(2) +
+      ' tps_x=' + Number(burst.tpsMultiple || 0).toFixed(2) +
+      ' peak=+' + Number(burst.peakRisePct || 0).toFixed(2) + '%' +
+      ' pullback=' + Number(burst.pullbackPct || 0).toFixed(2) + '%' +
+      ' flow5s=' + Number(burst.netFlow5sSol || 0).toFixed(2) + 'SOL' +
+      ' buy_accel=x' + Number(burst.buyerAcceleration || 0).toFixed(2) +
+      ' new_buyers=' + (burst.previousNewBuyers || 0) + '->' + (burst.currentNewBuyers || 0);
+
+    this.inflightBuys.add(mint);
+    this.lastTriggerTs.set(mint, now);
+    monitor.inc('SignalEngine.signalsAccepted', 1, 'SignalEngine');
+    this.emit('buyOrder', {
+      ...signal,
+      reason,
+      sizeSol: config.strategy.positionSizeSol,
+      _signalReceivedAt: signalReceivedAt,
+    });
+    console.log(
+      '[SignalEngine] BUY_SIGNAL ' + (symbol || mint.slice(0, 6)) + ': ' + reason +
+        (slot ? ' slot=' + slot : ''),
+    );
+
+    setImmediate(() => {
+      try {
+        this.tradeLogger.logSignal({
+          ts,
+          mint,
+          symbol,
+          kind: 'BURST_PULLBACK',
+          sellSol: signal.sellSol || 0,
+          priceImpactPct: burst.pullbackPct || 0,
+          seller: null,
+          sellerTx: signature,
+          notes: reason,
+          accepted: true,
+        });
+      } catch (err) {
+        monitor.recordError('SignalEngine', err, { phase: 'logBurstSignal_async' });
+      }
+    });
+  }
+
   async handleDumpSignal(signal) {
     monitor.beat('SignalEngine', 'signal');
     // v3.17.16: 记录信号到达 SignalEngine 的时间,用于事后分析 emit→BUY 延迟
     const _signalReceivedAt = Date.now();
     const { mint, symbol, sellSol, priceImpactPct, seller, signature, ts, slot } = signal;
+
+    if (signal._burstPullback) {
+      return this._handleBurstPullbackSignal(signal, _signalReceivedAt);
+    }
 
 
     // 1. 自触发过滤
@@ -287,7 +399,7 @@ class SignalEngine extends EventEmitter {
 
     // 5. 冷却
     //    买入后冷却 + 卖出后冷却（防止同一根K线买卖）
-    const triggerCooldownMs = signal._activityFlow ? 0 : config.strategy.cooldownMsPerToken;
+    const triggerCooldownMs = config.strategy.cooldownMsPerToken;
     const last = this.lastTriggerTs.get(mint);
     if (triggerCooldownMs > 0 && last && Date.now() - last < triggerCooldownMs) {
       monitor.inc('SignalEngine.rejectedCooldown', 1, 'SignalEngine');
@@ -298,47 +410,6 @@ class SignalEngine extends EventEmitter {
     // v3.17.40: 采样价格到长窗口缓存
     if (signal.priceAfter) {
       this._sampleLongPrice(mint, signal.priceAfter);
-    }
-
-    // Activity Flow entry uses TradingView-style RSI(7) on 1-minute candle closes.
-    // Fail closed until enough bars exist so a restart cannot bypass the filter.
-    if (signal._activityFlow && config.activityFlow.rsi1mEnabled) {
-      const minBars = Math.max(config.activityFlow.rsi1mPeriod + 1, config.activityFlow.rsi1mMinBars);
-      const snap = this.rsiCalculator ? this.rsiCalculator.snapshot(mint) : null;
-      const rsi1mLive = snap?.rsi1mLive;
-      const rsi1mClosed = snap?.rsi1mClosed;
-      const closedBars = snap?.rsi1mClosedBars || 0;
-      if (
-        !snap ||
-        !Number.isFinite(rsi1mLive) ||
-        !Number.isFinite(rsi1mClosed) ||
-        closedBars < minBars
-      ) {
-        monitor.inc('SignalEngine.rejectedRsi1mNotReady', 1, 'SignalEngine');
-        this._logReject(
-          signal,
-          `RSI_1M_NOT_READY: closedBars=${closedBars}/${minBars} ` +
-            `closed=${Number.isFinite(rsi1mClosed) ? rsi1mClosed.toFixed(1) : 'n/a'} ` +
-            `live=${Number.isFinite(rsi1mLive) ? rsi1mLive.toFixed(1) : 'n/a'}`,
-        );
-        return;
-      }
-      if (rsi1mClosed >= config.activityFlow.rsi1mMax || rsi1mLive >= config.activityFlow.rsi1mMax) {
-        monitor.inc('SignalEngine.rejectedRsi1mHigh', 1, 'SignalEngine');
-        this._logReject(
-          signal,
-          `RSI_1M_HIGH: RSI(${config.activityFlow.rsi1mPeriod},1m) ` +
-            `closed=${rsi1mClosed.toFixed(1)} live=${rsi1mLive.toFixed(1)} ` +
-            `max=${config.activityFlow.rsi1mMax}`,
-        );
-        return;
-      }
-      signal._rsi1m = rsi1mLive;
-      signal._rsi1mLive = rsi1mLive;
-      signal._rsi1mClosed = rsi1mClosed;
-      signal._rsi1mClosedBars = closedBars;
-      signal._rsi1mLiveClose = snap.rsi1mLiveClose;
-      signal._rsi1mLastClosedClose = snap.rsi1mLastClosedClose;
     }
 
     // v3.17.38: 在任何过滤判断之前,先取"砸单前 RSI"
@@ -411,7 +482,7 @@ class SignalEngine extends EventEmitter {
     // v3.17.36: 连环抛过滤
     const minSellCount = config.strategy.minTriggerSellCount;
     const sellCount10s = signal._sellCount10s || 1;
-    if (!signal._activityFlow && minSellCount > 0 && sellCount10s < minSellCount) {
+    if (minSellCount > 0 && sellCount10s < minSellCount) {
       monitor.inc('SignalEngine.rejectedLowSellCount', 1, 'SignalEngine');
       this._logReject(signal, 'recent 10s sell count ' + sellCount10s + ' < ' + minSellCount);
       return;
@@ -761,23 +832,11 @@ class SignalEngine extends EventEmitter {
     // v3.17.7: 日志带上 slot 和 slot gap（用于事后分析延迟分布）
     const latestSlot = this.tickStream ? (this.tickStream.latestSlot || 0) : 0;
     const slotGap = (slot && latestSlot) ? (latestSlot - slot) : null;
-    const flow = signal._flow || null;
-    const activityReason = signal._activityFlow && flow
-      ? `activity_flow_1m: ${flow.s60.tradeCount}tx/${flow.s60.volumeSol.toFixed(2)}SOL ` +
-        `buy=${flow.s60.buySol.toFixed(2)} sell=${flow.s60.sellSol.toFixed(2)} ` +
-        `r=${flow.s60.buySellRatio.toFixed(2)} ` +
-        `rsi1m_closed=${Number.isFinite(signal._rsi1mClosed) ? signal._rsi1mClosed.toFixed(1) : 'n/a'} ` +
-        `rsi1m_live=${Number.isFinite(signal._rsi1mLive) ? signal._rsi1mLive.toFixed(1) : 'n/a'} ` +
-        `closed_bars=${signal._rsi1mClosedBars || 0} ` +
-        `close=${Number.isFinite(signal._rsi1mLiveClose) ? signal._rsi1mLiveClose : 'n/a'} ` +
-        `prev_close=${Number.isFinite(signal._rsi1mLastClosedClose) ? signal._rsi1mLastClosedClose : 'n/a'}`
-      : null;
-
     // v3.10: 先 emit buyOrder（让 Executor 立即开始工作），再异步写 DB
     // SQLite WAL 模式下写入也要 1-3ms，省下来给关键路径
     this.emit('buyOrder', {
       ...signal,
-      reason: activityReason || `dump: sell ${sellSol.toFixed(2)} SOL, impact -${priceImpactPct.toFixed(2)}%`,
+      reason: `dump: sell ${sellSol.toFixed(2)} SOL, impact -${priceImpactPct.toFixed(2)}%`,
       sizeSol: config.strategy.positionSizeSol,
       _signalReceivedAt,
       rsiPreDump: signal._rsiPreDump,
@@ -800,20 +859,13 @@ class SignalEngine extends EventEmitter {
       console.warn(`[SignalEngine] ⚠️ slow path: ${inSignalEngineMs}ms in handleDumpSignal for ${symbol || mint.slice(0,6)}`);
     }
 
-    if (activityReason) {
-      console.log(
-        `[SignalEngine] BUY_SIGNAL ${symbol || mint.slice(0, 6)}: ${activityReason}` +
-          (slotGap !== null ? `, slot_gap=${slotGap}` : ''),
-      );
-    } else {
-      console.log(
-        `[SignalEngine] ✅ BUY_SIGNAL ${symbol || mint.slice(0, 6)}: sell=${sellSol.toFixed(
-          2,
-        )} SOL, impact=-${priceImpactPct.toFixed(2)}%, seller=${seller ? seller.slice(0, 6) + '..' : 'n/a'}, ` +
-          `seller_tx=${signature ? signature.slice(0, 8) + '..' : 'n/a'}` +
-          (slotGap !== null ? `, slot_gap=${slotGap}` : ''),
-      );
-    }
+    console.log(
+      `[SignalEngine] ✅ BUY_SIGNAL ${symbol || mint.slice(0, 6)}: sell=${sellSol.toFixed(
+        2,
+      )} SOL, impact=-${priceImpactPct.toFixed(2)}%, seller=${seller ? seller.slice(0, 6) + '..' : 'n/a'}, ` +
+        `seller_tx=${signature ? signature.slice(0, 8) + '..' : 'n/a'}` +
+        (slotGap !== null ? `, slot_gap=${slotGap}` : ''),
+    );
 
     // 异步写 DB（不阻塞 BUY 路径）
     // 写入时 accepted=1 + seller_tx，启动时 _restoreSellerTxsFromDb 就靠这个恢复
@@ -828,7 +880,7 @@ class SignalEngine extends EventEmitter {
           priceImpactPct,
           seller,
           sellerTx: signature,
-          notes: (activityReason || `accepted; sellSol=${sellSol.toFixed(2)}, impact=${priceImpactPct.toFixed(2)}%`) +
+          notes: `accepted; sellSol=${sellSol.toFixed(2)}, impact=${priceImpactPct.toFixed(2)}%` +
                  (slotGap !== null ? `, slot_gap=${slotGap}` : ''),
           accepted: true,
         });
@@ -985,7 +1037,7 @@ class SignalEngine extends EventEmitter {
       ts: signal.ts,
       mint: signal.mint,
       symbol: signal.symbol,
-      kind: signal._activityFlow ? 'ACTIVITY_FLOW' : 'DUMP_DETECTED',
+      kind: signal._burstPullback ? 'BURST_PULLBACK' : 'DUMP_DETECTED',
       sellSol: signal.sellSol,
       priceImpactPct: signal.priceImpactPct,
       seller: signal.seller,

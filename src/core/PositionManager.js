@@ -135,6 +135,7 @@ class PositionManager extends EventEmitter {
 
   handleSwapForExit(swap) {
     const s = config.strategy;
+    if (s.dedicatedExitOnly) return;
     if (!s.flowReversalExitEnabled || !swap || !swap.mint) return;
 
     const pids = this.byMint.get(swap.mint);
@@ -419,6 +420,7 @@ class PositionManager extends EventEmitter {
 
   handleRsiForExit(mint, price, snapshot) {
     const s = config.strategy;
+    if (s.dedicatedExitOnly) return false;
     if (!s.rsi1mExitEnabled || !Number.isFinite(s.rsi1mExitThreshold)) return false;
     if (!mint || !snapshot) return false;
 
@@ -457,7 +459,7 @@ class PositionManager extends EventEmitter {
       return false;
     }
 
-    const minBars = Math.max(1, config.activityFlow.rsi1mMinBars || 1);
+    const minBars = Math.max(1, config.rsi.rsi1mMinBars || 1);
     const completedBars = Number(snapshot.rsi1mClosedBars || 0);
     if (completedBars < minBars) {
       if (isOverbought) {
@@ -1163,6 +1165,20 @@ class PositionManager extends EventEmitter {
     for (const pos of this.positions.values()) {
       if (pos.exiting) continue;
 
+      if (config.strategy.dedicatedExitOnly) {
+        const age = now - pos.openedAt;
+        const timeoutMs = config.strategy.maxHoldMs;
+        if (timeoutMs > 0 && age >= timeoutMs) {
+          const lastPrice = this.priceTracker.getPrice(pos.mint) || pos.entryPrice;
+          console.log(
+            '[PositionManager] MAX_HOLD ' + (pos.symbol || pos.mint.slice(0, 6)) +
+              ' age=' + Math.round(age / 1000) + 's >= ' + Math.round(timeoutMs / 1000) + 's',
+          );
+          this._exitForCondition(pos, lastPrice, 'MAX_HOLD');
+        }
+        continue;
+      }
+
       this._fillPreVolFallback(pos);
       const age = now - pos.openedAt;
       // v3.19: peak 感知梯度超时 — 替代固定 maxHoldMs
@@ -1659,12 +1675,24 @@ class PositionManager extends EventEmitter {
 
     // Absolute loss cap: no stabilization or legacy emergency-stop grace delay.
     const fixedStopPct = config.strategy.fixedStopLossPct;
-    if (fixedStopPct < 0 && pnlPct <= fixedStopPct) {
+    if (fixedStopPct < 0 && pnlPct <= fixedStopPct + 1e-9) {
       console.warn(
         `[PositionManager] FIXED_STOP_LOSS ${pos.symbol || pos.mint.slice(0, 6)} ` +
           `pnl=${pnlPct.toFixed(2)}% threshold=${fixedStopPct}%`,
       );
       this._exitForCondition(pos, price, 'FIXED_STOP_LOSS');
+      return;
+    }
+
+    if (config.strategy.dedicatedExitOnly) {
+      const takeProfitPct = config.strategy.takeProfitPct;
+      if (takeProfitPct > 0 && pnlPct + 1e-9 >= takeProfitPct) {
+        console.log(
+          `[PositionManager] TAKE_PROFIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
+            `pnl=${pnlPct.toFixed(2)}% threshold=+${takeProfitPct}%`,
+        );
+        this._exitForCondition(pos, price, 'TAKE_PROFIT');
+      }
       return;
     }
 

@@ -19,6 +19,7 @@ class TokenWatchdog {
     onTokenRemoved,
     fetchMarkets,
     fetchMarket,
+    maxTokenAgeMs,
   }) {
     this.tokenRegistry = tokenRegistry;
     this.positionManager = positionManager;
@@ -41,7 +42,16 @@ class TokenWatchdog {
       : config.strategy.minLiquidityUsd;
     this.minVolume24hUsd = parseFloat(process.env.MIN_VOLUME_24H_USD || '20000');
     this.noBuyRemoveMs = parseInt(process.env.NO_BUY_REMOVE_MS || '86400000', 10);
-    this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '86400000', 10);
+    this.maxTokenAgeMs = maxTokenAgeMs ?? config.burstPullback.watchlistMaxAgeMs;
+    if (
+      process.env.MAX_TOKEN_AGE_MS != null &&
+      parseInt(process.env.MAX_TOKEN_AGE_MS, 10) !== this.maxTokenAgeMs
+    ) {
+      console.warn(
+        '[TokenWatchdog] MAX_TOKEN_AGE_MS is legacy and ignored; ' +
+          'use BURST_WATCHLIST_MAX_AGE_MS (default 3600000ms)',
+      );
+    }
 
     const configuredCheckIntervalMs = Math.max(
       10_000,
@@ -343,11 +353,11 @@ class TokenWatchdog {
       if (
         this.maxTokenAgeMs > 0 &&
         migrationAge != null &&
-        migrationAge >= this.maxTokenAgeMs
+        migrationAge > this.maxTokenAgeMs
       ) {
         reasons.push(
-          `migration_too_old(${Math.round(migrationAge / 3600000)}h >= ` +
-          `${this.maxTokenAgeMs / 3600000}h)`,
+          `migration_too_old(${Math.ceil(migrationAge / 1000)}s > ` +
+          `${Math.floor(this.maxTokenAgeMs / 1000)}s)`,
         );
       }
 

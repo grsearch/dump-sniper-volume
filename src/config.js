@@ -2,21 +2,6 @@
 
 require('dotenv').config({ override: true });
 
-const activityFlowForceDisabled = ['true', '1', 'yes'].includes(
-  String(process.env.ACTIVITY_FLOW_FORCE_DISABLED || process.env.ORDER_FLOW_FORCE_DISABLED || '').toLowerCase(),
-);
-
-function numberEnv(name, fallback) {
-  const raw = process.env[name];
-  if (raw == null || raw === '') return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-const solPriceUsdForConfig = numberEnv('SOL_PRICE_USD', 72);
-const activityFlow1mMinVolumeUsdDefault = numberEnv('ACTIVITY_FLOW_1M_MIN_VOLUME_USD', 3000);
-const activityFlow1mMinVolumeSolDefault = activityFlow1mMinVolumeUsdDefault / Math.max(solPriceUsdForConfig, 0.001);
-
 const config = {
   // ============ Mode ============
   DRY_RUN: (process.env.DRY_RUN ?? 'true').toLowerCase() === 'true',
@@ -48,14 +33,10 @@ const config = {
     // 仓位
     positionSizeSol: parseFloat(process.env.POSITION_SIZE_SOL || '0.1'),
 
-    // Exit model for current activity-flow strategy:
-    //   1) TAKE_PROFIT_PCT: fixed TP, sells immediately when reached.
-    //   2) TRAILING_*: arms after enough upside, then sells on drawdown from HWM.
-    //   3) EMERGENCY_STOP_LOSS_PCT and MAX_HOLD_MS remain as safety exits.
-    // 当前固定止盈：达到 TAKE_PROFIT_PCT 立即卖，不等双确认。
-    //   优先级高于移动止盈（_checkExit 里先检查 TP 再检查 trailing）。
-    //   tpConfirmCount/tpConfirmMinGapMs 保留字段但已不在固定止盈路径使用。
-    takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || '100'),
+    // Dedicated burst-pullback exits. Legacy exit environment variables do not
+    // override this strategy, so an older production .env cannot reactivate them.
+    dedicatedExitOnly: true,
+    takeProfitPct: parseFloat(process.env.BURST_EXIT_TAKE_PROFIT_PCT || '20'),
     tpConfirmCount: parseInt(process.env.TP_CONFIRM_COUNT || '2', 10),
     tpConfirmMinGapMs: parseInt(process.env.TP_CONFIRM_MIN_GAP_MS || '300', 10),
 
@@ -64,13 +45,13 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.TRAILING_ACTIVATE_PCT || '40'),
-    trailingDrawdownPct: parseFloat(process.env.TRAILING_DRAWDOWN_PCT || '10'),
+    trailingActivatePct: 0,
+    trailingDrawdownPct: 0,
     trailingMinHwmAgeMs: parseInt(process.env.TRAILING_MIN_HWM_AGE_MS || '2000', 10),
 
     // RSI 超买退出：使用当前未收盘的 1 分钟 RSI，便于在 swap 到达时立即响应。
     // 一旦同币任一仓位已经激活移动止盈，RSI 退出让位于移动止盈。
-    rsi1mExitEnabled: (process.env.RSI_1M_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    rsi1mExitEnabled: false,
     rsi1mExitThreshold: parseFloat(process.env.RSI_1M_EXIT_THRESHOLD || '80'),
 
     // v3.17.6: Stabilization 期 —— reconcile 完成后等价格稳定，再开始 trailing 追踪
@@ -101,7 +82,7 @@ const config = {
 
     // 紧急止损（防止灾难性下跌）
     // 设置为 0 可禁用紧急止损（恢复"硬扛"行为）
-    fixedStopLossPct: parseFloat(process.env.FIXED_STOP_LOSS_PCT || '-30'),
+    fixedStopLossPct: parseFloat(process.env.BURST_EXIT_STOP_LOSS_PCT || '-10'),
     emergencyStopLossPct: parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '0'),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值
@@ -120,28 +101,10 @@ const config = {
     //   v3.17.20: 设 0 禁用 TIMEOUT 卖出，持仓靠 TP/Trailing/Emergency 退出
     //   v3.17.32: 恢复为 4h 强制退出(数据回测: 4h+ 只有 30% 胜率, 平均亏 -13%)
     //   clean:     30min (1800000ms) — 短线反弹策略, 超时强制退出
-    maxHoldMs: parseInt(process.env.MAX_HOLD_MS || '0', 10),
+    maxHoldMs: parseInt(process.env.BURST_EXIT_MAX_HOLD_MS || '120000', 10),
     lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '0', 10),
-    // FLOW_REVERSAL_EXIT: 持仓后如果短窗口买盘反转为卖盘，则主动退出。
-    flowReversalExitEnabled: (process.env.FLOW_REVERSAL_EXIT_ENABLED ?? 'false').toLowerCase() === 'true',
-    flowReversalExitMode: String(process.env.FLOW_REVERSAL_EXIT_MODE || 'VOLUME_RATIO_1M').toUpperCase(),
-    flowReversalExitWindowMs: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_MS || '60000', 10),
-    flowReversalExitSellBuyRatio1m: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_1M || '1.35'),
-    flowReversalExitMinVolume1mSol: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_VOLUME_1M_SOL || '5'),
-    flowReversalExitMinHoldMs: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_HOLD_MS || '10000', 10),
-    flowReversalExitWindow5Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_5S_MS || '5000', 10),
-    flowReversalExitWindow15Ms: parseInt(process.env.FLOW_REVERSAL_EXIT_WINDOW_15S_MS || '15000', 10),
-    flowReversalExitMinTrades5s: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_TRADES_5S || '3', 10),
-    flowReversalExitMinVolume5sSol: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_VOLUME_5S_SOL || '1.5'),
-    flowReversalExitSellBuyRatio5s: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_5S || '2.0'),
-    flowReversalExitImbalance5s: parseFloat(process.env.FLOW_REVERSAL_EXIT_IMBALANCE_5S || '0.20'),
-    flowReversalExitMinTrades15s: parseInt(process.env.FLOW_REVERSAL_EXIT_MIN_TRADES_15S || '6', 10),
-    flowReversalExitMinVolume15sSol: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_VOLUME_15S_SOL || '3'),
-    flowReversalExitSellBuyRatio15s: parseFloat(process.env.FLOW_REVERSAL_EXIT_SELL_BUY_RATIO_15S || '1.5'),
-    flowReversalExitImbalance15s: parseFloat(process.env.FLOW_REVERSAL_EXIT_IMBALANCE_15S || '0.10'),
-    flowReversalExitMinDrawdownPct: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_DRAWDOWN_PCT || '3'),
-    flowReversalExitMinPeakDropPct: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_PEAK_DROP_PCT || '6'),
-    flowReversalExitMinPeakPnlPct: parseFloat(process.env.FLOW_REVERSAL_EXIT_MIN_PEAK_PNL_PCT || '0'),
+    // Legacy flow-reversal exit is permanently disabled for this strategy.
+    flowReversalExitEnabled: false,
 
     // v3.17.32: 防御模式 — 持仓超过 defenseActivateMs 后进入防御 trailing
     //   数据回测: 20 分钟是 PnL 拐点, 此后 peak<8% 的单平均亏 -17.8%
@@ -206,69 +169,34 @@ const config = {
     maxFdVUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
   },
 
-  // ============ Activity-flow entry ============
-  activityFlow: {
-    // Default entry: 1-minute volume + buy/sell ratio. Legacy multi-window fields remain available.
-    enabled:
-      !activityFlowForceDisabled &&
-      (process.env.ACTIVITY_FLOW_ENABLED ?? process.env.ORDER_FLOW_ENABLED ?? 'true').toLowerCase() === 'true',
-    replaceDumpSignal:
-      !activityFlowForceDisabled &&
-      (process.env.ACTIVITY_FLOW_REPLACE_DUMP_SIGNAL ?? process.env.ORDER_FLOW_REPLACE_DUMP_SIGNAL ?? 'true')
-        .toLowerCase() === 'true',
-    entryMode: String(process.env.ACTIVITY_FLOW_ENTRY_MODE || 'VOLUME_RATIO_1M').toUpperCase(),
-    minVolume1mUsd: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_USD || '3000'),
-    minVolume1mSol: parseFloat(
-      process.env.ACTIVITY_FLOW_1M_MIN_VOLUME_SOL || String(activityFlow1mMinVolumeSolDefault),
-    ),
-    minRatio1m: parseFloat(process.env.ACTIVITY_FLOW_1M_MIN_BUY_SELL_RATIO || '1.35'),
-    minTrades1m: parseInt(process.env.ACTIVITY_FLOW_1M_MIN_TRADES || '25', 10),
-    rsi1mEnabled: (process.env.ACTIVITY_FLOW_RSI_1M_ENABLED ?? 'true').toLowerCase() === 'true',
-    rsi1mPeriod: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_PERIOD || '7', 10),
-    rsi1mMax: parseFloat(process.env.ACTIVITY_FLOW_RSI_1M_MAX || '50'),
-    rsi1mMinBars: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_MIN_BARS || '8', 10),
-    rsi1mWarmupMaxMinutes: parseInt(process.env.ACTIVITY_FLOW_RSI_1M_WARMUP_MAX_MINUTES || '120', 10),
+  // RSI remains an analytics stream only. It is not an entry or exit condition.
+  rsi: {
+    rsi1mPeriod: 7,
+    rsi1mMinBars: 8,
+    rsi1mWarmupMaxMinutes: 120,
     rsiPriceScaleResetRatio: parseFloat(process.env.RSI_PRICE_SCALE_RESET_RATIO || '100'),
-    confirmMinBuyTrades5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_TRADES_5S || '4', 10),
-    confirmMinUniqueBuyers5s: parseInt(process.env.ACTIVITY_FLOW_CONFIRM_MIN_UNIQUE_BUYERS_5S || '3', 10),
-    confirmMinRatio5s: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MIN_BUY_SELL_RATIO_5S || '1.10'),
-    confirmMaxBuyerShare5s: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MAX_BUYER_SHARE_5S || '0.50'),
-    confirmMaxPriceRise5sPct: parseFloat(process.env.ACTIVITY_FLOW_CONFIRM_MAX_PRICE_RISE_5S_PCT || '6'),
-    confirmMaxSingleBuyImpactPct: parseFloat(
-      process.env.ACTIVITY_FLOW_CONFIRM_MAX_SINGLE_BUY_IMPACT_PCT || '4',
+  },
+
+  // ============ First-burst pullback entry ============
+  burstPullback: {
+    enabled: (process.env.BURST_PULLBACK_ENABLED ?? 'true').toLowerCase() === 'true',
+    window5Ms: parseInt(process.env.BURST_PULLBACK_WINDOW_5S_MS || '5000', 10),
+    volumeExpansion: parseFloat(process.env.BURST_PULLBACK_VOLUME_EXPANSION || '3'),
+    tpsExpansion: parseFloat(process.env.BURST_PULLBACK_TPS_EXPANSION || '2'),
+    quietWindowMs: parseInt(process.env.BURST_PULLBACK_QUIET_WINDOW_MS || '30000', 10),
+    confirmWindowMs: parseInt(process.env.BURST_PULLBACK_CONFIRM_WINDOW_MS || '60000', 10),
+    minPeakRisePct: parseFloat(process.env.BURST_PULLBACK_MIN_PEAK_RISE_PCT || '5'),
+    minPullbackPct: parseFloat(process.env.BURST_PULLBACK_MIN_PULLBACK_PCT || '2'),
+    maxPullbackPct: parseFloat(process.env.BURST_PULLBACK_MAX_PULLBACK_PCT || '8'),
+    minBuyerAcceleration: parseFloat(
+      process.env.BURST_PULLBACK_MIN_BUYER_ACCELERATION || '1.5',
     ),
-    window5Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_5S_MS || '5000', 10),
-    window15Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_15S_MS || '15000', 10),
-    window30Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_30S_MS || '30000', 10),
-    window60Ms: parseInt(process.env.ACTIVITY_FLOW_WINDOW_60S_MS || '60000', 10),
-    minTrades60s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_60S || '24', 10),
-    minVolume60sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_60S_SOL || '12'),
-    minUniqueTraders60s: parseInt(process.env.ACTIVITY_FLOW_MIN_UNIQUE_TRADERS_60S || '10', 10),
-    minTrades30s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_30S || '12', 10),
-    minVolume30sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_30S_SOL || '6'),
-    minRatio30s: parseFloat(process.env.ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_30S || '1.05'),
-    minTrades15s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_15S || '8', 10),
-    minVolume15sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_15S_SOL || '4'),
-    minRatio15s: parseFloat(process.env.ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_15S || '1.45'),
-    minImbalance15s: parseFloat(process.env.ACTIVITY_FLOW_MIN_IMBALANCE_15S || '0.20'),
-    minUniqueBuyers15s: parseInt(process.env.ACTIVITY_FLOW_MIN_UNIQUE_BUYERS_15S || '3', 10),
-    minPriceChange15sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_15S_PCT || '-3'),
-    minPriceChange30sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_30S_PCT || '-20'),
-    minPriceChange60sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_60S_PCT || '-30'),
-    minTrades5s: parseInt(process.env.ACTIVITY_FLOW_MIN_TRADES_5S || '5', 10),
-    minVolume5sSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_VOLUME_5S_SOL || '2.5'),
-    minRatio5s: parseFloat(process.env.ACTIVITY_FLOW_MIN_BUY_SELL_RATIO_5S || '1.40'),
-    minImbalance5s: parseFloat(process.env.ACTIVITY_FLOW_MIN_IMBALANCE_5S || '0.25'),
-    minUniqueBuyers5s: parseInt(process.env.ACTIVITY_FLOW_MIN_UNIQUE_BUYERS_5S || '2', 10),
-    minPriceChange5sPct: parseFloat(process.env.ACTIVITY_FLOW_MIN_PRICE_CHANGE_5S_PCT || '0.2'),
-    maxPriceChange5sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_5S_PCT || '5'),
-    maxPriceChange30sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_30S_PCT || '10'),
-    maxPriceChange60sPct: parseFloat(process.env.ACTIVITY_FLOW_MAX_PRICE_CHANGE_60S_PCT || '10'),
-    minPoolQuoteSol: parseFloat(process.env.ACTIVITY_FLOW_MIN_POOL_QUOTE_SOL || process.env.MIN_POOL_QUOTE_SOL || '30'),
-    cooldownMs: parseInt(process.env.ACTIVITY_FLOW_COOLDOWN_MS || '0', 10),
-    maxSignalAgeMs: parseInt(process.env.ACTIVITY_FLOW_MAX_SIGNAL_AGE_MS || process.env.MAX_PUSH_LAG_MS || '5000', 10),
-    maxEventsPerMint: parseInt(process.env.ACTIVITY_FLOW_MAX_EVENTS_PER_MINT || '600', 10),
-    debug: (process.env.ACTIVITY_FLOW_DEBUG ?? 'false').toLowerCase() === 'true',
+    newBuyerWindowMs: parseInt(process.env.BURST_PULLBACK_NEW_BUYER_WINDOW_MS || '10000', 10),
+    cooldownMs: parseInt(process.env.BURST_PULLBACK_EVENT_COOLDOWN_MS || '300000', 10),
+    maxSignalAgeMs: parseInt(process.env.BURST_PULLBACK_MAX_SIGNAL_AGE_MS || '5000', 10),
+    maxEventsPerMint: parseInt(process.env.BURST_PULLBACK_MAX_EVENTS_PER_MINT || '2000', 10),
+    debug: (process.env.BURST_PULLBACK_DEBUG ?? 'false').toLowerCase() === 'true',
+    watchlistMaxAgeMs: parseInt(process.env.BURST_WATCHLIST_MAX_AGE_MS || '3600000', 10),
   },
 
   // ============ Price anomaly filter ============

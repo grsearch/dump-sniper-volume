@@ -274,7 +274,7 @@
       <div class="status-grid">
         <div class="status-item"><div class="label">监控代币</div><div class="value" id="stat-watched">-</div></div>
         <div class="status-item"><div class="label">当前持仓</div><div class="value" id="stat-open">-</div></div>
-        <div class="status-item"><div class="label">触发卖单SOL</div><div class="value" id="stat-minSell">-</div></div>
+        <div class="status-item"><div class="label">爆量阈值</div><div class="value" id="stat-minSell">-</div></div>
         <div class="status-item"><div class="label">固定止损</div><div class="value" id="stat-impact">-</div></div>
         <div class="status-item"><div class="label">每笔仓位</div><div class="value" id="stat-size">-</div></div>
         <div class="status-item"><div class="label">止盈</div><div class="value" id="stat-tp">-</div></div>
@@ -472,7 +472,8 @@ async function refreshStatus() {
   $('modeBadge').className = 'badge ' + (r.dryRun ? 'dry' : 'live');
   $('stat-watched').textContent = r.watchedTokens;
   $('stat-open').textContent = r.openPositions;
-  $('stat-minSell').textContent = r.config.minSellSol + ' SOL';
+  $('stat-minSell').textContent =
+    r.config.burstVolumeExpansion + 'x / TPS ' + r.config.burstTpsExpansion + 'x';
   $('stat-impact').textContent = r.config.fixedStopLossPct < 0
     ? r.config.fixedStopLossPct + '%'
     : '关闭';

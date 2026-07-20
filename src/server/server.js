@@ -356,8 +356,8 @@ class Server {
         watchedTokens: this.tokenRegistry.listActive().length,
         openPositions: this.positionManager.openPositionCount(),
         config: {
-          minSellSol: config.strategy.minSellSol,
-          minPriceImpactPct: config.strategy.minPriceImpactPct,
+          burstVolumeExpansion: config.burstPullback.volumeExpansion,
+          burstTpsExpansion: config.burstPullback.tpsExpansion,
           fixedStopLossPct: config.strategy.fixedStopLossPct,
           positionSizeSol: config.strategy.positionSizeSol,
           takeProfitPct: config.strategy.takeProfitPct,
