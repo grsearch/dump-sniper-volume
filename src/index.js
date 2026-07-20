@@ -132,6 +132,7 @@ async function main() {
   const rsiMode = process.env.RSI_FILTER || 'off';
   const rsiCalculator = (rsiMode === 'peak' || rsiMode === 'slope' || rsiMode === 'off')
     ? new RsiCalculator({
+      period5: config.burstPullback.rsi5sPeriod,
       period60: config.rsi.rsi1mPeriod,
       priceScaleResetRatio: config.rsi.rsiPriceScaleResetRatio,
     })
@@ -139,7 +140,10 @@ async function main() {
   // v3.17.30: 即使 RSI_FILTER=off 也需要 RsiCalculator (RECENT_PUMP 用 buckets 数据)
   // 只有完全不需要 RSI 数据时才设 null
   if (rsiCalculator) {
-    console.log(`[main] RSI filter enabled, mode=${rsiMode}`);
+    console.log(
+      `[main] RSI analytics enabled, burst entry requires RSI(${config.burstPullback.rsi5sPeriod},5s) ` +
+        `< ${config.burstPullback.rsi5sMax}`,
+    );
     if (rsiMode === 'slope') {
       console.warn('[main] ⚠️  RSI_FILTER=slope conflicts with sniper strategy. Consider RSI_FILTER=peak or off.');
     }
@@ -214,6 +218,7 @@ async function main() {
       `quiet=${burstPullbackTracker.quietWindowMs / 1000}s confirm=${burstPullbackTracker.confirmWindowMs / 1000}s ` +
       `peak>=${burstPullbackTracker.minPeakRisePct}% ` +
       `pullback=${burstPullbackTracker.minPullbackPct}-${burstPullbackTracker.maxPullbackPct}% ` +
+      `RSI(${config.burstPullback.rsi5sPeriod},5s)<${config.burstPullback.rsi5sMax} ` +
       `buyerAccel=x${burstPullbackTracker.minBuyerAcceleration} ` +
       `cooldown=${burstPullbackTracker.cooldownMs / 60_000}min`,
   );
@@ -593,7 +598,29 @@ async function main() {
     }
   }, 10_000);
 
-  dumpDetector.on('priceTick', ({ mint, price, ts, poolAddress, side, solVolume, poolQuoteAfter }) => {
+  dumpDetector.on('priceTick', ({
+    mint,
+    price,
+    ts,
+    slot,
+    poolAddress,
+    side,
+    solVolume,
+    poolQuoteAfter,
+    poolBaseAfter,
+    baseDecimals,
+  }) => {
+    // The parsed transaction already contains post-swap vault balances. Apply
+    // them before PriceTracker emits the stop-loss check, so the emergency SELL
+    // is quoted against the state that caused the threshold crossing.
+    if (executor.poolStateCache && poolAddress) {
+      executor.poolStateCache.applySwapBalances(poolAddress, {
+        poolBaseAfter,
+        poolQuoteAfter,
+        baseDecimals,
+        slot,
+      });
+    }
     priceTracker.update(mint, price, ts, poolAddress);
     // v3.17.41: 采样价格到长窗口缓存 (比 handleDumpSignal 更频繁，覆盖所有 priceTick)
     signalEngine._sampleLongPrice(mint, priceTracker.getPrice(mint));

@@ -222,12 +222,39 @@ class SignalEngine extends EventEmitter {
       return;
     }
 
+    const rsiSnapshot = this.rsiCalculator ? this.rsiCalculator.snapshot(mint, 0) : null;
+    const rsi5s = rsiSnapshot?.rsi5s == null ? null : Number(rsiSnapshot.rsi5s);
+    const rsi5sBuckets = Number(rsiSnapshot?.bucketCount5s || 0);
+    if (
+      !rsiSnapshot ||
+      !Number.isFinite(rsi5s) ||
+      rsi5sBuckets < config.burstPullback.rsi5sMinBuckets
+    ) {
+      monitor.inc('SignalEngine.rejectedBurstRsi5sUnavailable', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        'RSI_5S_UNAVAILABLE: need ' + config.burstPullback.rsi5sMinBuckets +
+          ' buckets, got ' + rsi5sBuckets,
+      );
+      return;
+    }
+    if (rsi5s >= config.burstPullback.rsi5sMax) {
+      monitor.inc('SignalEngine.rejectedBurstRsi5sHigh', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        'RSI_5S_HIGH: RSI(' + config.burstPullback.rsi5sPeriod + ')=' + rsi5s.toFixed(1) +
+          ' >= ' + config.burstPullback.rsi5sMax,
+      );
+      return;
+    }
+
     const burst = signal._burst || {};
     const reason =
       'burst_pullback: volume_x=' + Number(burst.volumeMultiple || 0).toFixed(2) +
       ' tps_x=' + Number(burst.tpsMultiple || 0).toFixed(2) +
       ' peak=+' + Number(burst.peakRisePct || 0).toFixed(2) + '%' +
       ' pullback=' + Number(burst.pullbackPct || 0).toFixed(2) + '%' +
+      ' rsi5s=' + rsi5s.toFixed(1) +
       ' flow5s=' + Number(burst.netFlow5sSol || 0).toFixed(2) + 'SOL' +
       ' buy_accel=x' + Number(burst.buyerAcceleration || 0).toFixed(2) +
       ' new_buyers=' + (burst.previousNewBuyers || 0) + '->' + (burst.currentNewBuyers || 0);

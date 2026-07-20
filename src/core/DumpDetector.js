@@ -178,10 +178,14 @@ class DumpDetector extends EventEmitter {
         mint: parsed.baseMint,
         price: parsed.priceAfter,
         ts: parsed.ts,
+        slot: parsed.slot,
+        signature: parsed.signature,
         poolAddress: parsed.poolAddress,
         side: parsed.side,                 // 'BUY' | 'SELL'
         solVolume: parsed.quoteAmount,     // 这笔交易的 SOL 体积
         poolQuoteAfter: parsed.poolQuoteAfter, // 池子当前 SOL
+        poolBaseAfter: parsed.poolBaseAfter,
+        baseDecimals: parsed.baseDecimals,
       });
 
       // v3.17.20: emit swapParsed -- 给 CompetitorTracker 用。

@@ -75,6 +75,7 @@ function run() {
   {
     const manager = managerWith(position('p1', mint), position('p2', mint));
     manager._checkExit('p1', 0.9);
+    assert(Number.isFinite(manager.positions.get('p1')._exitTriggeredAt));
     assert.deepStrictEqual(manager._exitCalls.map((item) => item.id), ['p1', 'p2']);
     assert(manager._exitCalls.every((item) => item.reason === 'FIXED_STOP_LOSS'));
   }

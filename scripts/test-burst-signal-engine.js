@@ -12,7 +12,7 @@ Module._load = function loadWithDotenvStub(request, parent, isMain) {
 const SignalEngine = require('../src/core/SignalEngine');
 Module._load = originalLoad;
 
-function makeEngine(openForMint = 0) {
+function makeEngine(openForMint = 0, rsi5s = 55, bucketCount5s = 8) {
   const engine = Object.create(SignalEngine.prototype);
   EventEmitter.call(engine);
   engine.lastTriggerTs = new Map();
@@ -23,6 +23,9 @@ function makeEngine(openForMint = 0) {
     openPositionCount: () => openForMint,
     openPositionCountByMint: () => openForMint,
     hasOpenPosition: () => openForMint > 0,
+  };
+  engine.rsiCalculator = {
+    snapshot: () => ({ rsi5s, bucketCount5s }),
   };
   engine.loggedSignals = [];
   engine.tradeLogger = {
@@ -65,6 +68,7 @@ async function run() {
 
   assert(order, 'dedicated signal must emit a buy order');
   assert(order.reason.startsWith('burst_pullback:'));
+  assert(order.reason.includes('rsi5s=55.0'));
   assert.strictEqual(order.sizeSol > 0, true);
   assert.strictEqual(engine.inflightBuys.has(mint), true);
   assert.strictEqual(engine.loggedSignals[0].kind, 'BURST_PULLBACK');
@@ -76,6 +80,20 @@ async function run() {
   assert.strictEqual(blockedOrder, null, 'existing position must block add-on');
   assert.strictEqual(blocked.loggedSignals[0].accepted, false);
   assert(blocked.loggedSignals[0].rejectReason.includes('add-on disabled'));
+
+  const atLimit = makeEngine(0, 70, 8);
+  let atLimitOrder = null;
+  atLimit.on('buyOrder', (value) => { atLimitOrder = value; });
+  await atLimit.handleDumpSignal(signal(mint));
+  assert.strictEqual(atLimitOrder, null, 'RSI exactly at 70 must be rejected');
+  assert(atLimit.loggedSignals[0].rejectReason.includes('RSI_5S_HIGH'));
+
+  const insufficient = makeEngine(0, null, 8);
+  let insufficientOrder = null;
+  insufficient.on('buyOrder', (value) => { insufficientOrder = value; });
+  await insufficient.handleDumpSignal(signal(mint));
+  assert.strictEqual(insufficientOrder, null, 'insufficient RSI history must be rejected');
+  assert(insufficient.loggedSignals[0].rejectReason.includes('RSI_5S_UNAVAILABLE'));
 
   console.log('Dedicated burst signal engine tests: PASS');
   process.exit(0);

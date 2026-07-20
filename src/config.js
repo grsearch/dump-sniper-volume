@@ -169,7 +169,7 @@ const config = {
     maxFdVUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
   },
 
-  // RSI remains an analytics stream only. It is not an entry or exit condition.
+  // Shared RSI analytics. The active burst entry uses the 5-second RSI settings below.
   rsi: {
     rsi1mPeriod: 7,
     rsi1mMinBars: 8,
@@ -188,6 +188,9 @@ const config = {
     minPeakRisePct: parseFloat(process.env.BURST_PULLBACK_MIN_PEAK_RISE_PCT || '5'),
     minPullbackPct: parseFloat(process.env.BURST_PULLBACK_MIN_PULLBACK_PCT || '2'),
     maxPullbackPct: parseFloat(process.env.BURST_PULLBACK_MAX_PULLBACK_PCT || '8'),
+    rsi5sPeriod: parseInt(process.env.BURST_PULLBACK_RSI_5S_PERIOD || '7', 10),
+    rsi5sMax: parseFloat(process.env.BURST_PULLBACK_RSI_5S_MAX || '70'),
+    rsi5sMinBuckets: parseInt(process.env.BURST_PULLBACK_RSI_5S_MIN_BUCKETS || '8', 10),
     minBuyerAcceleration: parseFloat(
       process.env.BURST_PULLBACK_MIN_BUYER_ACCELERATION || '1.5',
     ),
@@ -339,7 +342,7 @@ const config = {
   // ============ Priority fees ============
   // BUY 和 SELL 分开配置：
   //   - BUY 是抢 slot 的（砸盘后所有 sniper 同抢），需要高 fee
-  //   - SELL 是平仓的（晚 1-3 个 slot 落链没差别），低 fee 即可
+  //   - SELL 是风险退出；优先费可低于抢买，但必须尽快传播并落链
   // 实战竞争者数据(BABYTROLL slot):
   //   排名1 93kgxYKe: priority fee 0.037 SOL,CU 111K → μL/CU 334M
   //   排名2 3fZftz6m: priority fee 0.012 SOL,CU 110K → μL/CU 113M

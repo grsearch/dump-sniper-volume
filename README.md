@@ -25,11 +25,14 @@ Solana / Pump.fun 实时交易机器人。当前唯一自动买入策略是
    - 当前 10 秒的新买家钱包数高于前一段 10 秒。
    - 新买家必须是第一次爆量确认后首次出现的钱包；爆量时已经出现的钱包、
      以及之后重复买入的钱包都不会重复计数。
+   - 实时 5 秒 RSI(7) 必须 **< 70**。RSI 使用 5 秒成交量加权价格和 Wilder
+     平滑计算；至少需要 8 个 5 秒桶，数据不足时不买入。
 4. 每个代币在发出一次合格行情信号后冷却 **5 分钟**，冷却期间不再接受
    同币的新爆量行情事件。
 
-旧的 1 分钟量比、RSI 入场、大砸单入场、多窗口反转、追高过滤和加仓
-均不参与当前买入路径。大砸单仍可记录分析，但不会触发买入。
+旧的 1 分钟量比、旧 RSI 模式、大砸单入场、多窗口反转、追高过滤和加仓
+均不参与当前买入路径；仅保留上述 5 秒 RSI(7) 硬过滤。大砸单仍可记录分析，
+但不会触发买入。
 
 ## 卖出策略
 
@@ -82,6 +85,9 @@ BURST_PULLBACK_CONFIRM_WINDOW_MS=60000
 BURST_PULLBACK_MIN_PEAK_RISE_PCT=5
 BURST_PULLBACK_MIN_PULLBACK_PCT=2
 BURST_PULLBACK_MAX_PULLBACK_PCT=8
+BURST_PULLBACK_RSI_5S_PERIOD=7
+BURST_PULLBACK_RSI_5S_MAX=70
+BURST_PULLBACK_RSI_5S_MIN_BUCKETS=8
 BURST_PULLBACK_MIN_BUYER_ACCELERATION=1.5
 BURST_PULLBACK_NEW_BUYER_WINDOW_MS=10000
 BURST_PULLBACK_EVENT_COOLDOWN_MS=300000
@@ -105,7 +111,7 @@ SWAP_EVENT_LOG_ENABLED=true
 启动日志应显示：
 
 ~~~text
-Entry: FIRST_BURST_PULLBACK
+Entry: FIRST_BURST_PULLBACK ... RSI(7,5s)<70
 Exit only: TP +20% / stop -10% / max hold 120s
 Legacy entries/exits: disabled
 Watchdog: ... migrationAge=1h

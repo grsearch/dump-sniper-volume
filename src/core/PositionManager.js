@@ -100,7 +100,7 @@ class PositionManager extends EventEmitter {
     this._priceSampleLastTs = new Map(); // mint → lastSampleTs
     this._priceSampleIntervalMs = parseInt(process.env.PRICE_SAMPLE_INTERVAL_MS || '10000', 10);
 
-    this.priceTracker.on('update', ({ mint, price }) => {
+    this.priceTracker.on('update', ({ mint, price, ts }) => {
       const pids = this.byMint.get(mint);
 
       // 价格采样：持仓币才采样，按间隔写入DB
@@ -116,8 +116,13 @@ class PositionManager extends EventEmitter {
       }
 
       if (!pids || pids.size === 0) return;
+      const receivedAt = Date.now();
       for (const pid of pids) {
-        this._checkExit(pid, price);
+        this._checkExit(pid, price, {
+          marketTs: Number(ts) || null,
+          receivedAt,
+          source: 'price_tick',
+        });
       }
     });
   }
@@ -1620,7 +1625,7 @@ class PositionManager extends EventEmitter {
     }
   }
 
-  _checkExit(positionId, price) {
+  _checkExit(positionId, price, context = null) {
     const pos = this.positions.get(positionId);
     if (!pos || pos.exiting) return;
 
@@ -1676,6 +1681,9 @@ class PositionManager extends EventEmitter {
     // Absolute loss cap: no stabilization or legacy emergency-stop grace delay.
     const fixedStopPct = config.strategy.fixedStopLossPct;
     if (fixedStopPct < 0 && pnlPct <= fixedStopPct + 1e-9) {
+      pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
+      pos._exitMarketTs = pos._exitMarketTs || context?.marketTs || null;
+      pos._exitTriggerSource = pos._exitTriggerSource || context?.source || 'price_check';
       console.warn(
         `[PositionManager] FIXED_STOP_LOSS ${pos.symbol || pos.mint.slice(0, 6)} ` +
           `pnl=${pnlPct.toFixed(2)}% threshold=${fixedStopPct}%`,
@@ -1687,6 +1695,9 @@ class PositionManager extends EventEmitter {
     if (config.strategy.dedicatedExitOnly) {
       const takeProfitPct = config.strategy.takeProfitPct;
       if (takeProfitPct > 0 && pnlPct + 1e-9 >= takeProfitPct) {
+        pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
+        pos._exitMarketTs = pos._exitMarketTs || context?.marketTs || null;
+        pos._exitTriggerSource = pos._exitTriggerSource || context?.source || 'price_check';
         console.log(
           `[PositionManager] TAKE_PROFIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
             `pnl=${pnlPct.toFixed(2)}% threshold=+${takeProfitPct}%`,
@@ -2238,6 +2249,8 @@ class PositionManager extends EventEmitter {
    */
   async _exit(pos, exitPrice, reason) {
     if (pos.exiting) return;
+    pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
+    pos._exitTriggerPrice = pos._exitTriggerPrice || exitPrice;
     pos.exiting = true;
     pos.exitReason = reason;
 
@@ -2342,6 +2355,7 @@ class PositionManager extends EventEmitter {
   }
 
   async _attemptSell(pos, triggerPrice) {
+    const attemptStartedAt = Date.now();
     const tokenInfo = this.tokenRegistry.getToken(pos.mint);
 
     // v3.17.40: 卖出时用最新实时价格，不用触发时的价格
@@ -2379,6 +2393,25 @@ class PositionManager extends EventEmitter {
     }
 
     pos.sellAttempts = (pos.sellAttempts || 0) + 1;
+
+    if (sellResult.success) {
+      const submittedAt = Date.now();
+      pos._lastSellSubmittedAt = submittedAt;
+      const detectToAttemptMs = Math.max(0, attemptStartedAt - (pos._exitTriggeredAt || attemptStartedAt));
+      const detectToSubmitMs = Math.max(0, submittedAt - (pos._exitTriggeredAt || submittedAt));
+      const marketToDetectMs = pos._exitMarketTs
+        ? Math.max(0, (pos._exitTriggeredAt || submittedAt) - pos._exitMarketTs)
+        : null;
+      monitor.set('PositionManager.lastExitDetectToSubmitMs', detectToSubmitMs, 'PositionManager');
+      console.log(
+        `[PositionManager] EXIT_TIMING ${pos.symbol || pos.mint.slice(0, 6)} ` +
+          `reason=${pos.exitReason} attempt=${pos.sellAttempts} ` +
+          `market_to_detect=${marketToDetectMs == null ? 'n/a' : `${marketToDetectMs}ms`} ` +
+          `detect_to_attempt=${detectToAttemptMs}ms ` +
+          `executor=${sellResult.latencyMs ?? 'n/a'}ms ` +
+          `detect_to_submit=${detectToSubmitMs}ms`,
+      );
+    }
 
     const realSolOut = sellResult.solOut ?? null;
     const realExitPrice = sellResult.price ?? triggerPrice;
@@ -2510,6 +2543,18 @@ class PositionManager extends EventEmitter {
 
     if (result.confirmed) {
       monitor.inc('PositionManager.sellConfirmed', 1, 'PositionManager');
+      const confirmedAt = Date.now();
+      const detectToConfirmMs = Math.max(0, confirmedAt - (pos._exitTriggeredAt || confirmedAt));
+      const submitToConfirmMs = pos._lastSellSubmittedAt
+        ? Math.max(0, confirmedAt - pos._lastSellSubmittedAt)
+        : null;
+      monitor.set('PositionManager.lastExitDetectToConfirmMs', detectToConfirmMs, 'PositionManager');
+      console.log(
+        `[PositionManager] EXIT_CONFIRMED_TIMING ${pos.symbol || pos.mint.slice(0, 6)} ` +
+          `reason=${pos.exitReason} detect_to_confirm=${detectToConfirmMs}ms ` +
+          `submit_to_confirm=${submitToConfirmMs == null ? 'n/a' : `${submitToConfirmMs}ms`} ` +
+          `slot=${result.slot || 'n/a'}`,
+      );
 
       // v3.17.6: 拉链上真实 SOL 增量
       let realExitPrice = exitPrice;

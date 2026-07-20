@@ -67,7 +67,7 @@ class Executor {
     this._latestBuySlot = 0;  // BUY 提交时的链上 slot
     // v3.15 通道分流（Openclaw 发现：staked RPC 限流严格，70 token 刷新会打爆）
     //   - this.rpc：普通公共 RPC（用于 PoolStateCache 后台刷新 + getTransaction / getSignatureStatuses 等查询）
-    //   - this.stakedRpc：staked 端点，**只用于 sendTransaction**（不参与缓存刷新）
+    //   - this.stakedRpc：staked 端点，用于交易广播（不参与缓存刷新）
     //   - this.senderEndpoint：Helius Sender（带 Jito 通道）
     this.rpc = new Connection(config.helius.rpcUrl, 'confirmed');
     this.stakedRpc = config.helius.stakedRpcUrl
@@ -202,7 +202,7 @@ class Executor {
     // ============ AllenHark Slipstream ============
     // leader-proximity-aware 交易中继，自动路由到离当前 leader 最近的 sender
     // BUY 时优先走 Slipstream（多 region + 多 sender 竞争），失败 fallback Helius Sender + staked RPC
-    // SELL 仍走 staked RPC（不需要抢 slot）
+    // SELL 同时走 staked + regular RPC，降低单通道传播延迟
     this.slipstreamClient = null;
     this._slipstreamReady = false;
     this._slipstreamInitAttempted = false;
@@ -508,7 +508,7 @@ class Executor {
    *     Promise.race 取第一个成功返回的（其它请求继续后台进行但结果被忽略）。
    *     Solana 节点会拒收重复 signature，所以重复提交是安全的。
    *   - 全部 Sender 失败才 fallback 到 staked RPC
-   *   - SELL 直接走 staked RPC（SELL 不带 Jito tip，Sender 会拒收）
+   *   - SELL 将同一签名并发广播到 staked RPC 与普通 RPC
    *
    * @param {Buffer} serialized
    * @param {'BUY'|'SELL'} side
@@ -517,7 +517,7 @@ class Executor {
     // v3.17.14: BUY 三路并发提交 (Slipstream + Helius Sender + Staked RPC)
     //           同时提交到三个通道，拿第一个返回的 signature
     //           其余请求被 Solana 节点的重复 sig 检测自动忽略
-    //           SELL 仍走 staked RPC（不需要抢 slot）
+    //           SELL 双 RPC 并发广播，首个成功返回
     if (side === 'BUY') {
       // 首个成功的 racer 立即 resolve，全部失败才 reject
       const racers = [];
@@ -593,10 +593,54 @@ class Executor {
       return await firstSuccess;
     }
 
-    // SELL — 直接走 staked RPC
-    return await this.stakedRpc.sendRawTransaction(serialized, {
-      skipPreflight: true,
-      maxRetries: 0,
+    // SELL — broadcast the same signed transaction through both available RPC
+    // paths. Solana deduplicates by signature, so this improves propagation
+    // without creating a second sale or a second on-chain fee.
+    return await this._submitSellRace(serialized);
+  }
+
+  async _submitSellRace(serialized) {
+    const channels = [
+      { label: 'Staked', connection: this.stakedRpc },
+    ];
+    const stakedEndpoint = this.stakedRpc?.rpcEndpoint || null;
+    const regularEndpoint = this.rpc?.rpcEndpoint || null;
+    if (
+      this.rpc &&
+      this.rpc !== this.stakedRpc &&
+      (!stakedEndpoint || !regularEndpoint || regularEndpoint !== stakedEndpoint)
+    ) {
+      channels.push({ label: 'Regular', connection: this.rpc });
+    }
+
+    const startedAt = Date.now();
+    return new Promise((resolve, reject) => {
+      let pending = channels.length;
+      let settled = false;
+      const errors = [];
+
+      for (const { label, connection } of channels) {
+        const channelStartedAt = Date.now();
+        connection.sendRawTransaction(serialized, {
+          skipPreflight: true,
+          maxRetries: 2,
+        }).then((signature) => {
+          if (settled) return;
+          settled = true;
+          const elapsedMs = Date.now() - channelStartedAt;
+          monitor.inc(`Executor.sellRaceWon_${label}`, 1, 'Executor');
+          monitor.set('Executor.lastSellRaceMs', Date.now() - startedAt, 'Executor');
+          console.log(`[Executor:race] SELL ${label} won in ${elapsedMs}ms`);
+          resolve(signature);
+        }).catch((err) => {
+          errors.push(`${label}: ${err.message}`);
+        }).finally(() => {
+          pending -= 1;
+          if (pending === 0 && !settled) {
+            reject(new Error(`All SELL submission channels failed (${errors.join(' | ')})`));
+          }
+        });
+      }
     });
   }
 

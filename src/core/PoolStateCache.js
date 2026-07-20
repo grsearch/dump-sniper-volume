@@ -27,6 +27,7 @@
  *   - stop()
  *   - get(poolAddress) → state | null
  *   - getAge(poolAddress) → ms 或 null
+ *   - applySwapBalances(poolAddress, balances) → boolean
  *   - addHot(mint, poolAddress, isPosition)
  *   - markPosition(mint)
  *   - removeHot(mint)
@@ -229,6 +230,46 @@ class PoolStateCache {
   getAge(poolAddress) {
     const entry = this.cache.get(poolAddress);
     return entry ? Date.now() - entry.fetchedAt : null;
+  }
+
+  /**
+   * Apply the post-swap vault balances already present in the parsed transaction.
+   * This keeps an emergency SELL quote on the same pool state as the price tick
+   * that triggered it, without waiting for the 500ms background RPC refresh.
+   */
+  applySwapBalances(poolAddress, {
+    poolBaseAfter,
+    poolQuoteAfter,
+    baseDecimals = 6,
+    quoteDecimals = 9,
+    slot = 0,
+  } = {}) {
+    if (!poolAddress) return false;
+    const entry = this.cache.get(poolAddress);
+    if (!entry?.state) return false;
+
+    const base = Number(poolBaseAfter);
+    const quote = Number(poolQuoteAfter);
+    const baseScale = 10 ** Number(baseDecimals);
+    const quoteScale = 10 ** Number(quoteDecimals);
+    const baseRaw = Math.round(base * baseScale);
+    const quoteRaw = Math.round(quote * quoteScale);
+    if (
+      !Number.isFinite(base) || base <= 0 ||
+      !Number.isFinite(quote) || quote <= 0 ||
+      !Number.isSafeInteger(baseRaw) || baseRaw <= 0 ||
+      !Number.isSafeInteger(quoteRaw) || quoteRaw <= 0
+    ) return false;
+
+    const numericSlot = Number(slot) || 0;
+    if (numericSlot > 0 && entry.marketSlot > numericSlot) return false;
+
+    entry.state.poolBaseAmount = new BN(String(baseRaw));
+    entry.state.poolQuoteAmount = new BN(String(quoteRaw));
+    entry.fetchedAt = Date.now();
+    if (numericSlot > 0) entry.marketSlot = numericSlot;
+    monitor.inc('PoolStateCache.swapBalanceApplied', 1, 'PoolStateCache');
+    return true;
   }
 
   /**
