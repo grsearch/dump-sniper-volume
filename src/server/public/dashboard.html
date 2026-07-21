@@ -274,11 +274,11 @@
       <div class="status-grid">
         <div class="status-item"><div class="label">监控代币</div><div class="value" id="stat-watched">-</div></div>
         <div class="status-item"><div class="label">当前持仓</div><div class="value" id="stat-open">-</div></div>
-        <div class="status-item"><div class="label">爆量阈值</div><div class="value" id="stat-minSell">-</div></div>
-        <div class="status-item"><div class="label">固定止损</div><div class="value" id="stat-impact">-</div></div>
+        <div class="status-item"><div class="label">1分钟成交额</div><div class="value" id="stat-minSell">-</div></div>
+        <div class="status-item"><div class="label">RSI 买入</div><div class="value" id="stat-impact">-</div></div>
         <div class="status-item"><div class="label">每笔仓位</div><div class="value" id="stat-size">-</div></div>
-        <div class="status-item"><div class="label">止盈</div><div class="value" id="stat-tp">-</div></div>
-        <div class="status-item"><div class="label">最大持仓</div><div class="value" id="stat-hold">-</div></div>
+        <div class="status-item"><div class="label">RSI 卖出</div><div class="value" id="stat-tp">-</div></div>
+        <div class="status-item"><div class="label">移动止盈</div><div class="value" id="stat-hold">-</div></div>
       </div>
     </div>
   </div>
@@ -472,14 +472,11 @@ async function refreshStatus() {
   $('modeBadge').className = 'badge ' + (r.dryRun ? 'dry' : 'live');
   $('stat-watched').textContent = r.watchedTokens;
   $('stat-open').textContent = r.openPositions;
-  $('stat-minSell').textContent =
-    r.config.burstVolumeExpansion + 'x / TPS ' + r.config.burstTpsExpansion + 'x';
-  $('stat-impact').textContent = r.config.fixedStopLossPct < 0
-    ? r.config.fixedStopLossPct + '%'
-    : '关闭';
+  $('stat-minSell').textContent = '> $' + Number(r.config.entryMinVolumeUsd).toLocaleString();
+  $('stat-impact').textContent = 'RSI(' + r.config.rsi5sPeriod + ') ↑ ' + r.config.rsiBuyCross;
   $('stat-size').textContent = r.config.positionSizeSol + ' SOL';
-  $('stat-tp').textContent = '+' + r.config.takeProfitPct + '%';
-  $('stat-hold').textContent = r.config.maxHoldMs / 1000 + 's';
+  $('stat-tp').textContent = '↓' + r.config.rsiExitDownCross + ' / >' + r.config.rsiExitOverbought;
+  $('stat-hold').textContent = '+' + r.config.trailingActivatePct + '% / -' + r.config.trailingDrawdownPct + '%';
   $('statusMeta').textContent = new Date().toLocaleTimeString();
 }
 
@@ -816,7 +813,7 @@ async function refreshHealth() {
     const txReceived = tt['TickStream.txReceived'] || 0;
     const txParsed = tt['DumpDetector.txParsed'] || 0;
     const priceTicks = tt['DumpDetector.priceTicks'] || 0;
-    const dumpSignals = tt['DumpDetector.dumpSignals'] || 0;
+    const activitySignals = tt['ActivityRsi.signalsEmitted'] || 0;
     const accepted = tt['SignalEngine.signalsAccepted'] || 0;
     const buyOk = tt['Executor.buySuccess'] || 0;
     const sellOk = tt['Executor.sellSuccess'] || 0;
@@ -829,7 +826,7 @@ async function refreshHealth() {
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:6px;font-size:11px;font-family:'SF Mono',Consolas,monospace;">
           <div><div style="color:var(--text-dim);">TX 收到</div><div style="font-weight:600;">${txReceived}</div></div>
           <div><div style="color:var(--text-dim);">价格更新</div><div style="font-weight:600;">${priceTicks}</div></div>
-          <div><div style="color:var(--text-dim);">砸盘信号</div><div style="font-weight:600;color:${dumpSignals > 0 ? 'var(--yellow)' : 'var(--text)'};">${dumpSignals}</div></div>
+          <div><div style="color:var(--text-dim);">量+RSI信号</div><div style="font-weight:600;color:${activitySignals > 0 ? 'var(--yellow)' : 'var(--text)'};">${activitySignals}</div></div>
           <div><div style="color:var(--text-dim);">通过过滤</div><div style="font-weight:600;color:${accepted > 0 ? 'var(--accent)' : 'var(--text)'};">${accepted}</div></div>
           <div><div style="color:var(--text-dim);">买入成功</div><div style="font-weight:600;">${buyOk}</div></div>
           <div><div style="color:var(--text-dim);">卖出成功</div><div style="font-weight:600;">${sellOk}</div></div>

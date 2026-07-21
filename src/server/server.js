@@ -356,12 +356,15 @@ class Server {
         watchedTokens: this.tokenRegistry.listActive().length,
         openPositions: this.positionManager.openPositionCount(),
         config: {
-          burstVolumeExpansion: config.burstPullback.volumeExpansion,
-          burstTpsExpansion: config.burstPullback.tpsExpansion,
-          fixedStopLossPct: config.strategy.fixedStopLossPct,
+          entryMinVolumeUsd: config.activityRsi.minVolumeUsd,
+          solPriceUsd: config.activityRsi.solPriceUsd,
+          rsi5sPeriod: config.activityRsi.rsi5sPeriod,
+          rsiBuyCross: config.activityRsi.rsiBuyCross,
+          rsiExitDownCross: config.strategy.rsi5sExitDownCross,
+          rsiExitOverbought: config.strategy.rsi5sExitOverbought,
+          trailingActivatePct: config.strategy.trailingActivatePct,
+          trailingDrawdownPct: config.strategy.trailingDrawdownPct,
           positionSizeSol: config.strategy.positionSizeSol,
-          takeProfitPct: config.strategy.takeProfitPct,
-          maxHoldMs: config.strategy.maxHoldMs,
         },
       });
     });

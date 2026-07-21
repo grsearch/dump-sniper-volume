@@ -33,10 +33,10 @@ const config = {
     // 仓位
     positionSizeSol: parseFloat(process.env.POSITION_SIZE_SOL || '0.1'),
 
-    // Dedicated burst-pullback exits. Legacy exit environment variables do not
-    // override this strategy, so an older production .env cannot reactivate them.
+    // Dedicated activity/RSI exits. Old production variables cannot reactivate
+    // fixed TP/SL, timeout, flow reversal, or any other legacy exit.
     dedicatedExitOnly: true,
-    takeProfitPct: parseFloat(process.env.BURST_EXIT_TAKE_PROFIT_PCT || '20'),
+    takeProfitPct: 0,
     tpConfirmCount: parseInt(process.env.TP_CONFIRM_COUNT || '2', 10),
     tpConfirmMinGapMs: parseInt(process.env.TP_CONFIRM_MIN_GAP_MS || '300', 10),
 
@@ -45,14 +45,16 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: 0,
-    trailingDrawdownPct: 0,
-    trailingMinHwmAgeMs: parseInt(process.env.TRAILING_MIN_HWM_AGE_MS || '2000', 10),
+    trailingActivatePct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT || '30'),
+    trailingDrawdownPct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT || '10'),
+    trailingMinHwmAgeMs: 0,
 
-    // RSI 超买退出：使用当前未收盘的 1 分钟 RSI，便于在 swap 到达时立即响应。
-    // 一旦同币任一仓位已经激活移动止盈，RSI 退出让位于移动止盈。
+    // 旧的 1 分钟 RSI 退出关闭；当前策略使用包含实时桶的 5 秒 RSI(7)。
     rsi1mExitEnabled: false,
     rsi1mExitThreshold: parseFloat(process.env.RSI_1M_EXIT_THRESHOLD || '80'),
+    rsi5sExitEnabled: true,
+    rsi5sExitDownCross: parseFloat(process.env.ACTIVITY_RSI_EXIT_DOWN_CROSS || '70'),
+    rsi5sExitOverbought: parseFloat(process.env.ACTIVITY_RSI_EXIT_OVERBOUGHT || '80'),
 
     // v3.17.6: Stabilization 期 —— reconcile 完成后等价格稳定，再开始 trailing 追踪
     //   原理：砸盘后 + 我们自买入 → 池子价格剧烈波动 + 虚高 5-10%
@@ -67,7 +69,7 @@ const config = {
     //     - 5 秒：覆盖砸盘后短暂剧烈波动（实测多数 < 3 秒就稳定）
     //     - 太短（< 3s）：保护不够，自买入虚高没消化完
     //     - 太长（> 10s）：错过早期快速反弹的入场窗口
-    stabilizationMs: parseInt(process.env.STABILIZATION_MS || '5000', 10),
+    stabilizationMs: 0,
 
     // v3.17.7: stabilization 期内 emergency_stop 的阈值
     //   stabilization 期内"相对 entryPrice 的 PnL"不可靠（自买入推高+回归造成假亏损）
@@ -82,7 +84,7 @@ const config = {
 
     // 紧急止损（防止灾难性下跌）
     // 设置为 0 可禁用紧急止损（恢复"硬扛"行为）
-    fixedStopLossPct: parseFloat(process.env.BURST_EXIT_STOP_LOSS_PCT || '-10'),
+    fixedStopLossPct: 0,
     emergencyStopLossPct: parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '0'),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值
@@ -101,7 +103,7 @@ const config = {
     //   v3.17.20: 设 0 禁用 TIMEOUT 卖出，持仓靠 TP/Trailing/Emergency 退出
     //   v3.17.32: 恢复为 4h 强制退出(数据回测: 4h+ 只有 30% 胜率, 平均亏 -13%)
     //   clean:     30min (1800000ms) — 短线反弹策略, 超时强制退出
-    maxHoldMs: parseInt(process.env.BURST_EXIT_MAX_HOLD_MS || '120000', 10),
+    maxHoldMs: 0,
     lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '0', 10),
     // Legacy flow-reversal exit is permanently disabled for this strategy.
     flowReversalExitEnabled: false,
@@ -123,7 +125,7 @@ const config = {
 
     // 风控（v3.17 默认 maxConcurrent 5）
     cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '0', 10),
-    rebuyCooldownMs: parseInt(process.env.REBUY_COOLDOWN_MS || '300000', 10),
+    rebuyCooldownMs: 0,
     maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS || '10', 10),
 
     // v3.17.6: 同砸单去重时间窗（毫秒）
@@ -169,7 +171,7 @@ const config = {
     maxFdVUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
   },
 
-  // Shared RSI analytics. The active burst entry uses the 5-second RSI settings below.
+  // Shared RSI analytics.
   rsi: {
     rsi1mPeriod: 7,
     rsi1mMinBars: 8,
@@ -177,28 +179,18 @@ const config = {
     rsiPriceScaleResetRatio: parseFloat(process.env.RSI_PRICE_SCALE_RESET_RATIO || '100'),
   },
 
-  // ============ First-burst pullback entry ============
-  burstPullback: {
-    enabled: (process.env.BURST_PULLBACK_ENABLED ?? 'true').toLowerCase() === 'true',
-    window5Ms: parseInt(process.env.BURST_PULLBACK_WINDOW_5S_MS || '5000', 10),
-    volumeExpansion: parseFloat(process.env.BURST_PULLBACK_VOLUME_EXPANSION || '3'),
-    tpsExpansion: parseFloat(process.env.BURST_PULLBACK_TPS_EXPANSION || '2'),
-    quietWindowMs: parseInt(process.env.BURST_PULLBACK_QUIET_WINDOW_MS || '30000', 10),
-    confirmWindowMs: parseInt(process.env.BURST_PULLBACK_CONFIRM_WINDOW_MS || '60000', 10),
-    minPeakRisePct: parseFloat(process.env.BURST_PULLBACK_MIN_PEAK_RISE_PCT || '5'),
-    minPullbackPct: parseFloat(process.env.BURST_PULLBACK_MIN_PULLBACK_PCT || '2'),
-    maxPullbackPct: parseFloat(process.env.BURST_PULLBACK_MAX_PULLBACK_PCT || '8'),
-    rsi5sPeriod: parseInt(process.env.BURST_PULLBACK_RSI_5S_PERIOD || '7', 10),
-    rsi5sMax: parseFloat(process.env.BURST_PULLBACK_RSI_5S_MAX || '70'),
-    rsi5sMinBuckets: parseInt(process.env.BURST_PULLBACK_RSI_5S_MIN_BUCKETS || '8', 10),
-    minBuyerAcceleration: parseFloat(
-      process.env.BURST_PULLBACK_MIN_BUYER_ACCELERATION || '1.5',
-    ),
-    newBuyerWindowMs: parseInt(process.env.BURST_PULLBACK_NEW_BUYER_WINDOW_MS || '10000', 10),
-    cooldownMs: parseInt(process.env.BURST_PULLBACK_EVENT_COOLDOWN_MS || '300000', 10),
-    maxSignalAgeMs: parseInt(process.env.BURST_PULLBACK_MAX_SIGNAL_AGE_MS || '5000', 10),
-    maxEventsPerMint: parseInt(process.env.BURST_PULLBACK_MAX_EVENTS_PER_MINT || '2000', 10),
-    debug: (process.env.BURST_PULLBACK_DEBUG ?? 'false').toLowerCase() === 'true',
+  // ============ 1-minute activity + 5-second RSI cross entry ============
+  activityRsi: {
+    enabled: (process.env.ACTIVITY_RSI_ENABLED ?? 'true').toLowerCase() === 'true',
+    volumeWindowMs: parseInt(process.env.ACTIVITY_RSI_VOLUME_WINDOW_MS || '60000', 10),
+    minVolumeUsd: parseFloat(process.env.ACTIVITY_RSI_MIN_VOLUME_USD || '10000'),
+    solPriceUsd: parseFloat(process.env.ACTIVITY_RSI_SOL_PRICE_USD || '75.5'),
+    rsi5sPeriod: parseInt(process.env.ACTIVITY_RSI_5S_PERIOD || '7', 10),
+    rsiBuyCross: parseFloat(process.env.ACTIVITY_RSI_BUY_CROSS || '30'),
+    rsi5sMinBuckets: parseInt(process.env.ACTIVITY_RSI_5S_MIN_BUCKETS || '8', 10),
+    maxSignalAgeMs: parseInt(process.env.ACTIVITY_RSI_MAX_SIGNAL_AGE_MS || '5000', 10),
+    maxEventsPerMint: parseInt(process.env.ACTIVITY_RSI_MAX_EVENTS_PER_MINT || '0', 10),
+    debug: (process.env.ACTIVITY_RSI_DEBUG ?? 'false').toLowerCase() === 'true',
     watchlistMaxAgeMs: parseInt(process.env.BURST_WATCHLIST_MAX_AGE_MS || '3600000', 10),
   },
 

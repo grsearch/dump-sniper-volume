@@ -40,9 +40,9 @@ class TokenWatchdog {
     this.minLiquidityUsd = process.env.MIN_LIQUIDITY_USD != null
       ? parseFloat(process.env.MIN_LIQUIDITY_USD)
       : config.strategy.minLiquidityUsd;
-    this.minVolume24hUsd = parseFloat(process.env.MIN_VOLUME_24H_USD || '20000');
+    this.minVolume24hUsd = parseFloat(process.env.MIN_VOLUME_24H_USD || '5000');
     this.noBuyRemoveMs = parseInt(process.env.NO_BUY_REMOVE_MS || '86400000', 10);
-    this.maxTokenAgeMs = maxTokenAgeMs ?? config.burstPullback.watchlistMaxAgeMs;
+    this.maxTokenAgeMs = maxTokenAgeMs ?? config.activityRsi.watchlistMaxAgeMs;
     if (
       process.env.MAX_TOKEN_AGE_MS != null &&
       parseInt(process.env.MAX_TOKEN_AGE_MS, 10) !== this.maxTokenAgeMs

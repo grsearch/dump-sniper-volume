@@ -110,7 +110,19 @@ function run() {
     'price changes below the configured ratio must not reset RSI history',
   );
 
-  console.log('RsiCalculator TradingView 1m RSI self-test: PASS');
+  // TradingView RSI uses each candle's close, not its volume-weighted price.
+  const fiveSecond = new RsiCalculator({ period5: 7 });
+  const fiveSecondCloses = [44, 44.15, 43.9, 44.35, 44.1, 44.8, 45.0];
+  fiveSecondCloses.forEach((price, index) => {
+    fiveSecond.feedTrade('five-second', price, 1, 'buy', index * 5_000 + 1_000, 50);
+  });
+  fiveSecond.feedTrade('five-second', 44.6, 100, 'sell', 7 * 5_000 + 1_000, 50);
+  fiveSecond.feedTrade('five-second', 45.6, 1, 'buy', 7 * 5_000 + 4_000, 50);
+  const fiveSecondSnapshot = fiveSecond.snapshot('five-second');
+  approx(fiveSecondSnapshot.rsi5s, referenceRsi([...fiveSecondCloses, 45.6], 7));
+  assert.strictEqual(fiveSecondSnapshot.bucketCount5s, 8);
+
+  console.log('RsiCalculator TradingView 1m/5s RSI self-test: PASS');
 }
 
 run();

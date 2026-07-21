@@ -1,8 +1,9 @@
 'use strict';
 
-process.env.BURST_EXIT_TAKE_PROFIT_PCT = '20';
-process.env.BURST_EXIT_STOP_LOSS_PCT = '-10';
-process.env.BURST_EXIT_MAX_HOLD_MS = '120000';
+process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT = '30';
+process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT = '10';
+process.env.ACTIVITY_RSI_EXIT_DOWN_CROSS = '70';
+process.env.ACTIVITY_RSI_EXIT_OVERBOUGHT = '80';
 
 const assert = require('assert');
 const Module = require('module');
@@ -24,6 +25,7 @@ function position(id, mint, overrides = {}) {
     symbol: 'TEST',
     entryPrice: 1,
     highWaterMark: 1,
+    highWaterMarkTs: now,
     openedAt: now,
     reconciledAt: now,
     reconciled: true,
@@ -41,11 +43,14 @@ function managerWith(...positions) {
   manager.positions = new Map();
   manager.byMint = new Map();
   manager._rsiExitSkipLogAt = new Map();
+  manager._lastRsi5sByMint = new Map();
+  manager._pendingRsi5sExit = new Map();
   manager._exitCalls = [];
   manager._tickCount = 0;
   manager.priceTracker = { getPrice: () => 1, forceSet() {} };
   manager.executor = null;
   manager.tokenRegistry = null;
+  manager.tradeLogger = null;
   manager._exit = function mockExit(pos, price, reason) {
     if (pos.exiting) return;
     pos.exiting = true;
@@ -61,63 +66,85 @@ function managerWith(...positions) {
   return manager;
 }
 
+function rsi(value) {
+  return { rsi5s: value, bucketCount5s: 8 };
+}
+
 function run() {
   const mint = 'TestMint111111111111111111111111111111111';
   assert.strictEqual(config.strategy.dedicatedExitOnly, true);
-  assert.strictEqual(config.strategy.takeProfitPct, 20);
-  assert.strictEqual(config.strategy.fixedStopLossPct, -10);
-  assert.strictEqual(config.strategy.maxHoldMs, 120_000);
-  assert.strictEqual(config.strategy.rsi1mExitEnabled, false);
+  assert.strictEqual(config.strategy.takeProfitPct, 0);
+  assert.strictEqual(config.strategy.fixedStopLossPct, 0);
+  assert.strictEqual(config.strategy.maxHoldMs, 0);
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
-  assert.strictEqual(config.strategy.trailingActivatePct, 0);
-  assert.strictEqual(config.strategy.trailingDrawdownPct, 0);
+  assert.strictEqual(config.strategy.trailingActivatePct, 30);
+  assert.strictEqual(config.strategy.trailingDrawdownPct, 10);
+  assert.strictEqual(config.strategy.rsi5sExitDownCross, 70);
+  assert.strictEqual(config.strategy.rsi5sExitOverbought, 80);
 
   {
-    const manager = managerWith(position('p1', mint), position('p2', mint));
-    manager._checkExit('p1', 0.9);
-    assert(Number.isFinite(manager.positions.get('p1')._exitTriggeredAt));
-    assert.deepStrictEqual(manager._exitCalls.map((item) => item.id), ['p1', 'p2']);
-    assert(manager._exitCalls.every((item) => item.reason === 'FIXED_STOP_LOSS'));
+    const manager = managerWith(position('p1', mint));
+    manager._checkExit('p1', 0.5);
+    assert.strictEqual(manager._exitCalls.length, 0, 'fixed stop loss must be disabled');
   }
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 0.9001);
-    assert.strictEqual(manager._exitCalls.length, 0, 'stop must not trigger above -10%');
-  }
-
-  {
-    const manager = managerWith(position('p1', mint), position('p2', mint));
-    manager._checkExit('p1', 1.2);
-    assert.deepStrictEqual(manager._exitCalls.map((item) => item.id), ['p1', 'p2']);
-    assert(manager._exitCalls.every((item) => item.reason === 'TAKE_PROFIT'));
+    manager._checkExit('p1', 1.3);
+    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+30% must arm trailing');
+    assert.strictEqual(manager._exitCalls.length, 0);
+    manager._checkExit('p1', 1.17);
+    assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
   }
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 1.1999);
-    assert.strictEqual(manager._exitCalls.length, 0, 'take profit must not trigger below +20%');
+    manager.handleRsi5sForExit(mint, 1.1, rsi(69));
+    manager.handleRsi5sForExit(mint, 1.1, rsi(71));
+    assert.strictEqual(manager._exitCalls.length, 0, 'upward cross of 70 must not sell');
+    manager.handleRsi5sForExit(mint, 1.1, rsi(69));
+    assert.strictEqual(manager._exitCalls[0].reason, 'RSI_5S_DOWN_CROSS_70');
   }
 
   {
     const manager = managerWith(position('p1', mint));
+    manager.handleRsi5sForExit(mint, 1.1, rsi(80));
+    assert.strictEqual(manager._exitCalls.length, 0, 'RSI exactly 80 must not sell');
+    manager.handleRsi5sForExit(mint, 1.1, rsi(80.1));
+    assert.strictEqual(manager._exitCalls[0].reason, 'RSI_5S_OVERBOUGHT');
+  }
+
+  {
+    const manager = managerWith(position('p1', mint, {
+      trailingArmed: true,
+      highWaterMark: 1.3,
+      _armedHwm: 1.3,
+    }));
+    manager._pendingRsi5sExit.set(mint, 'RSI_5S_OVERBOUGHT');
+    manager.handleRsi5sForExit(mint, 1.2, rsi(71));
+    manager.handleRsi5sForExit(mint, 1.2, rsi(69));
+    manager.handleRsi5sForExit(mint, 1.2, rsi(80.1));
     assert.strictEqual(
-      manager.handleRsiForExit(mint, 1.3, { rsi1mLive: 99, rsi1mClosedBars: 20 }),
-      false,
+      manager._exitCalls.length,
+      0,
+      'armed trailing must suppress both RSI exit rules',
     );
-    assert.strictEqual(manager._exitCalls.length, 0, 'RSI exit must remain disabled');
+    assert.strictEqual(
+      manager._pendingRsi5sExit.has(mint),
+      false,
+      'arming trailing must clear a pending RSI exit',
+    );
   }
 
   {
-    const manager = managerWith(position('p1', mint, { openedAt: Date.now() - 120_001 }));
+    const manager = managerWith(position('p1', mint, { openedAt: Date.now() - 999_999 }));
     manager.priceTracker = { getPrice: () => 1.05, forceSet() {} };
     manager._tick();
-    assert.strictEqual(manager._exitCalls.length, 1);
-    assert.strictEqual(manager._exitCalls[0].reason, 'MAX_HOLD');
+    assert.strictEqual(manager._exitCalls.length, 0, 'timeout exit must be disabled');
   }
 
-  console.log('Dedicated position exit policy tests: PASS');
+  console.log('Dedicated activity/RSI exit policy tests: PASS');
+  process.exit(0);
 }
 
 run();
-process.exit(0);

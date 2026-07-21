@@ -88,7 +88,7 @@ class RsiCalculator {
     if (!s) return;
     this._updateRsi1mState(s, price, ts);
     this._touchBucket(s.buckets1s, price, 0, ts, this.bucketMs1);
-    this._touchBucket(s.buckets5s, price, 0, ts, this.bucketMs5);
+    this._touchBucket(s.buckets5s, price, 0, ts, this.bucketMs5, true);
     this._touchBucket(s.buckets30s, price, 0, ts, this.bucketMs30);
     this._touchBucket(s.buckets60s, price, 0, ts, this.bucketMs60, true);
     this._trim(s);
@@ -130,7 +130,7 @@ class RsiCalculator {
 
     this._updateRsi1mState(s, price, ts);
     this._touchBucket(s.buckets1s, price, solVolume, ts, this.bucketMs1);
-    this._touchBucket(s.buckets5s, price, solVolume, ts, this.bucketMs5);
+    this._touchBucket(s.buckets5s, price, solVolume, ts, this.bucketMs5, true);
     this._touchBucket(s.buckets30s, price, solVolume, ts, this.bucketMs30);
     this._touchBucket(s.buckets60s, price, solVolume, ts, this.bucketMs60, true);
     this._trim(s);
@@ -360,6 +360,21 @@ class RsiCalculator {
   }
 
   /**
+   * Convert candles to closes for TradingView-compatible RSI. Empty candles
+   * are already forward-filled by _touchBucket and carry the prior close.
+   */
+  _bucketsToClosePrices(buckets) {
+    const prices = [];
+    let previousClose = null;
+    for (const bucket of buckets) {
+      const close = Number(bucket.lastPrice);
+      if (Number.isFinite(close) && close > 0) previousClose = close;
+      if (previousClose != null) prices.push(previousClose);
+    }
+    return prices;
+  }
+
+  /**
    * Wilder's RSI: 用 EMA 平均涨跌幅
    * @param {number[]} prices
    * @param {number} period 默认 this.period(向后兼容)
@@ -405,7 +420,7 @@ class RsiCalculator {
     if (!s) return null;
 
     const prices1s = this._bucketsToPrices(s.buckets1s);
-    const prices5s = this._bucketsToPrices(s.buckets5s);
+    const prices5s = this._bucketsToClosePrices(s.buckets5s);
 
     const prices30s = this._bucketsToPrices(s.buckets30s);
     const rsi1s = this._wildersRsi(prices1s, this.period1);

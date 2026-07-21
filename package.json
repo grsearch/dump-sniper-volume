@@ -1,7 +1,7 @@
 {
   "name": "dump-sniper",
   "version": "4.0.0-clean",
-  "description": "Solana Pump.fun first-burst pullback trader.",
+  "description": "Solana Pump.fun one-minute volume and five-second RSI trader.",
   "main": "src/index-flow.js",
   "scripts": {
     "start": "node src/index-flow.js",
@@ -11,8 +11,8 @@
     "diagnose": "node scripts/diagnose.js",
     "diagnose:quick": "node scripts/diagnose.js --quick",
     "test:rsi": "node scripts/test-rsi-calculator.js",
-    "test:burst": "node scripts/test-burst-pullback-strategy.js",
-    "test:burst-signal": "node scripts/test-burst-signal-engine.js",
+    "test:activity-rsi": "node scripts/test-activity-rsi-tracker.js",
+    "test:activity-rsi-signal": "node scripts/test-activity-rsi-signal.js",
     "test:exit-policy": "node scripts/test-position-exit-policy.js",
     "test:stop-fast": "node scripts/test-stop-loss-fast-path.js",
     "test:pump-discovery": "node scripts/test-pump-migration-parser.js",

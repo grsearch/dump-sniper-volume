@@ -1,50 +1,43 @@
 # Dump Sniper
 
-Solana / Pump.fun 实时交易机器人。当前唯一自动买入策略是
-**第一次爆量后的回撤确认**。
+Solana / Pump.fun 实时交易机器人。当前唯一自动策略是 **1 分钟成交额 + 5 秒 RSI(7)**。
 
 ## 买入策略
 
-程序对监控列表中每个代币的 swap 逐笔计算滚动窗口。每次收到新交易时，
-“当前 5 秒”指 `(当前时刻-5s, 当前时刻]`，“前一段 5 秒”指
-`(当前时刻-10s, 当前时刻-5s]`：
+程序逐笔处理监控列表内的 swap。只有以下两项同时成立才买入：
 
-1. 识别第一次爆量：
-   - 当前 5 秒总成交量 / 前一段 5 秒总成交量 **>= 3**。
-   - 当前 5 秒交易笔数（等价于 5 秒平均 TPS）/ 前一段 5 秒交易笔数 **>= 2**。
-   - 前一段 5 秒必须有真实交易，禁止从零基数计算扩张。
-   - 此前 30 秒没有检测到同时满足上述成交量与 TPS 扩张阈值的同等级爆量。
-2. 第一次爆量后最多等待 60 秒，持续更新爆量后最高价。
-3. 以下条件同时满足时买入：
-   - 最高价相对爆量前价格上涨 **>= 5%**。
-   - 当前价格从最高价回撤 **2%～8%**。
-   - 当前价格仍高于爆量前价格。
-   - 当前 5 秒买入 SOL - 卖出 SOL **> 0**。
-   - 当前 5 秒卖出 SOL 低于前一段 5 秒。
-   - 当前 5 秒买入 SOL / 前一段 5 秒买入 SOL **>= 1.5**，且买入 SOL 增加。
-   - 当前 10 秒的新买家钱包数高于前一段 10 秒。
-   - 新买家必须是第一次爆量确认后首次出现的钱包；爆量时已经出现的钱包、
-     以及之后重复买入的钱包都不会重复计数。
-   - 实时 5 秒 RSI(7) 必须 **< 70**。RSI 使用 5 秒成交量加权价格和 Wilder
-     平滑计算；至少需要 8 个 5 秒桶，数据不足时不买入。
-4. 每个代币在发出一次合格行情信号后冷却 **5 分钟**，冷却期间不再接受
-   同币的新爆量行情事件。
+1. 最近 60 秒总成交额 **> $10,000**。
+2. 实时 5 秒 RSI(7) 从 **<=30 上穿到 >30**。
 
-旧的 1 分钟量比、旧 RSI 模式、大砸单入场、多窗口反转、追高过滤和加仓
-均不参与当前买入路径；仅保留上述 5 秒 RSI(7) 硬过滤。大砸单仍可记录分析，
-但不会触发买入。
+成交额按 `最近60秒SOL成交量 × ACTIVITY_RSI_SOL_PRICE_USD` 计算，默认
+`ACTIVITY_RSI_SOL_PRICE_USD=75.5`。SOL 市价变化后应同步更新该配置；旧的
+`SOL_PRICE_USD` 不会覆盖新策略，避免历史配置中的旧价格误改成交额门槛。
+
+RSI 使用每根 5 秒 K 线的最新收盘价和 Wilder 平滑计算，与 TradingView 标准 RSI
+一致；它包含当前尚未结束的 5 秒 K 线，以便在最新 swap 到达时立即判断。RSI(7)
+至少需要 8 根 5 秒 K 线；历史不足时不会买入。RSI 已经在 30 上方时不会重复触发，
+必须先回到 30 或以下，再次上穿。
+
+旧的第一次爆量、TPS 扩张、回撤确认、买卖比、大砸单、多窗口反转、追高过滤、
+固定冷却和加仓均不参与买入。
 
 ## 卖出策略
 
-自动退出仅保留三项：
+以下任一条件成立即卖出：
 
-- 固定止盈：相对真实成交入场价 **+20%**。
-- 固定止损：相对真实成交入场价 **-10%**。
-- 最长持仓：**120 秒**，到时无条件卖出。
-- 实际平仓完成后，同币继续冷静 **5 分钟**再允许重新买入。
+- 实时 5 秒 RSI(7) 从 **>=70 下穿到 <70**。
+- 实时 5 秒 RSI(7) **>80**。
+- 相对真实成交入场价上涨 **30%** 后激活移动止盈；随后从最新最高价回撤
+  **10%** 卖出。
 
-RSI、流动反转、移动止盈、稳定期退出、趋势/区间止损、定时止盈、
-竞争对手跟卖和加仓均不会参与当前策略。手动卖出仍然可用。
+如果移动止盈先激活，则不再执行 RSI 下穿 70 或 RSI 大于 80 的卖出；该持仓随后
+只由最高价回撤 10% 触发移动止盈卖出。
+
+阈值均按严格定义执行：RSI 恰好等于 80 不触发超买退出；当前 RSI 低于 70
+本身也不触发，必须观察到前值不低于 70、当前值低于 70 的真实下穿。
+
+固定止盈、固定止损、最长持仓、流动反转、稳定期退出、趋势/区间止损、定时止盈、
+竞争对手跟卖和其他自动卖出策略均被专用策略分支屏蔽。手动卖出与交易失败处理保留。
 
 ## 监控列表
 
@@ -56,10 +49,10 @@ TokenWatchdog 每分钟刷新一次 FDV、LP、价格和 24 小时成交量：
 - AGE 从 Pump.fun 迁移时间开始计算。
 - AGE **> 60 分钟**时移出监控；已有持仓会保留订阅，直到平仓后再移除。
 - 历史记录缺少迁移时间时，先使用发现时间显示 AGE；拿到 DEX
-  交易池创建时间后会自动替换为精确时间。
+  交易池创建时间后自动替换为精确时间。
 
-旧的 **MAX_TOKEN_AGE_MS** 不再控制当前策略。使用
-**BURST_WATCHLIST_MAX_AGE_MS=3600000**。
+旧的 `MAX_TOKEN_AGE_MS` 不再控制当前策略。监控年龄使用
+`BURST_WATCHLIST_MAX_AGE_MS=3600000`。
 
 ## Pump.fun 迁移发现
 
@@ -70,32 +63,25 @@ TokenWatchdog 每分钟刷新一次 FDV、LP、价格和 24 小时成交量：
 
 ## 数据留存
 
-**SWAP_EVENT_LOG_ENABLED=true** 时，每笔已解析的监控代币 swap 都写入
-SQLite **swap_events**，可用于离线重放和阈值回测。
+`SWAP_EVENT_LOG_ENABLED=true` 时，每笔已解析的监控代币 swap 都写入 SQLite
+`swap_events`，可用于离线重放和阈值回测。
 
 ## 关键配置
 
 ~~~env
-BURST_PULLBACK_ENABLED=true
-BURST_PULLBACK_WINDOW_5S_MS=5000
-BURST_PULLBACK_VOLUME_EXPANSION=3
-BURST_PULLBACK_TPS_EXPANSION=2
-BURST_PULLBACK_QUIET_WINDOW_MS=30000
-BURST_PULLBACK_CONFIRM_WINDOW_MS=60000
-BURST_PULLBACK_MIN_PEAK_RISE_PCT=5
-BURST_PULLBACK_MIN_PULLBACK_PCT=2
-BURST_PULLBACK_MAX_PULLBACK_PCT=8
-BURST_PULLBACK_RSI_5S_PERIOD=7
-BURST_PULLBACK_RSI_5S_MAX=70
-BURST_PULLBACK_RSI_5S_MIN_BUCKETS=8
-BURST_PULLBACK_MIN_BUYER_ACCELERATION=1.5
-BURST_PULLBACK_NEW_BUYER_WINDOW_MS=10000
-BURST_PULLBACK_EVENT_COOLDOWN_MS=300000
-BURST_PULLBACK_MAX_SIGNAL_AGE_MS=5000
+ACTIVITY_RSI_ENABLED=true
+ACTIVITY_RSI_VOLUME_WINDOW_MS=60000
+ACTIVITY_RSI_MIN_VOLUME_USD=10000
+ACTIVITY_RSI_SOL_PRICE_USD=75.5
+ACTIVITY_RSI_5S_PERIOD=7
+ACTIVITY_RSI_BUY_CROSS=30
+ACTIVITY_RSI_5S_MIN_BUCKETS=8
+ACTIVITY_RSI_MAX_SIGNAL_AGE_MS=5000
 
-BURST_EXIT_TAKE_PROFIT_PCT=20
-BURST_EXIT_STOP_LOSS_PCT=-10
-BURST_EXIT_MAX_HOLD_MS=120000
+ACTIVITY_RSI_EXIT_DOWN_CROSS=70
+ACTIVITY_RSI_EXIT_OVERBOUGHT=80
+ACTIVITY_RSI_TRAILING_ACTIVATE_PCT=30
+ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT=10
 
 BURST_WATCHLIST_MAX_AGE_MS=3600000
 WATCHDOG_CHECK_INTERVAL_MS=60000
@@ -104,15 +90,15 @@ MAX_FDV_USD=1000000
 MIN_LIQUIDITY_USD=3000
 
 ADDON_ENABLED=0
-REBUY_COOLDOWN_MS=300000
+REBUY_COOLDOWN_MS=0
 SWAP_EVENT_LOG_ENABLED=true
 ~~~
 
 启动日志应显示：
 
 ~~~text
-Entry: FIRST_BURST_PULLBACK ... RSI(7,5s)<70
-Exit only: TP +20% / stop -10% / max hold 120s
+Entry: ACTIVITY_RSI (1m volume >$10000, RSI(7,5s) crosses above 30, SOL=$75.5)
+Exit only: RSI(7,5s) crosses below 70 or >80; trailing +30% / drawdown 10%
 Legacy entries/exits: disabled
 Watchdog: ... migrationAge=1h
 ~~~

@@ -18,13 +18,13 @@ const { getMonitor } = require('./monitor/HealthMonitor');
 const AlertChecker = require('./monitor/AlertChecker');
 const TokenWatchdog = require('./core/TokenWatchdog');
 const CompetitorTracker = require('./core/CompetitorTracker');
-const BurstPullbackTracker = require('./core/OrderFlowTracker');
+const ActivityRsiTracker = require('./core/ActivityRsiTracker');
 const PumpGraduationDiscovery = require('./core/PumpGraduationDiscovery');
 
 const monitor = getMonitor();
 
 async function main() {
-  const maxTokenAgeMs = config.burstPullback.watchlistMaxAgeMs;
+  const maxTokenAgeMs = config.activityRsi.watchlistMaxAgeMs;
   const watchdogCheckIntervalMs = parseInt(process.env.WATCHDOG_CHECK_INTERVAL_MS || '60000', 10);
   const watchdogFdvRange = config.strategy.maxFdVUsd > 0
     ? `$${config.strategy.minFdVUsd}-$${config.strategy.maxFdVUsd}`
@@ -34,18 +34,15 @@ async function main() {
   console.log(`Mode: ${config.DRY_RUN ? 'DRY_RUN' : '⚠️  LIVE TRADING ⚠️'}`);
   console.log(`Position: ${config.strategy.positionSizeSol} SOL`);
   console.log(
-    `Entry: FIRST_BURST_PULLBACK (5s volume x${config.burstPullback.volumeExpansion}, ` +
-      `TPS x${config.burstPullback.tpsExpansion}, quiet ${config.burstPullback.quietWindowMs / 1000}s)`,
+    `Entry: ACTIVITY_RSI (1m volume >$${config.activityRsi.minVolumeUsd}, ` +
+      `RSI(${config.activityRsi.rsi5sPeriod},5s) crosses above ${config.activityRsi.rsiBuyCross}, ` +
+      `SOL=$${config.activityRsi.solPriceUsd})`,
   );
   console.log(
-    `Confirm <=${config.burstPullback.confirmWindowMs / 1000}s: peak +${config.burstPullback.minPeakRisePct}%+, ` +
-      `pullback ${config.burstPullback.minPullbackPct}-${config.burstPullback.maxPullbackPct}%, ` +
-      `positive 5s flow, falling sell volume, buyer acceleration x${config.burstPullback.minBuyerAcceleration}, ` +
-      `new buyers rising`,
-  );
-  console.log(
-    `Exit only: TP +${config.strategy.takeProfitPct}% / stop ${config.strategy.fixedStopLossPct}% / ` +
-      `max hold ${config.strategy.maxHoldMs / 1000}s`,
+    `Exit only: RSI(${config.activityRsi.rsi5sPeriod},5s) crosses below ` +
+      `${config.strategy.rsi5sExitDownCross} or >${config.strategy.rsi5sExitOverbought}; ` +
+      `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
+      `(trailing overrides RSI after arming)`,
   );
   console.log('Legacy entries/exits: disabled');
   console.log(`Rebuy cooldown: ${config.strategy.rebuyCooldownMs > 0 ? config.strategy.rebuyCooldownMs / 60_000 + 'min after close' : 'disabled'}`);
@@ -132,7 +129,7 @@ async function main() {
   const rsiMode = process.env.RSI_FILTER || 'off';
   const rsiCalculator = (rsiMode === 'peak' || rsiMode === 'slope' || rsiMode === 'off')
     ? new RsiCalculator({
-      period5: config.burstPullback.rsi5sPeriod,
+      period5: config.activityRsi.rsi5sPeriod,
       period60: config.rsi.rsi1mPeriod,
       priceScaleResetRatio: config.rsi.rsiPriceScaleResetRatio,
     })
@@ -141,8 +138,8 @@ async function main() {
   // 只有完全不需要 RSI 数据时才设 null
   if (rsiCalculator) {
     console.log(
-      `[main] RSI analytics enabled, burst entry requires RSI(${config.burstPullback.rsi5sPeriod},5s) ` +
-        `< ${config.burstPullback.rsi5sMax}`,
+      `[main] RSI analytics enabled, entry requires RSI(${config.activityRsi.rsi5sPeriod},5s) ` +
+        `cross above ${config.activityRsi.rsiBuyCross}`,
     );
     if (rsiMode === 'slope') {
       console.warn('[main] ⚠️  RSI_FILTER=slope conflicts with sniper strategy. Consider RSI_FILTER=peak or off.');
@@ -211,24 +208,20 @@ async function main() {
     followSellMinWinRate: parseFloat(process.env.COMPETITOR_FOLLOW_SELL_MIN_WINRATE || '60'),
     followSellMinClosed: parseInt(process.env.COMPETITOR_FOLLOW_SELL_MIN_CLOSED || '10', 10),
   });
-  const burstPullbackTracker = new BurstPullbackTracker({ tokenRegistry });
+  const activityRsiTracker = new ActivityRsiTracker({ rsiCalculator });
   console.log(
-    `[main] BurstPullback ${burstPullbackTracker.enabled ? 'enabled' : 'disabled'}: ` +
-      `volume=x${burstPullbackTracker.volumeExpansion} TPS=x${burstPullbackTracker.tpsExpansion} ` +
-      `quiet=${burstPullbackTracker.quietWindowMs / 1000}s confirm=${burstPullbackTracker.confirmWindowMs / 1000}s ` +
-      `peak>=${burstPullbackTracker.minPeakRisePct}% ` +
-      `pullback=${burstPullbackTracker.minPullbackPct}-${burstPullbackTracker.maxPullbackPct}% ` +
-      `RSI(${config.burstPullback.rsi5sPeriod},5s)<${config.burstPullback.rsi5sMax} ` +
-      `buyerAccel=x${burstPullbackTracker.minBuyerAcceleration} ` +
-      `cooldown=${burstPullbackTracker.cooldownMs / 60_000}min`,
+    `[main] ActivityRsi ${activityRsiTracker.enabled ? 'enabled' : 'disabled'}: ` +
+      `volume1m>$${activityRsiTracker.minVolumeUsd} ` +
+      `RSI(${activityRsiTracker.rsi5sPeriod},5s) cross>${activityRsiTracker.rsiBuyCross} ` +
+      `SOL=$${activityRsiTracker.solPriceUsd}`,
   );
   dumpDetector.on("swapParsed", (swap) => {
     if (config.capture.swapEventsEnabled) {
       try { tradeLogger.logSwapEvent(swap); } catch (_) { /* analytics only */ }
     }
     try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
-    try { burstPullbackTracker.handleSwap(swap); } catch (err) {
-      console.warn(`[BurstPullback] handleSwap failed: ${err.message}`);
+    try { activityRsiTracker.handleSwap(swap); } catch (err) {
+      console.warn(`[ActivityRsi] handleSwap failed: ${err.message}`);
     }
   });
 
@@ -248,9 +241,9 @@ async function main() {
   });
   // v3.17.41: PositionManager blacklist needs signalEngine reference
   positionManager.signalEngine = signalEngine;
-  burstPullbackTracker.on('burstPullbackSignal', (signal) => {
-    Promise.resolve(signalEngine.handleDumpSignal(signal)).catch((err) => {
-      console.error(`[BurstPullback] SignalEngine error: ${err.message}`);
+  activityRsiTracker.on('activityRsiSignal', (signal) => {
+    Promise.resolve(signalEngine.handleActivityRsiSignal(signal)).catch((err) => {
+      console.error(`[ActivityRsi] SignalEngine error: ${err.message}`);
     });
   });
 
@@ -283,6 +276,8 @@ async function main() {
     onBeforeAdd: (mint) => server._evictIfNeeded(mint),
     onMigrationDetected: (migration) => {
       if (rsiCalculator) rsiCalculator.reset(migration.mint, 'pump_migration');
+      activityRsiTracker.reset(migration.mint);
+      positionManager.resetRsi5sForExit(migration.mint);
     },
     onTokenAdded: async ({ token, migration, screening, evicted }) => {
       const mints = tokenRegistry.listActive().map((t) => t.mint);
@@ -622,8 +617,6 @@ async function main() {
       });
     }
     priceTracker.update(mint, price, ts, poolAddress);
-    // v3.17.41: 采样价格到长窗口缓存 (比 handleDumpSignal 更频繁，覆盖所有 priceTick)
-    signalEngine._sampleLongPrice(mint, priceTracker.getPrice(mint));
     // v3.17.17: 喂 RSI - 用 feedTrade 带上 volume,RSI 能做 volume-weighted aggregation
     if (rsiCalculator) {
       // v3.17.38-fix: poolQuoteAfter=0 时用 tokenRegistry.liquidity 推算
@@ -641,73 +634,8 @@ async function main() {
       } else {
         rsiCalculator.feedTick(mint, price, ts);
       }
-
+      positionManager.handleRsi5sForExit(mint, price, rsiCalculator.snapshot(mint, 0));
     }
-  });
-
-  // v3.17.17: 旧 sellAnalyzed → feedTrade 接线已经合并到 priceTick 路径(priceTick 包含所有 swap)
-  // 不需要单独的 sellAnalyzed → RSI 监听
-
-  // sellAnalyzed: 只记录"接近触发"的（半阈值），避免写入风暴
-  dumpDetector.on('sellAnalyzed', (info) => {
-    if (info.passSize && info.passImpact && info.passLiquidity) return; // 已 dumpSignal
-    const halfSize = config.strategy.minSellSol * 0.5;
-    const halfImpact = config.strategy.minPriceImpactPct * 0.5;
-    if (info.sellSol < halfSize || info.priceImpactPct < halfImpact) return;
-    // 构造可读的拒绝原因
-    const reasons = [];
-    if (!info.passSize) reasons.push(`size:${info.sellSol.toFixed(1)}<${config.strategy.minSellSol}`);
-    if (!info.passImpact) {
-      if (info.priceImpactPct < config.strategy.minPriceImpactPct) {
-        reasons.push(`impact:${info.priceImpactPct.toFixed(1)}%<${config.strategy.minPriceImpactPct}%`);
-      } else {
-        reasons.push(`impact:${info.priceImpactPct.toFixed(1)}%>${config.strategy.maxPriceImpactPct}% (pool dead?)`);
-      }
-    }
-    if (!info.passLiquidity) {
-      reasons.push(`liq:${(info.poolQuoteAfter ?? 0).toFixed(0)} SOL<${config.strategy.minPoolQuoteSol}`);
-    }
-    tradeLogger.logSignal({
-      ts: info.ts,
-      mint: info.mint,
-      symbol: info.symbol,
-      kind: 'DUMP_DETECTED',
-      sellSol: info.sellSol,
-      priceImpactPct: info.priceImpactPct,
-      seller: info.seller,
-      sellerTx: info.signature,
-      notes: `near-miss: ${reasons.join(', ')}`,
-      accepted: false,
-      rejectReason: reasons.join('; '),
-    });
-  });
-
-  dumpDetector.on('dumpSignal', (signal) => {
-    // v3.17.16: 移除 refreshOne 调用
-    //   handleDumpSignal → buyOrder → executor.buy 都在同一 microtask 链完成,
-    //   refreshOne 的 RPC(30-100ms)永远追不上当次 BUY,对当前信号无意义。
-    //   PoolStateCache 后台滚动刷新(POOL_STATE_REFRESH_MS=5000)已经保证 cache 新鲜。
-    //   如果希望砸盘瞬间池子状态更新,把 POOL_STATE_REFRESH_MS 调到 2000-3000。
-    burstPullbackTracker.noteSuppressedDumpSignal(signal);
-  });
-
-  // v3.17.15: RUG 信号 — 同 slot 5+ 笔卖出、合计 > 5 SOL → 持仓立即卖出
-  //   v3.17.27: 用户要求关闭 RUG_PULL_EXIT，改为仅记录不卖出
-  dumpDetector.on('rugSignal', (rug) => {
-    const mint = rug.mint;
-    const pids = positionManager.byMint.get(mint);
-    if (!pids || pids.size === 0) return; // 无持仓，忽略
-    console.log(
-      `[RUG] 🚨 RUG PULL detected on ${rug.symbol || mint.slice(0,6)}: ${rug.sellCount} sells, ${rug.sellSol.toFixed(1)} SOL, ${rug.sellers.length} sellers — RUG_PULL_EXIT disabled, skipping`,
-    );
-    // RUG_PULL_EXIT 已关闭 — 不再强制卖出，让 trailing/TP 等其他机制处理
-    // for (const pid of pids) {
-    //   const pos = positionManager.positions.get(pid);
-    //   if (pos && !pos.exiting) {
-    //     const px = positionManager.priceTracker.getPrice(mint) || pos.entryPrice;
-    //     positionManager._exit(pos, px, 'RUG_PULL_EXIT');
-    //   }
-    // }
   });
 
   // ============ buyOrder → BUY → register position ============

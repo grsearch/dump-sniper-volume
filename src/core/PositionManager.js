@@ -68,6 +68,8 @@ class PositionManager extends EventEmitter {
     this._tickCount = 0;  // v3.26: tick counter for PoolStateCache price check
     this._flowExitEvents = new Map(); // mint -> recent BUY/SELL swaps while holding
     this._rsiExitSkipLogAt = new Map(); // mint -> { ts, reason }; throttle diagnostic logs
+    this._lastRsi5sByMint = new Map(); // mint -> previous valid live RSI(7, 5s)
+    this._pendingRsi5sExit = new Map(); // mint -> condition seen before BUY reconciliation
 
     this.positions = new Map(); // positionId → position obj
     this.byMint = new Map();    // mint → Set<positionId> (v3.17.13: 同币多仓)
@@ -491,6 +493,86 @@ class PositionManager extends EventEmitter {
     return true;
   }
 
+  resetRsi5sForExit(mint) {
+    if (!mint) return;
+    this._lastRsi5sByMint.delete(mint);
+    this._pendingRsi5sExit.delete(mint);
+  }
+
+  /**
+   * Called immediately after every swap is added to the live 5-second RSI.
+   * Exits on RSI > 80 or on a strict downward cross of 70, unless trailing
+   * profit has already armed for this mint. Once armed, trailing owns the exit.
+   */
+  handleRsi5sForExit(mint, price, snapshot) {
+    const s = config.strategy;
+    if (!s.dedicatedExitOnly || !s.rsi5sExitEnabled || !mint || !snapshot) return false;
+
+    const currentRsi = snapshot.rsi5s == null ? NaN : Number(snapshot.rsi5s);
+    const bucketCount = Number(snapshot.bucketCount5s || 0);
+    if (!Number.isFinite(currentRsi) || bucketCount < config.activityRsi.rsi5sMinBuckets) {
+      return false;
+    }
+
+    const previousRsi = this._lastRsi5sByMint.get(mint);
+    this._lastRsi5sByMint.set(mint, currentRsi);
+
+    const pids = this.byMint.get(mint);
+    if (!pids || pids.size === 0) {
+      this._pendingRsi5sExit.delete(mint);
+      return false;
+    }
+    const active = [];
+    for (const pid of pids) {
+      const pos = this.positions.get(pid);
+      if (pos && !pos.exiting && pos.status !== 'stuck') active.push(pos);
+    }
+    if (active.length === 0) return false;
+
+    if (active.some((pos) => pos.trailingArmed)) {
+      this._pendingRsi5sExit.delete(mint);
+      return false;
+    }
+
+    let reason = null;
+    if (currentRsi > s.rsi5sExitOverbought) {
+      reason = 'RSI_5S_OVERBOUGHT';
+    } else if (
+      Number.isFinite(previousRsi) &&
+      previousRsi >= s.rsi5sExitDownCross &&
+      currentRsi < s.rsi5sExitDownCross
+    ) {
+      reason = 'RSI_5S_DOWN_CROSS_70';
+    }
+    if (!reason) reason = this._pendingRsi5sExit.get(mint) || null;
+    if (!reason) return false;
+
+    if (!Number.isFinite(price) || price <= 0) return false;
+    if (active.some((pos) => !pos.reconciled && !pos.dryRun)) {
+      this._pendingRsi5sExit.set(mint, reason);
+      console.log(
+        `[PositionManager] RSI_5S_EXIT_PENDING ${active[0].symbol || mint.slice(0, 6)} ` +
+          `reason=${reason} RSI=${Number.isFinite(previousRsi) ? previousRsi.toFixed(1) : 'n/a'}` +
+          `->${currentRsi.toFixed(1)} waiting=buy_reconcile`,
+      );
+      return false;
+    }
+
+    this._pendingRsi5sExit.delete(mint);
+    const first = active[0];
+    first._exitTriggeredAt = first._exitTriggeredAt || Date.now();
+    first._exitTriggerSource = first._exitTriggerSource || 'rsi_5s_swap';
+    console.log(
+      `[PositionManager] ${reason} ${first.symbol || mint.slice(0, 6)} ` +
+        `RSI(${config.activityRsi.rsi5sPeriod},5s)=` +
+        `${Number.isFinite(previousRsi) ? previousRsi.toFixed(1) : 'n/a'}->${currentRsi.toFixed(1)} ` +
+        `positions=${active.length}`,
+    );
+    monitor.inc(`PositionManager.${reason}`, 1, 'PositionManager');
+    this._exitAllByMint(mint, price, reason);
+    return true;
+  }
+
   openPositionCount() {
     return this.positions.size;
   }
@@ -603,12 +685,7 @@ class PositionManager extends EventEmitter {
         //   v3.20: 使用 DB 中的 pre_vol_5m_pct 决定 activate 阈值
         trailingArmed: (() => {
           if (!row.peak_price || row.peak_price <= 0) return false;
-          const preVol = row.pre_vol_5m_pct ?? null;
-          const activatePct = preVol != null && preVol >= 0
-            ? (preVol < (parseFloat(process.env.VOL_LOW_THRESHOLD || '10')) ? parseFloat(process.env.VOL_LOW_TRAILING_ACTIVATE_PCT || '20')
-               : preVol >= (parseFloat(process.env.VOL_HIGH_THRESHOLD || '15')) ? parseFloat(process.env.VOL_HIGH_TRAILING_ACTIVATE_PCT || '15')
-               : config.strategy.trailingActivatePct || 10)
-            : config.strategy.trailingActivatePct || 10;
+          const activatePct = config.strategy.trailingActivatePct;
           if (activatePct <= 0) return false;
           const peakPnlPct = ((row.peak_price - row.entry_price) / row.entry_price) * 100;
           return peakPnlPct >= activatePct;
@@ -616,12 +693,7 @@ class PositionManager extends EventEmitter {
         // v3.17.28: 恢复 armedHwm，确保重启后 trailing drawdown 计算正确
         _armedHwm: (() => {
           if (!row.peak_price || row.peak_price <= 0) return undefined;
-          const preVol = row.pre_vol_5m_pct ?? null;
-          const activatePct = preVol != null && preVol >= 0
-            ? (preVol < (parseFloat(process.env.VOL_LOW_THRESHOLD || '10')) ? parseFloat(process.env.VOL_LOW_TRAILING_ACTIVATE_PCT || '20')
-               : preVol >= (parseFloat(process.env.VOL_HIGH_THRESHOLD || '15')) ? parseFloat(process.env.VOL_HIGH_TRAILING_ACTIVATE_PCT || '15')
-               : config.strategy.trailingActivatePct || 10)
-            : config.strategy.trailingActivatePct || 10;
+          const activatePct = config.strategy.trailingActivatePct;
           if (activatePct <= 0) return undefined;
           const peakPnlPct = ((row.peak_price - row.entry_price) / row.entry_price) * 100;
           return peakPnlPct >= activatePct ? row.peak_price : undefined;
@@ -631,7 +703,7 @@ class PositionManager extends EventEmitter {
         //   避免重启后第一个 tick 拿到的剧烈波动价格污染 HWM
         // v3.17.21: 如果已有 peak_price（持仓期间涨过），跳过 stabilization
         //   旧持仓重启后不应重跑 stabilization，否则 HWM 会被重置到低于真实峰值
-        stabilizing: !row.peak_price || row.peak_price <= 0,
+        stabilizing: false,
         reconciledAt: Date.now(),
         _stabilizeSamples: [],
         // 恢复时已经 reconciled（DB 里的 entryPrice 已经是真实成交价）
@@ -709,9 +781,9 @@ class PositionManager extends EventEmitter {
       // v3.17.6: stabilization 期
       //   DRY_RUN：开仓即进入 stabilization(用估算价格作起点)
       //   LIVE：reconcile 完成时进入 stabilization
-      stabilizing: !!dryRun,
+      stabilizing: false,
       reconciledAt: dryRun ? Date.now() : null,
-      _stabilizeSamples: dryRun ? [] : null,
+      _stabilizeSamples: null,
       // v3.20: 买入前波动率 — 同步计算(用 RsiCalculator 的内存数据，避免异步竞态丢失)
       preVol5m: null,
       rangeSupport: null,  // v3.23: range stop support line
@@ -1086,7 +1158,7 @@ class PositionManager extends EventEmitter {
     //   drift 必须在这里先算（原来在后面 console.log 那行定义的）
     const drift = ((realSolSpent - oldEntrySol) / oldEntrySol) * 100;
     const maxReconcileDriftPct = parseFloat(process.env.MAX_RECONCILE_DRIFT_PCT || '-40');
-    if (maxReconcileDriftPct < 0 && drift < maxReconcileDriftPct) {
+    if (!config.strategy.dedicatedExitOnly && maxReconcileDriftPct < 0 && drift < maxReconcileDriftPct) {
       console.warn(
         `[PositionManager] 🚨 RECONCILE_RUG ${pos.symbol || mint.slice(0, 6)}: ` +
           `drift=${drift.toFixed(2)}% < ${maxReconcileDriftPct}%, ` +
@@ -1103,8 +1175,8 @@ class PositionManager extends EventEmitter {
 
     // 进入 stabilization 期
     pos.reconciledAt = Date.now();
-    pos.stabilizing = true;
-    pos._stabilizeSamples = []; // 期间收到的所有价格
+    pos.stabilizing = config.strategy.stabilizationMs > 0;
+    pos._stabilizeSamples = pos.stabilizing ? [] : null;
 
     // v3.12: 标记 reconciled，解除 _checkExit 的"完全跳过"锁定
     //        进入 stabilization 模式（_checkExit 内部判断 stabilizing 时只跑 emergency）
@@ -1693,16 +1765,54 @@ class PositionManager extends EventEmitter {
     }
 
     if (config.strategy.dedicatedExitOnly) {
-      const takeProfitPct = config.strategy.takeProfitPct;
-      if (takeProfitPct > 0 && pnlPct + 1e-9 >= takeProfitPct) {
-        pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
-        pos._exitMarketTs = pos._exitMarketTs || context?.marketTs || null;
-        pos._exitTriggerSource = pos._exitTriggerSource || context?.source || 'price_check';
+      const now = Date.now();
+      if (!Number.isFinite(pos.highWaterMark) || pos.highWaterMark < pos.entryPrice) {
+        pos.highWaterMark = pos.entryPrice;
+        pos.highWaterMarkTs = now;
+      }
+      if (price > pos.highWaterMark) {
+        pos.highWaterMark = price;
+        pos.highWaterMarkTs = now;
+        const peakPnlPct = ((pos.highWaterMark - pos.entryPrice) / pos.entryPrice) * 100;
+        if (!pos._lastPeakFlush || now - pos._lastPeakFlush >= 1000) {
+          try {
+            this.tradeLogger?.stmts?.updatePeak?.run({
+              positionId: pos.positionId,
+              peakPrice: pos.highWaterMark,
+              peakTs: pos.highWaterMarkTs,
+              peakPnlPct,
+            });
+            pos._lastPeakFlush = now;
+          } catch (_) { /* best effort */ }
+        }
+      }
+
+      const peakPnlPct = ((pos.highWaterMark - pos.entryPrice) / pos.entryPrice) * 100;
+      if (!pos.trailingArmed && peakPnlPct + 1e-9 >= config.strategy.trailingActivatePct) {
+        pos.trailingArmed = true;
+        pos._armedHwm = pos.highWaterMark;
+        pos._armedHwmTs = pos.highWaterMarkTs || now;
         console.log(
-          `[PositionManager] TAKE_PROFIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
-            `pnl=${pnlPct.toFixed(2)}% threshold=+${takeProfitPct}%`,
+          `[PositionManager] TRAILING_ARMED ${pos.symbol || pos.mint.slice(0, 6)} ` +
+            `peak=+${peakPnlPct.toFixed(2)}% threshold=+${config.strategy.trailingActivatePct}%`,
         );
-        this._exitForCondition(pos, price, 'TAKE_PROFIT');
+        monitor.inc('PositionManager.trailingArmed', 1, 'PositionManager');
+      }
+
+      if (pos.trailingArmed) {
+        pos._armedHwm = Math.max(pos._armedHwm || 0, pos.highWaterMark);
+        const drawdownPct = ((pos._armedHwm - price) / pos._armedHwm) * 100;
+        if (drawdownPct + 1e-9 >= config.strategy.trailingDrawdownPct) {
+          pos._exitTriggeredAt = pos._exitTriggeredAt || now;
+          pos._exitMarketTs = pos._exitMarketTs || context?.marketTs || null;
+          pos._exitTriggerSource = pos._exitTriggerSource || context?.source || 'price_check';
+          console.log(
+            `[PositionManager] TRAILING_STOP ${pos.symbol || pos.mint.slice(0, 6)} ` +
+              `peak=+${peakPnlPct.toFixed(2)}% drawdown=${drawdownPct.toFixed(2)}% ` +
+              `threshold=${config.strategy.trailingDrawdownPct}%`,
+          );
+          this._exitForCondition(pos, price, 'TRAILING_STOP');
+        }
       }
       return;
     }
