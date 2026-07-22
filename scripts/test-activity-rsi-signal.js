@@ -67,15 +67,35 @@ async function run() {
   assert.strictEqual(blockedOrder, null, 'existing position must block add-on');
 
   const executionCooldown = makeEngine();
-  executionCooldown._exitCooldowns.set(mint, Date.now() + 60_000);
+  const cooldownStartedAt = Date.now();
+  const cooldownUntil = executionCooldown.setPositionExitCooldown(
+    { mint, exitReason: 'FIXED_STOP_LOSS' },
+    { rebuyCooldownMs: 0, stopLossRebuyCooldownMs: 120_000 },
+  );
+  assert(
+    cooldownUntil >= cooldownStartedAt + 120_000 &&
+      cooldownUntil <= Date.now() + 120_000,
+    'fixed stop-loss cooldown must last 120 seconds',
+  );
   let cooldownOrder = null;
   executionCooldown.on('buyOrder', (value) => { cooldownOrder = value; });
   await executionCooldown.handleActivityRsiSignal(signal(mint));
-  assert.strictEqual(cooldownOrder, null, 'a recorded BUY failure cooldown must block fee-burning retries');
+  assert.strictEqual(cooldownOrder, null, 'a stop-loss cooldown must block immediate rebuy');
   assert(
     executionCooldown.loggedSignals[0].rejectReason.includes('buy execution cooldown'),
     'the rejection must identify the execution cooldown',
   );
+
+  const profitExit = makeEngine();
+  assert.strictEqual(
+    profitExit.setPositionExitCooldown(
+      { mint, exitReason: 'TRAILING_STOP' },
+      { rebuyCooldownMs: 0, stopLossRebuyCooldownMs: 120_000 },
+    ),
+    0,
+    'trailing and RSI exits must not inherit the stop-loss cooldown',
+  );
+  assert.strictEqual(profitExit._exitCooldowns.size, 0);
 
   const lowVolume = makeEngine();
   let lowVolumeOrder = null;

@@ -15,6 +15,7 @@ class TokenWatchdog {
   constructor({
     tokenRegistry,
     positionManager,
+    poolStateCache,
     tradeLogger,
     onTokenRemoved,
     fetchMarkets,
@@ -23,6 +24,7 @@ class TokenWatchdog {
   }) {
     this.tokenRegistry = tokenRegistry;
     this.positionManager = positionManager;
+    this.poolStateCache = poolStateCache || null;
     this.tradeLogger = tradeLogger || null;
     this.onTokenRemoved = onTokenRemoved;
     this.fetchMarkets = fetchMarkets || fetchTokenMarketsFromDexScreener;
@@ -84,17 +86,28 @@ class TokenWatchdog {
       250,
       parseInt(process.env.WATCHDOG_AGE_CHECK_INTERVAL_MS || '1000', 10),
     );
+    this.realtimeMarketPersistMs = Math.max(
+      250,
+      parseInt(process.env.WATCHDOG_REALTIME_MARKET_PERSIST_MS || '1000', 10),
+    );
+    this.solPriceUsd = Number(config.activityRsi.solPriceUsd) || 0;
 
     this._pendingExitMints = new Set();
     this._checkInterval = null;
     this._ageCheckInterval = null;
     this._checking = false;
     this._lastMarketAttemptAt = new Map();
+    this._lastProviderMarketAt = new Map();
+    this._lastRealtimePersistAt = new Map();
+    this._lastRealtimeKeepLogAt = new Map();
 
     const features = [
       `checkEvery=${this.checkIntervalMs / 60_000}min`,
       `market=dexscreener(batch ${this.marketBatchSize})+birdeye fallback`,
     ];
+    if (this.poolStateCache && this.solPriceUsd > 0) {
+      features.push(`realtimeFDV/LP=${this.realtimeMarketPersistMs}ms`);
+    }
     if (this.maxWatchDurationMs > 0) features.push(`maxWatch=${this.maxWatchDurationMs / 60000}min`);
     if (this.minFdVUsd > 0) features.push(`minFDV=$${this.minFdVUsd}`);
     if (this.maxFdVUsd > 0) features.push(`maxFDV=$${this.maxFdVUsd}`);
@@ -138,6 +151,9 @@ class TokenWatchdog {
       clearInterval(this._ageCheckInterval);
       this._ageCheckInterval = null;
     }
+    this._lastProviderMarketAt.clear();
+    this._lastRealtimePersistAt.clear();
+    this._lastRealtimeKeepLogAt.clear();
   }
 
   async _runCheck() {
@@ -179,6 +195,9 @@ class TokenWatchdog {
     this.tokenRegistry.removeToken(token.mint);
     this._pendingExitMints.delete(token.mint);
     this._lastMarketAttemptAt.delete(token.mint);
+    this._lastProviderMarketAt.delete(token.mint);
+    this._lastRealtimePersistAt.delete(token.mint);
+    this._lastRealtimeKeepLogAt.delete(token.mint);
     if (this.onTokenRemoved) this.onTokenRemoved();
     monitor.inc('TokenWatchdog.tokensRemoved', 1, 'TokenWatchdog');
     return true;
@@ -242,6 +261,122 @@ class TokenWatchdog {
     );
   }
 
+  _number(value) {
+    if (value == null) return null;
+    try {
+      const number = Number(
+        typeof value === 'object' && typeof value.toString === 'function'
+          ? value.toString()
+          : value,
+      );
+      return Number.isFinite(number) ? number : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _realtimeMarketReasons(fdvUsd, liquidityUsd) {
+    const reasons = [];
+    if (this.minFdVUsd > 0 && fdvUsd < this.minFdVUsd) {
+      reasons.push(`fdv_too_low($${Math.round(fdvUsd)} < $${this.minFdVUsd})`);
+    }
+    if (this.maxFdVUsd > 0 && fdvUsd > this.maxFdVUsd) {
+      reasons.push(`fdv_too_high($${Math.round(fdvUsd)} > $${this.maxFdVUsd})`);
+    }
+    if (this.minLiquidityUsd > 0 && liquidityUsd < this.minLiquidityUsd) {
+      reasons.push(
+        `liquidity_too_low($${Math.round(liquidityUsd)} < $${this.minLiquidityUsd})`,
+      );
+    }
+    return reasons;
+  }
+
+  handleRealtimePoolTick({
+    mint,
+    price,
+    poolAddress,
+    poolQuoteAfter,
+    baseDecimals,
+  } = {}) {
+    if (!mint || !this.poolStateCache || this.solPriceUsd <= 0) return null;
+
+    const token = this.tokenRegistry.getToken?.(mint);
+    if (!token || Number(token.is_active) !== 1) return null;
+
+    const resolvedPoolAddress = poolAddress || token.pool_address;
+    if (!resolvedPoolAddress) return null;
+    const state = this.poolStateCache.get(resolvedPoolAddress);
+    if (!state?.baseMintAccount || !state.poolQuoteAmount) return null;
+
+    const priceSol = this._number(price);
+    const supplyRaw = this._number(state.baseMintAccount.supply);
+    const decimals = this._number(state.baseMintAccount.decimals) ??
+      this._number(baseDecimals) ??
+      this._number(token.decimals) ??
+      6;
+    const supplyScale = 10 ** decimals;
+    const supplyUi = supplyRaw != null && supplyRaw > 0 && Number.isFinite(supplyScale)
+      ? supplyRaw / supplyScale
+      : null;
+
+    let quoteSol = this._number(poolQuoteAfter);
+    if (!(quoteSol > 0)) {
+      const quoteRaw = this._number(state.poolQuoteAmount);
+      quoteSol = quoteRaw != null ? quoteRaw / 1e9 : null;
+    }
+    if (!(priceSol > 0) || !(supplyUi > 0) || !(quoteSol > 0)) return null;
+
+    const fdvUsd = priceSol * supplyUi * this.solPriceUsd;
+    const liquidityUsd = quoteSol * 2 * this.solPriceUsd;
+    const priceUsd = priceSol * this.solPriceUsd;
+    if (
+      !Number.isFinite(fdvUsd) || fdvUsd <= 0 ||
+      !Number.isFinite(liquidityUsd) || liquidityUsd <= 0 ||
+      !Number.isFinite(priceUsd) || priceUsd <= 0
+    ) return null;
+
+    const now = Date.now();
+    const reasons = this._realtimeMarketReasons(fdvUsd, liquidityUsd);
+    const lastPersistAt = this._lastRealtimePersistAt.get(mint) || 0;
+    let currentToken = token;
+    if (reasons.length > 0 || now - lastPersistAt >= this.realtimeMarketPersistMs) {
+      currentToken = this.tokenRegistry.updateMarket(mint, {
+        fdv: fdvUsd,
+        liquidity: liquidityUsd,
+        price: priceUsd,
+        priceSol,
+        supply: supplyUi,
+        poolQuoteSol: quoteSol,
+        marketSource: 'chain_pool_realtime',
+        fetchedAt: now,
+      }) || token;
+      this._lastRealtimePersistAt.set(mint, now);
+    }
+
+    monitor.inc('TokenWatchdog.realtimeMarketTicks', 1, 'TokenWatchdog');
+    if (reasons.length === 0) {
+      return { removed: false, fdvUsd, liquidityUsd, priceUsd };
+    }
+
+    const reasonStr = `${reasons.join(', ')} (realtime)`;
+    if (this.positionManager.hasOpenPosition(mint)) {
+      const lastLogAt = this._lastRealtimeKeepLogAt.get(mint) || 0;
+      if (now - lastLogAt >= 10_000) {
+        console.log(
+          `[TokenWatchdog] KEEP ${currentToken.symbol || mint.slice(0, 8)}: ` +
+            `${reasonStr} - has open position, keep monitoring until exit`,
+        );
+        this._lastRealtimeKeepLogAt.set(mint, now);
+      }
+      monitor.inc('TokenWatchdog.realtimeRetainedForPosition', 1, 'TokenWatchdog');
+      return { removed: false, retainedForPosition: true, fdvUsd, liquidityUsd, priceUsd };
+    }
+
+    const removed = this._removeToken(currentToken, reasonStr);
+    if (removed) monitor.inc('TokenWatchdog.realtimeRemoved', 1, 'TokenWatchdog');
+    return { removed, fdvUsd, liquidityUsd, priceUsd };
+  }
+
   _isMarketFresh(token, now = Date.now()) {
     const updatedAt = Number(token?.market_updated_at);
     return Number.isFinite(updatedAt) && updatedAt > 0 && now - updatedAt <= this.marketStaleMs;
@@ -273,7 +408,11 @@ class TokenWatchdog {
     if (!marketFilterEnabled) return { refreshed: 0, failed: 0 };
 
     const due = tokens.filter((token) => {
-      const lastSuccess = Number(token.market_updated_at) || 0;
+      const lastSuccess = this._lastProviderMarketAt.get(token.mint) || (
+        token.market_source === 'chain_pool_realtime'
+          ? 0
+          : Number(token.market_updated_at) || 0
+      );
       const lastAttempt = this._lastMarketAttemptAt.get(token.mint) || 0;
       return (
         now - lastSuccess >= this.checkIntervalMs &&
@@ -315,6 +454,7 @@ class TokenWatchdog {
           continue;
         }
         this.tokenRegistry.updateMarket(token.mint, market);
+        this._lastProviderMarketAt.set(token.mint, Number(market.fetchedAt) || now);
         refreshed++;
       }
 
@@ -343,6 +483,7 @@ class TokenWatchdog {
           fdv: fallbackFdv,
           marketSource: market.marketSource || 'birdeye',
         });
+        this._lastProviderMarketAt.set(token.mint, Number(market.fetchedAt) || now);
         refreshed++;
       } catch (err) {
         failed++;

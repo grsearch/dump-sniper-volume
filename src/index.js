@@ -49,6 +49,11 @@ async function main() {
   console.log('Legacy entries/exits: disabled');
   console.log(`Rebuy cooldown: ${config.strategy.rebuyCooldownMs > 0 ? config.strategy.rebuyCooldownMs / 60_000 + 'min after close' : 'disabled'}`);
   console.log(
+    `Stop-loss cooldown: ${config.strategy.stopLossRebuyCooldownMs > 0
+      ? config.strategy.stopLossRebuyCooldownMs / 1000 + 's after FIXED_STOP_LOSS'
+      : 'disabled'}`,
+  );
+  console.log(
     `Watchdog: FDV=${watchdogFdvRange}, liquidity>=$${config.strategy.minLiquidityUsd}, ` +
       `migrationAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 60_000) + 'min' : 'disabled'} ` +
       `(check every ${watchdogCheckIntervalMs / 60_000}min)`,
@@ -642,6 +647,22 @@ async function main() {
         slot,
       });
     }
+    let realtimeMarketResult = null;
+    try {
+      realtimeMarketResult = tokenWatchdog.handleRealtimePoolTick({
+        mint,
+        price,
+        poolAddress,
+        poolQuoteAfter,
+        baseDecimals,
+      });
+    } catch (err) {
+      monitor.recordError('TokenWatchdog', err, { phase: 'realtime_pool_tick', mint });
+    }
+    if (realtimeMarketResult?.removed) {
+      monitor.inc('main.realtimeMarketTickRemoved', 1, 'main');
+      return;
+    }
     priceTracker.update(mint, price, ts, poolAddress, {
       slot,
       signature,
@@ -834,9 +855,10 @@ async function main() {
     // Start cooldown from confirmed close. Sequential add-on exits extend the
     // same mint cooldown from the latest completed sale.
     signalEngine.lastTriggerTs.set(pos.mint, Date.now());
-    if (config.strategy.rebuyCooldownMs > 0) {
-      signalEngine._exitCooldowns.set(pos.mint, Date.now() + config.strategy.rebuyCooldownMs);
-    }
+    signalEngine.setPositionExitCooldown(pos, {
+      rebuyCooldownMs: config.strategy.rebuyCooldownMs,
+      stopLossRebuyCooldownMs: config.strategy.stopLossRebuyCooldownMs,
+    });
     server.broadcast({ type: 'positionClosed', position: pos });
     tokenWatchdog.handlePositionClosed(pos);
   });

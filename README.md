@@ -47,10 +47,15 @@ RSI 使用每根 5 秒 K 线的最新收盘价和 Wilder 平滑计算，与 Trad
 
 ## 监控列表
 
-TokenWatchdog 每分钟刷新一次 FDV、LP、价格和 24 小时成交量：
+TokenWatchdog 在每个可信链上价格事件后实时计算 FDV 和 LP，并立即执行准入阈值；
+数据库和监控页面最多每秒更新一次，避免高频 swap 阻塞交易主路径。DexScreener/Birdeye
+仍每分钟补充一次 24 小时成交量等外部行情字段：
 
 - FDV：**$15,000～$1,000,000**。
 - LP：**>= $3,000**。
+- 实时 FDV = 链上有效价格 × Mint 实际总供应量 × `ACTIVITY_RSI_SOL_PRICE_USD`。
+- 实时 LP = PumpSwap 池实际 SOL 储备 × 2 × `ACTIVITY_RSI_SOL_PRICE_USD`；虚拟储备不计入 LP。
+- FDV 或 LP 在任一可信 tick 不符合条件时立即移出；有持仓时保留监控，确保退出数据不断流。
 - 24 小时成交量：**>= $5,000**。
 - AGE 从 Pump.fun 迁移时间开始计算。
 - AGE **> 25 分钟**时移出监控；如有持仓，先以 `TOKEN_AGE_EXPIRED` 自动卖出，卖出确认后再移除。
@@ -92,6 +97,7 @@ BUY_FORCE_FRESH_POOL_STATE=true
 COMPUTE_UNIT_LIMIT=250000
 
 ACTIVITY_RSI_STOP_LOSS_PCT=-10
+STOP_LOSS_REBUY_COOLDOWN_MS=120000
 ACTIVITY_RSI_EXIT_DOWN_CROSS=70
 ACTIVITY_RSI_EXIT_OVERBOUGHT=80
 ACTIVITY_RSI_TRAILING_ACTIVATE_PCT=20
@@ -100,6 +106,7 @@ ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT=10
 BURST_WATCHLIST_MAX_AGE_MS=1500000
 WATCHDOG_AGE_CHECK_INTERVAL_MS=1000
 WATCHDOG_CHECK_INTERVAL_MS=60000
+WATCHDOG_REALTIME_MARKET_PERSIST_MS=1000
 MIN_FDV_USD=15000
 MAX_FDV_USD=1000000
 MIN_LIQUIDITY_USD=3000

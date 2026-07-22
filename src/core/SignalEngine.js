@@ -45,6 +45,43 @@ class SignalEngine extends EventEmitter {
     this.inflightBuys.delete(mint);
   }
 
+  setExecutionCooldown(mint, durationMs, reason = 'execution') {
+    const duration = Number(durationMs);
+    if (!mint || !Number.isFinite(duration) || duration <= 0) return 0;
+
+    const now = Date.now();
+    const cooldownUntil = Math.max(
+      Number(this._exitCooldowns.get(mint)) || 0,
+      now + duration,
+    );
+    this._exitCooldowns.set(mint, cooldownUntil);
+    console.log(
+      `[SignalEngine] cooldown ${mint.slice(0, 8)}.. ` +
+        `${Math.ceil((cooldownUntil - now) / 1000)}s reason=${reason}`,
+    );
+    return cooldownUntil;
+  }
+
+  setPositionExitCooldown(position, {
+    rebuyCooldownMs = 0,
+    stopLossRebuyCooldownMs = 0,
+  } = {}) {
+    const mint = position?.mint;
+    if (!mint) return 0;
+
+    const isFixedStopLoss = position.exitReason === 'FIXED_STOP_LOSS';
+    const durationMs = isFixedStopLoss
+      ? Math.max(Number(rebuyCooldownMs) || 0, Number(stopLossRebuyCooldownMs) || 0)
+      : Number(rebuyCooldownMs) || 0;
+    if (durationMs <= 0) return 0;
+
+    return this.setExecutionCooldown(
+      mint,
+      durationMs,
+      isFixedStopLoss ? 'fixed_stop_loss' : 'position_closed',
+    );
+  }
+
   registerOurSignature(signature) {
     if (!signature) return;
     this.ourSignatures.add(signature);

@@ -330,6 +330,100 @@ assert.strictEqual(
     'stale FDV/LP must not remove a token when both market providers fail',
   );
 
+  const realtimeToken = {
+    ...token,
+    fdv: 40_000,
+    liquidity: 20_000,
+    market_updated_at: null,
+    market_source: null,
+    is_active: 1,
+  };
+  let realtimeRemoved = false;
+  const realtimeRegistry = {
+    getToken: () => (realtimeRemoved ? { ...realtimeToken, is_active: 0 } : realtimeToken),
+    updateMarket: (_mint, market) => {
+      Object.assign(realtimeToken, {
+        fdv: market.fdv,
+        liquidity: market.liquidity,
+        price: market.price,
+        market_updated_at: market.fetchedAt,
+        market_source: market.marketSource,
+      });
+      return realtimeToken;
+    },
+    removeToken: () => { realtimeRemoved = true; },
+  };
+  const realtimeState = {
+    baseMintAccount: {
+      supply: { toString: () => '1000000000000000' },
+      decimals: 6,
+    },
+    poolQuoteAmount: { toString: () => '20000000000' },
+  };
+  const realtimeWatchdog = new TokenWatchdog({
+    tokenRegistry: realtimeRegistry,
+    positionManager: { hasOpenPosition: () => false },
+    poolStateCache: { get: () => realtimeState },
+    tradeLogger: null,
+    fetchMarkets: async () => new Map(),
+    fetchMarket: async () => null,
+  });
+  realtimeWatchdog.minFdVUsd = 15_000;
+  realtimeWatchdog.maxFdVUsd = 1_000_000;
+  realtimeWatchdog.minLiquidityUsd = 3_000;
+
+  const healthyRealtime = realtimeWatchdog.handleRealtimePoolTick({
+    mint,
+    price: 0.0000003,
+    poolAddress: preferredPool,
+    poolQuoteAfter: 20,
+    baseDecimals: 6,
+  });
+  assert.strictEqual(healthyRealtime.removed, false);
+  assert(Math.abs(healthyRealtime.fdvUsd - 22_650) < 1e-9);
+  assert(Math.abs(healthyRealtime.liquidityUsd - 3_020) < 1e-9);
+  assert.strictEqual(realtimeToken.market_source, 'chain_pool_realtime');
+
+  const lowLiquidityRealtime = realtimeWatchdog.handleRealtimePoolTick({
+    mint,
+    price: 0.0000003,
+    poolAddress: preferredPool,
+    poolQuoteAfter: 19,
+    baseDecimals: 6,
+  });
+  assert.strictEqual(lowLiquidityRealtime.removed, true);
+  assert.strictEqual(realtimeRemoved, true, 'LP below $3,000 must remove on the same tick');
+
+  let heldRealtimeRemoved = false;
+  const heldRealtimeToken = { ...realtimeToken, is_active: 1 };
+  const heldRealtimeWatchdog = new TokenWatchdog({
+    tokenRegistry: {
+      getToken: () => heldRealtimeToken,
+      updateMarket: (_mint, market) => {
+        Object.assign(heldRealtimeToken, market);
+        return heldRealtimeToken;
+      },
+      removeToken: () => { heldRealtimeRemoved = true; },
+    },
+    positionManager: { hasOpenPosition: () => true },
+    poolStateCache: { get: () => realtimeState },
+    tradeLogger: null,
+    fetchMarkets: async () => new Map(),
+    fetchMarket: async () => null,
+  });
+  heldRealtimeWatchdog.minFdVUsd = 15_000;
+  heldRealtimeWatchdog.maxFdVUsd = 1_000_000;
+  heldRealtimeWatchdog.minLiquidityUsd = 3_000;
+  const heldRealtime = heldRealtimeWatchdog.handleRealtimePoolTick({
+    mint,
+    price: 0.0000003,
+    poolAddress: preferredPool,
+    poolQuoteAfter: 10,
+    baseDecimals: 6,
+  });
+  assert.strictEqual(heldRealtime.retainedForPosition, true);
+  assert.strictEqual(heldRealtimeRemoved, false, 'open positions must keep their price subscription');
+
   console.log('Token market refresh and migration AGE tests passed');
   process.exit(0);
 })().catch((err) => {

@@ -131,6 +131,10 @@ const config = {
     // 风控（v3.17 默认 maxConcurrent 5）
     cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '0', 10),
     rebuyCooldownMs: 0,
+    stopLossRebuyCooldownMs: parseInt(
+      process.env.STOP_LOSS_REBUY_COOLDOWN_MS || '120000',
+      10,
+    ),
     maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS || '10', 10),
 
     // v3.17.6: 同砸单去重时间窗（毫秒）
@@ -168,7 +172,8 @@ const config = {
     // v3.17.13: 代币监控超时（毫秒），0 = 禁用
     //   v3.17.20: 用户明确不要"监控超时退出"（不要 6 小时到期退出），保持 0
     maxWatchDurationMs: parseInt(process.env.MAX_WATCH_DURATION_MS || '0', 10),
-    // v3.17.20: FDV lower bound in USD; refreshed once per minute by TokenWatchdog.
+    // FDV/LP are recalculated from every trusted PumpSwap price tick. Provider
+    // refreshes remain as a one-minute metadata and 24h-volume fallback.
     minFdVUsd: parseFloat(process.env.MIN_FDV_USD || '15000'),
     // Birdeye liquidity in USD. Shared by discovery admission and watchdog removal.
     minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '3000'),
