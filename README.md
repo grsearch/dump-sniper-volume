@@ -21,6 +21,11 @@ RSI 使用每根 5 秒 K 线的最新收盘价和 Wilder 平滑计算，与 Trad
 旧的第一次爆量、TPS 扩张、回撤确认、买卖比、大砸单、多窗口反转、追高过滤、
 固定冷却和加仓均不参与买入。
 
+实盘构造 BUY 前会同步刷新超过 500ms 的池状态，并以信号成交价为基准执行独立的
+`+5%` 价格上限。`BUY_SLIPPAGE_BPS=5000` 只是链上绝对上限；每笔交易会按剩余
+价格空间动态收紧。例如刷新后的预估价已高于信号价 3%，链上滑点只允许约 1.94%。
+刷新后预估价已经超过信号价 5% 时，本地直接拒绝，不提交交易也不消耗优先费。
+
 ## 卖出策略
 
 以下任一条件成立即卖出：
@@ -80,6 +85,11 @@ ACTIVITY_RSI_BUY_CROSS=30
 ACTIVITY_RSI_5S_MIN_BUCKETS=8
 ACTIVITY_RSI_MAX_SIGNAL_AGE_MS=5000
 
+BUY_SLIPPAGE_BPS=5000
+BUY_MAX_PRICE_DEVIATION_PCT=5
+BUY_MAX_POOL_STATE_AGE_MS=500
+COMPUTE_UNIT_LIMIT=250000
+
 ACTIVITY_RSI_STOP_LOSS_PCT=-10
 ACTIVITY_RSI_EXIT_DOWN_CROSS=70
 ACTIVITY_RSI_EXIT_OVERBOUGHT=80
@@ -103,6 +113,7 @@ SWAP_EVENT_LOG_ENABLED=true
 ~~~text
 Entry: ACTIVITY_RSI (1m volume >$10000, RSI(7,5s) crosses above 30, SOL=$75.5)
 Exit only: stop -10%; RSI(7,5s) crosses below 70 or >80; trailing +20% / drawdown 10%
+Executor: ... BUY chain ceiling=50%, signal-price cap=+5%, pool-state max age=500ms, CU=250000
 Legacy entries/exits: disabled
 Watchdog: ... migrationAge=25min
 ~~~

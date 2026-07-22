@@ -54,7 +54,12 @@ async function main() {
       `(check every ${watchdogCheckIntervalMs / 60_000}min)`,
   );
   console.log('Add-on: disabled');
-  console.log(`Executor: Pump AMM SDK direct (no Jupiter)`);
+  console.log(
+    `Executor: Pump AMM SDK direct; BUY chain ceiling=${config.strategy.buySlippageBps / 100}%, ` +
+      `signal-price cap=+${config.strategy.buyMaxPriceDeviationPct}%, ` +
+      `pool-state max age=${config.strategy.buyMaxPoolStateAgeMs}ms, ` +
+      `CU=${parseInt(process.env.COMPUTE_UNIT_LIMIT || '250000', 10)}`,
+  );
   console.log(`Pump graduation discovery: ${config.pumpDiscovery.enabled ? 'enabled' : 'disabled'}`);
   console.log('================================================');
 
@@ -656,16 +661,19 @@ async function main() {
     // Record the current chain slot on BUY for execution metadata.
     executor.setLatestSlot(tickStream.latestSlot || 0);
 
-    // v3.17.27: 同步刷新 pool state → 确保 executor.buy cache hit
-    //   如果 cache miss，executor.buy 会走同步 RPC(80-180ms)。
-    //   在这里同步 refreshOne(30-80ms) 把 state 填入 cache，
-    //   buy 时直接 cache hit → state=0ms → 总延迟从 ~150ms 降到 ~60ms。
+    // Pre-fill a missing pool state. Executor.buy independently rejects stale
+    // state and performs a synchronous refresh before constructing the quote.
     const preBuyPoolAddr = tokenInfo?.pool_address;
     if (preBuyPoolAddr && executor.poolStateCache) {
       const cachedState = executor.poolStateCache.get(preBuyPoolAddr);
       if (!cachedState) {
         const tPre = Date.now();
-        try { await executor.poolStateCache.refreshOne(preBuyPoolAddr); } catch (_) { /* 静默 */ }
+        try {
+          await executor.poolStateCache.refreshOne(
+            preBuyPoolAddr,
+            config.strategy.buyMaxPoolStateAgeMs,
+          );
+        } catch (_) { /* 静默 */ }
         monitor.set('main.preBuyRefreshMs', Date.now() - tPre, 'main');
       }
     }

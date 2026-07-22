@@ -14,6 +14,7 @@
     "test:activity-rsi": "node scripts/test-activity-rsi-tracker.js",
     "test:activity-rsi-signal": "node scripts/test-activity-rsi-signal.js",
     "test:exit-policy": "node scripts/test-position-exit-policy.js",
+    "test:buy-guard": "node scripts/test-buy-execution-guard.js",
     "test:stop-fast": "node scripts/test-stop-loss-fast-path.js",
     "test:pump-discovery": "node scripts/test-pump-migration-parser.js",
     "test:token-market": "node scripts/test-token-watchdog-market.js",

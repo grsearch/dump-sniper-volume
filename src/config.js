@@ -120,7 +120,12 @@ const config = {
     defenseProfitActivatePct: parseFloat(process.env.DEFENSE_PROFIT_ACTIVATE_PCT || '0'),
 
     // 滑点
-    buySlippageBps: parseInt(process.env.BUY_SLIPPAGE_BPS || '1500', 10),  // 15%
+    // BUY_SLIPPAGE_BPS is only the absolute chain ceiling. The effective
+    // tolerance is reduced per order so the fill cannot exceed the signal
+    // price by BUY_MAX_PRICE_DEVIATION_PCT.
+    buySlippageBps: parseInt(process.env.BUY_SLIPPAGE_BPS || '5000', 10),
+    buyMaxPriceDeviationPct: parseFloat(process.env.BUY_MAX_PRICE_DEVIATION_PCT || '5'),
+    buyMaxPoolStateAgeMs: parseInt(process.env.BUY_MAX_POOL_STATE_AGE_MS || '500', 10),
     sellSlippageBps: parseInt(process.env.SELL_SLIPPAGE_BPS || '2000', 10), // 20%
 
     // 风控（v3.17 默认 maxConcurrent 5）

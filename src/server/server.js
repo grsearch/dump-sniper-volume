@@ -365,6 +365,10 @@ class Server {
           trailingActivatePct: config.strategy.trailingActivatePct,
           trailingDrawdownPct: config.strategy.trailingDrawdownPct,
           positionSizeSol: config.strategy.positionSizeSol,
+          buySlippageBps: config.strategy.buySlippageBps,
+          buyMaxPriceDeviationPct: config.strategy.buyMaxPriceDeviationPct,
+          buyMaxPoolStateAgeMs: config.strategy.buyMaxPoolStateAgeMs,
+          computeUnitLimit: parseInt(process.env.COMPUTE_UNIT_LIMIT || '250000', 10),
         },
       });
     });

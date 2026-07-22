@@ -273,13 +273,16 @@ class PoolStateCache {
   }
 
   /**
-   * 单点刷新（dumpSignal 触发 / addHot 时使用）
-   * 不阻塞调用方；后台异步刷新。如果该 pool 0.5s 内已经刷过则跳过。
+   * 单点刷新（信号触发 / addHot / BUY 前使用）。
+   * 缓存年龄不超过 maxAgeMs 时复用，否则同步读取最新池状态。
    */
-  async refreshOne(poolAddress) {
+  async refreshOne(poolAddress, maxAgeMs = 500) {
     if (!this.onlineSdk || !this.user || !poolAddress) return null;
     const cached = this.cache.get(poolAddress);
-    if (cached && Date.now() - cached.fetchedAt < 500) return cached.state;
+    const allowedAgeMs = Number.isFinite(Number(maxAgeMs))
+      ? Math.max(0, Number(maxAgeMs))
+      : 500;
+    if (cached && Date.now() - cached.fetchedAt <= allowedAgeMs) return cached.state;
     try {
       const state = await this._fetchPoolState(poolAddress);
       if (state) {
