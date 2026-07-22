@@ -11,7 +11,7 @@
  * 1. 双确认止盈：连续 N 次（默认 2）满足 TP 条件，且首次和最近一次间隔
  *    >= tpConfirmMinGapMs（默认 300ms），才真正触发卖出。挡住单次价格污染。
  *
- * 2. 紧急止损：跌幅 <= emergencyStopLossPct（默认 -15%）立即出场。
+ * 2. 专用固定止损：相对真实入场价跌幅 <= -10% 时立即出场。
  *    防止 PRATT/Goblin/COMPUTA 那种 -97% 灾难。
  *
  * 3. PnL 用真实成交价计算：sellResult.solOut 来自钱包真实余额变化（LIVE）

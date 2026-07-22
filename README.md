@@ -25,6 +25,7 @@ RSI 使用每根 5 秒 K 线的最新收盘价和 Wilder 平滑计算，与 Trad
 
 以下任一条件成立即卖出：
 
+- 相对真实成交入场价跌至 **-10%**，立即固定止损。
 - 实时 5 秒 RSI(7) 从 **>=70 下穿到 <70**。
 - 实时 5 秒 RSI(7) **>80**。
 - 相对真实成交入场价上涨 **20%** 后激活移动止盈；随后从最新最高价回撤
@@ -36,7 +37,7 @@ RSI 使用每根 5 秒 K 线的最新收盘价和 Wilder 平滑计算，与 Trad
 阈值均按严格定义执行：RSI 恰好等于 80 不触发超买退出；当前 RSI 低于 70
 本身也不触发，必须观察到前值不低于 70、当前值低于 70 的真实下穿。
 
-固定止盈、固定止损、最长持仓、流动反转、稳定期退出、趋势/区间止损、定时止盈、
+固定止盈、最长持仓、流动反转、稳定期退出、趋势/区间止损、定时止盈、
 竞争对手跟卖和其他自动卖出策略均被专用策略分支屏蔽。手动卖出与交易失败处理保留。
 
 ## 监控列表
@@ -79,6 +80,7 @@ ACTIVITY_RSI_BUY_CROSS=30
 ACTIVITY_RSI_5S_MIN_BUCKETS=8
 ACTIVITY_RSI_MAX_SIGNAL_AGE_MS=5000
 
+ACTIVITY_RSI_STOP_LOSS_PCT=-10
 ACTIVITY_RSI_EXIT_DOWN_CROSS=70
 ACTIVITY_RSI_EXIT_OVERBOUGHT=80
 ACTIVITY_RSI_TRAILING_ACTIVATE_PCT=20
@@ -100,7 +102,7 @@ SWAP_EVENT_LOG_ENABLED=true
 
 ~~~text
 Entry: ACTIVITY_RSI (1m volume >$10000, RSI(7,5s) crosses above 30, SOL=$75.5)
-Exit only: RSI(7,5s) crosses below 70 or >80; trailing +20% / drawdown 10%
+Exit only: stop -10%; RSI(7,5s) crosses below 70 or >80; trailing +20% / drawdown 10%
 Legacy entries/exits: disabled
 Watchdog: ... migrationAge=25min
 ~~~

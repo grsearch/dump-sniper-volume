@@ -40,7 +40,8 @@ async function main() {
       `SOL=$${config.activityRsi.solPriceUsd})`,
   );
   console.log(
-    `Exit only: RSI(${config.activityRsi.rsi5sPeriod},5s) crosses below ` +
+    `Exit only: stop ${config.strategy.fixedStopLossPct}%; ` +
+      `RSI(${config.activityRsi.rsi5sPeriod},5s) crosses below ` +
       `${config.strategy.rsi5sExitDownCross} or >${config.strategy.rsi5sExitOverbought}; ` +
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
       `(trailing overrides RSI after arming)`,

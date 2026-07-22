@@ -34,7 +34,7 @@ const config = {
     positionSizeSol: parseFloat(process.env.POSITION_SIZE_SOL || '0.1'),
 
     // Dedicated activity/RSI exits. Old production variables cannot reactivate
-    // fixed TP/SL, timeout, flow reversal, or any other legacy exit.
+    // legacy TP/SL, timeout, flow reversal, or any other legacy exit.
     dedicatedExitOnly: true,
     takeProfitPct: 0,
     tpConfirmCount: parseInt(process.env.TP_CONFIRM_COUNT || '2', 10),
@@ -84,7 +84,7 @@ const config = {
 
     // 紧急止损（防止灾难性下跌）
     // 设置为 0 可禁用紧急止损（恢复"硬扛"行为）
-    fixedStopLossPct: 0,
+    fixedStopLossPct: parseFloat(process.env.ACTIVITY_RSI_STOP_LOSS_PCT || '-10'),
     emergencyStopLossPct: parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '0'),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值

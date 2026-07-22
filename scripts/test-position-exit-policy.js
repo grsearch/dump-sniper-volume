@@ -2,6 +2,7 @@
 
 process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT = '20';
 process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT = '10';
+process.env.ACTIVITY_RSI_STOP_LOSS_PCT = '-10';
 process.env.ACTIVITY_RSI_EXIT_DOWN_CROSS = '70';
 process.env.ACTIVITY_RSI_EXIT_OVERBOUGHT = '80';
 
@@ -74,7 +75,7 @@ function run() {
   const mint = 'TestMint111111111111111111111111111111111';
   assert.strictEqual(config.strategy.dedicatedExitOnly, true);
   assert.strictEqual(config.strategy.takeProfitPct, 0);
-  assert.strictEqual(config.strategy.fixedStopLossPct, 0);
+  assert.strictEqual(config.strategy.fixedStopLossPct, -10);
   assert.strictEqual(config.strategy.maxHoldMs, 0);
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
   assert.strictEqual(config.strategy.trailingActivatePct, 20);
@@ -84,8 +85,10 @@ function run() {
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 0.5);
-    assert.strictEqual(manager._exitCalls.length, 0, 'fixed stop loss must be disabled');
+    manager._checkExit('p1', 0.901);
+    assert.strictEqual(manager._exitCalls.length, 0, '-9.9% must not trigger the fixed stop');
+    manager._checkExit('p1', 0.9);
+    assert.strictEqual(manager._exitCalls[0].reason, 'FIXED_STOP_LOSS');
   }
 
   {
