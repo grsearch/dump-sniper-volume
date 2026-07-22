@@ -12,6 +12,7 @@ const {
 } = require('../src/utils/pumpMigrationParser');
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
 function encodeBase58(buffer) {
   let number = BigInt(`0x${buffer.toString('hex') || '0'}`);
@@ -42,8 +43,13 @@ function migrationAccounts() {
 }
 
 function migrationV2Accounts() {
-  const accounts = migrationAccounts();
-  accounts.splice(8, 0, '11111111111111111111111111111111');
+  const accounts = Array.from({ length: 25 }, (_, index) => key(String.fromCharCode(65 + index)));
+  accounts[2] = key('M');
+  accounts[9] = PUMP_AMM_PROGRAM_ID;
+  accounts[10] = key('P');
+  accounts[17] = key('V');
+  accounts[18] = key('W');
+  accounts[19] = TOKEN_2022_PROGRAM_ID;
   return accounts;
 }
 
@@ -88,7 +94,19 @@ assert.strictEqual(parsedV2.mint, key('M'));
 assert.strictEqual(parsedV2.poolAddress, key('P'));
 assert.strictEqual(parsedV2.poolBaseVault, key('V'));
 assert.strictEqual(parsedV2.poolQuoteVault, key('W'));
+assert.notStrictEqual(parsedV2.poolQuoteVault, TOKEN_2022_PROGRAM_ID);
 assert.strictEqual(parsedV2.migrationVersion, 'v2');
+
+const invalidV2Vaults = migrationV2Accounts();
+invalidV2Vaults[18] = TOKEN_2022_PROGRAM_ID;
+const parsedInvalidV2Vaults = parsePumpMigrationTransaction(parsedTransaction({
+  instruction: {
+    accounts: invalidV2Vaults,
+    data: encodeBase58(MIGRATE_V2_DISCRIMINATOR),
+  },
+}));
+assert(parsedInvalidV2Vaults, 'migration metadata remains useful when a vault cannot be trusted');
+assert.strictEqual(parsedInvalidV2Vaults.poolQuoteVault, null, 'program IDs must never be stored as vaults');
 
 const wrongData = Buffer.from(MIGRATE_DISCRIMINATOR);
 wrongData[0] ^= 0xff;
@@ -133,6 +151,33 @@ const compiled = parsedTransaction({
   },
 });
 assert(parsePumpMigrationTransaction(compiled), 'compiled account indexes should be supported');
+
+const compiledV2Accounts = migrationV2Accounts();
+const staticV2Keys = [PUMP_PROGRAM_ID, ...compiledV2Accounts.slice(0, 11)];
+const loadedV2Keys = compiledV2Accounts.slice(11);
+const compiledV2 = {
+  slot: 123457,
+  blockTime: 1_700_000_001,
+  meta: {
+    err: null,
+    innerInstructions: [],
+    loadedAddresses: { writable: loadedV2Keys, readonly: [] },
+  },
+  transaction: {
+    message: {
+      staticAccountKeys: staticV2Keys,
+      instructions: [{
+        programIdIndex: 0,
+        accounts: compiledV2Accounts.map((_, index) => index + 1),
+        data: encodeBase58(MIGRATE_V2_DISCRIMINATOR),
+      }],
+    },
+  },
+};
+const parsedCompiledV2 = parsePumpMigrationTransaction(compiledV2);
+assert(parsedCompiledV2, 'compiled V2 account indexes with ALT-loaded addresses should be supported');
+assert.strictEqual(parsedCompiledV2.poolBaseVault, key('V'));
+assert.strictEqual(parsedCompiledV2.poolQuoteVault, key('W'));
 
 assert.deepStrictEqual(decodeBase58('1'), Buffer.from([0]));
 assert.deepStrictEqual(decodeBase58('2'), Buffer.from([1]));

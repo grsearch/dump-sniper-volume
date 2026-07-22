@@ -20,6 +20,7 @@ const TokenWatchdog = require('./core/TokenWatchdog');
 const CompetitorTracker = require('./core/CompetitorTracker');
 const ActivityRsiTracker = require('./core/ActivityRsiTracker');
 const PumpGraduationDiscovery = require('./core/PumpGraduationDiscovery');
+const { isLikelyVaultAddress } = require('./utils/pumpMigrationParser');
 
 const monitor = getMonitor();
 
@@ -360,7 +361,7 @@ async function main() {
   // ============ 定期补缺 pool 信息（每 60 秒扫描一次） ============
   // 防止 onTokenAdded 时 PoolFinder 失败导致代币永远没有 pool
   setInterval(() => {
-    const missing = tokenRegistry.listActive().filter(t => !t.pool_address);
+    const missing = tokenRegistry.listActive().filter(needsPoolRefresh);
     if (missing.length === 0) return;
     console.log(`[pool-refill] ${missing.length} token(s) missing pool info, filling...`);
     for (const t of missing) {
@@ -880,7 +881,7 @@ async function main() {
 async function backgroundFillPools(tokenRegistry) {
   const targets = tokenRegistry
     .listAll()
-    .filter((t) => t.is_active && (!t.pool_address || !t.pool_base_vault || !t.pool_quote_vault));
+    .filter((t) => t.is_active && needsPoolRefresh(t));
 
   if (targets.length === 0) return;
   console.log(`[main] auto-fill pool for ${targets.length} tokens (background)`);
@@ -905,6 +906,12 @@ async function backgroundFillPools(tokenRegistry) {
     await new Promise((r) => setTimeout(r, 250));
   }
   console.log(`[main] auto-fill pool done: ${ok} OK, ${fail} failed`);
+}
+
+function needsPoolRefresh(token) {
+  return !token?.pool_address ||
+    !isLikelyVaultAddress(token.pool_base_vault) ||
+    !isLikelyVaultAddress(token.pool_quote_vault);
 }
 
 async function fillPoolForToken(tokenRegistry, mint) {
