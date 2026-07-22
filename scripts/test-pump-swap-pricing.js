@@ -69,7 +69,7 @@ const zeroVirtualState = {
 const zeroVirtualPricing = priceDetailsFromRawState(zeroVirtualState, 6);
 approx(zeroVirtualPricing.effectivePrice, zeroVirtualPricing.rawPrice);
 
-const monitor = { registerModule() {}, inc() {} };
+const monitor = { registerModule() {}, inc() {}, recordError() {} };
 const originalLoad = Module._load;
 Module._load = function loadWithStubs(request, parent, isMain) {
   if (request === 'bs58') return { default: { encode: (value) => String(value) } };
@@ -88,7 +88,12 @@ const DumpDetector = require('../src/core/DumpDetector');
 Module._load = originalLoad;
 
 const detector = Object.create(DumpDetector.prototype);
-detector.poolStateCache = { get: () => state };
+let onDemandRefreshes = 0;
+detector._poolStateRefreshAt = new Map();
+detector.poolStateCache = {
+  get: () => state,
+  refreshOne: async () => { onDemandRefreshes += 1; },
+};
 const baseMint = 'BaseMint111111111111111111111111111111111';
 const wsolMint = 'So11111111111111111111111111111111111111112';
 const tokenBalance = (accountIndex, mint, amount, decimals) => ({
@@ -126,5 +131,9 @@ approx(parsed.rawPriceBefore, 1.358e-6);
 approx(parsed.virtualQuoteReserveSol, 17.9);
 approx(parsed.priceAfter, 1.2702479338818182e-6, 1e-15);
 approx(parsed.poolQuoteAfter, 121.827272727);
+
+detector._requestPoolStateRefresh('PoolMissing111111111111111111111111111111');
+detector._requestPoolStateRefresh('PoolMissing111111111111111111111111111111');
+assert.strictEqual(onDemandRefreshes, 1, 'on-demand refreshes should be deduplicated for one second');
 
 console.log('PumpSwap effective-reserve pricing tests: PASS');
