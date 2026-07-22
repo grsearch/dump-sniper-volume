@@ -176,6 +176,9 @@ class PriceTracker extends EventEmitter {
     const snapshotFetchedAt = Number(meta.snapshotFetchedAt) || 0;
     const snapshotRequestedAt = Number(meta.snapshotRequestedAt) || 0;
     const marketSource = meta.marketSource || null;
+    const rawPrice = Number(meta.rawPrice) || null;
+    const virtualQuoteReserveSol = Number(meta.virtualQuoteReserveSol) || 0;
+    const effectiveQuoteReserveSol = Number(meta.effectiveQuoteReserveSol) || 0;
     this.prices.set(mint, {
       price,
       ts,
@@ -186,6 +189,9 @@ class PriceTracker extends EventEmitter {
       snapshotFetchedAt,
       snapshotRequestedAt,
       marketSource,
+      rawPrice,
+      virtualQuoteReserveSol,
+      effectiveQuoteReserveSol,
     });
     monitor.inc('PriceTracker.committed', 1, 'PriceTracker');
     this.emit('update', {
@@ -199,6 +205,9 @@ class PriceTracker extends EventEmitter {
       snapshotFetchedAt,
       snapshotRequestedAt,
       marketSource,
+      rawPrice,
+      virtualQuoteReserveSol,
+      effectiveQuoteReserveSol,
     });
   }
 

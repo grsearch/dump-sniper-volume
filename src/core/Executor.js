@@ -1666,7 +1666,8 @@ class Executor {
     // fallback：用 constant product 公式估算（不精确，仅用于显示）
     try {
       const baseReserve = BigInt(state.poolBaseAmount.toString());
-      const quoteReserve = BigInt(state.poolQuoteAmount.toString());
+      const quoteReserve = BigInt(state.poolQuoteAmount.toString()) +
+        BigInt(state.pool?.virtualQuoteReserves?.toString() || '0');
       const quoteIn = BigInt(fallbackQuoteIn.toString());
       const k = baseReserve * quoteReserve;
       const newQuote = quoteReserve + quoteIn;
@@ -1687,7 +1688,8 @@ class Executor {
     // fallback
     try {
       const baseReserve = BigInt(state.poolBaseAmount.toString());
-      const quoteReserve = BigInt(state.poolQuoteAmount.toString());
+      const quoteReserve = BigInt(state.poolQuoteAmount.toString()) +
+        BigInt(state.pool?.virtualQuoteReserves?.toString() || '0');
       const baseIn = BigInt(fallbackBaseIn.toString());
       const k = baseReserve * quoteReserve;
       const newBase = baseReserve + baseIn;

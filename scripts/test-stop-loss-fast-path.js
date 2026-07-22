@@ -64,6 +64,9 @@ async function run() {
     state: {
       poolBaseAmount: { toString: () => '1000000' },
       poolQuoteAmount: { toString: () => '1000000000' },
+      pool: {
+        virtualQuoteReserves: { toString: () => '15000000000' },
+      },
     },
     fetchedAt: Date.now() - 400,
   }]]);
@@ -77,6 +80,11 @@ async function run() {
   const updated = cache.cache.get(poolAddress);
   assert.strictEqual(updated.state.poolBaseAmount.toString(), '123456789');
   assert.strictEqual(updated.state.poolQuoteAmount.toString(), '42250000000');
+  assert.strictEqual(
+    updated.state.pool.virtualQuoteReserves.toString(),
+    '15000000000',
+    'applying raw vault balances must preserve the virtual quote reserve',
+  );
   assert.strictEqual(updated.marketSlot, 200);
   assert.strictEqual(cache.getMarketSlot(poolAddress), 200);
   assert.strictEqual(cache.getMarketMeta(poolAddress).source, 'chain_swap');

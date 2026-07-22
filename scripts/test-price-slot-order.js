@@ -27,8 +27,14 @@ assert.strictEqual(tracker.update(mint, 1, 1000, 'pool', {
   slot: 200,
   signature: 'slot-200',
   source: 'chain_swap',
+  rawPrice: 0.88,
+  virtualQuoteReserveSol: 12.5,
+  effectiveQuoteReserveSol: 112.5,
 }), true);
 assert.strictEqual(tracker.get(mint).slot, 200);
+assert.strictEqual(tracker.get(mint).rawPrice, 0.88);
+assert.strictEqual(tracker.get(mint).virtualQuoteReserveSol, 12.5);
+assert.strictEqual(updates[0].effectiveQuoteReserveSol, 112.5);
 
 assert.strictEqual(tracker.update(mint, 0.9, 1100, 'pool', {
   slot: 199,

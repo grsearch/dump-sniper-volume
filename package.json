@@ -18,6 +18,7 @@
     "test:buy-exact": "node scripts/test-exact-quote-buy.js",
     "test:price-order": "node scripts/test-price-slot-order.js",
     "test:stop-fast": "node scripts/test-stop-loss-fast-path.js",
+    "test:pricing": "node scripts/test-pump-swap-pricing.js",
     "test:pump-discovery": "node scripts/test-pump-migration-parser.js",
     "test:token-market": "node scripts/test-token-watchdog-market.js",
     "fill-pools": "node scripts/fill-pools.js",

@@ -84,6 +84,16 @@ function run() {
   assert.strictEqual(config.strategy.rsi5sExitOverbought, 80);
 
   {
+    const manager = managerWith();
+    const price = manager._priceFromState({
+      poolBaseAmount: { toString: () => '100000000000000' },
+      poolQuoteAmount: { toString: () => '135800000000' },
+      pool: { virtualQuoteReserves: { toString: () => '17900000000' } },
+    }, 6);
+    assert(Math.abs(price - 1.537e-6) < 1e-15, 'position polling must include virtual reserves');
+  }
+
+  {
     const manager = managerWith(position('p1', mint));
     manager._checkExit('p1', 0.901);
     assert.strictEqual(manager._exitCalls.length, 0, '-9.9% must not trigger the fixed stop');

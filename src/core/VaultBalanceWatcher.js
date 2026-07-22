@@ -27,8 +27,7 @@
 const { PublicKey } = require('@solana/web3.js');
 const { AccountLayout } = require('@solana/spl-token');
 const { getMonitor } = require('../monitor/HealthMonitor');
-const { config } = require('../config');
-const BN = require('bn.js');
+const { priceDetailsFromUiReserves } = require('../utils/pumpSwapPricing');
 
 const monitor = getMonitor();
 monitor.registerModule('VaultWatcher', { staleMs: 60_000, label: 'Vault Balance Watcher' });
@@ -48,9 +47,10 @@ class VaultBalanceWatcher {
    * @param {object} opts.connection - @solana/web3.js Connection
    * @param {object} opts.tokenRegistry - TokenRegistry 实例
    */
-  constructor({ connection, tokenRegistry }) {
+  constructor({ connection, tokenRegistry, poolStateCache = null }) {
     this.connection = connection;
     this.tokenRegistry = tokenRegistry;
+    this.poolStateCache = poolStateCache;
     this.pollMs = DEFAULT_POLL_MS;
 
     // TickStream 引用（用于获取 latestSlot）
@@ -232,7 +232,7 @@ class VaultBalanceWatcher {
       // quote_out = quote_before - quote_after
       //   quote_after = (base_before * quote_before) / base_after
       const baseAfter = bal.base;
-      const quoteAfter = Math.floor((baseBefore * quoteBefore) / baseAfter);
+      const quoteAfter = bal.quote;
       const quoteOutLamports = quoteBefore - quoteAfter;
       const sellSol = quoteOutLamports / 1e9;
 
@@ -241,8 +241,25 @@ class VaultBalanceWatcher {
 
       // Price impact — 用两种方式计算取更准确的
       // 方式1：AMM 常数乘积直接算
-      const priceBefore = quoteBefore / baseBefore;
-      const priceAfter = quoteAfter / baseAfter;
+      const poolState = this.poolStateCache?.get(key) || null;
+      const baseScale = Math.pow(10, decimals);
+      const beforePricing = priceDetailsFromUiReserves(
+        baseBefore / baseScale,
+        quoteBefore / 1e9,
+        poolState,
+      );
+      const afterPricing = priceDetailsFromUiReserves(
+        baseAfter / baseScale,
+        quoteAfter / 1e9,
+        poolState,
+      );
+      if (!beforePricing || !afterPricing) {
+        monitor.inc('VaultWatcher.virtualQuoteReserveMissing', 1, 'VaultWatcher');
+        continue;
+      }
+
+      const priceBefore = beforePricing.effectivePrice;
+      const priceAfter = afterPricing.effectivePrice;
       const impactAmm = ((priceAfter - priceBefore) / priceBefore) * 100;
       // 方式2：sellSol 占池子 SOL 比例近似（更稳定，不受快照间隔中其他交易干扰）
       // 对于常数乘积 AMM：impact ≈ sellSol / (poolSolBefore) * 100
@@ -278,6 +295,10 @@ class VaultBalanceWatcher {
         baseVaultAfter: baseAfter,
         quoteVaultBefore: quoteBefore,
         quoteVaultAfter: quoteAfter,
+        rawPriceBefore: beforePricing.rawPrice,
+        rawPriceAfter: afterPricing.rawPrice,
+        virtualQuoteReserveSol: afterPricing.virtualQuoteUi,
+        effectiveQuoteReserveSol: afterPricing.effectiveQuoteUi,
         ts: now,
         slot: this._latestSlot || 0,  // 用 TickStream 的最新 slot
         source: 'vault_watcher',

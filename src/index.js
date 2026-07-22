@@ -411,6 +411,7 @@ async function main() {
     const vaultWatcher = new VaultBalanceWatcher({
       connection: executor.rpc,
       tokenRegistry,
+      poolStateCache: executor.poolStateCache || null,
     });
     vaultWatcher.on('vaultSell', (info) => {
       // v3.17.23: VaultWatcher 检测到的卖单作为辅助信号
@@ -424,6 +425,9 @@ async function main() {
         priceTracker.update(info.mint, info.priceAfter, info.ts, info.poolAddress, {
           slot: info.slot,
           source: 'vault_watcher',
+          rawPrice: info.rawPriceAfter,
+          virtualQuoteReserveSol: info.virtualQuoteReserveSol,
+          effectiveQuoteReserveSol: info.effectiveQuoteReserveSol,
         });
       }
 
@@ -615,6 +619,9 @@ async function main() {
     poolQuoteAfter,
     poolBaseAfter,
     baseDecimals,
+    rawPrice,
+    virtualQuoteReserveSol,
+    effectiveQuoteReserveSol,
   }) => {
     const cachedMarketSlot = executor.poolStateCache && poolAddress
       ? executor.poolStateCache.getMarketSlot?.(poolAddress) || 0
@@ -639,6 +646,9 @@ async function main() {
       slot,
       signature,
       source: 'chain_swap',
+      rawPrice,
+      virtualQuoteReserveSol,
+      effectiveQuoteReserveSol,
     });
     // v3.17.17: 喂 RSI - 用 feedTrade 带上 volume,RSI 能做 volume-weighted aggregation
     if (rsiCalculator) {
