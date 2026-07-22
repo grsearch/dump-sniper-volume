@@ -27,7 +27,7 @@ RSI 使用每根 5 秒 K 线的最新收盘价和 Wilder 平滑计算，与 Trad
 
 - 实时 5 秒 RSI(7) 从 **>=70 下穿到 <70**。
 - 实时 5 秒 RSI(7) **>80**。
-- 相对真实成交入场价上涨 **30%** 后激活移动止盈；随后从最新最高价回撤
+- 相对真实成交入场价上涨 **20%** 后激活移动止盈；随后从最新最高价回撤
   **10%** 卖出。
 
 如果移动止盈先激活，则不再执行 RSI 下穿 70 或 RSI 大于 80 的卖出；该持仓随后
@@ -47,12 +47,13 @@ TokenWatchdog 每分钟刷新一次 FDV、LP、价格和 24 小时成交量：
 - LP：**>= $3,000**。
 - 24 小时成交量：**>= $5,000**。
 - AGE 从 Pump.fun 迁移时间开始计算。
-- AGE **> 60 分钟**时移出监控；已有持仓会保留订阅，直到平仓后再移除。
+- AGE **> 25 分钟**时移出监控；如有持仓，先以 `TOKEN_AGE_EXPIRED` 自动卖出，卖出确认后再移除。
+- AGE 使用独立的 1 秒检查，不等待每分钟一次的 FDV/LP 巡检。
 - 历史记录缺少迁移时间时，先使用发现时间显示 AGE；拿到 DEX
   交易池创建时间后自动替换为精确时间。
 
 旧的 `MAX_TOKEN_AGE_MS` 不再控制当前策略。监控年龄使用
-`BURST_WATCHLIST_MAX_AGE_MS=3600000`。
+`BURST_WATCHLIST_MAX_AGE_MS=1500000`。
 
 ## Pump.fun 迁移发现
 
@@ -80,10 +81,11 @@ ACTIVITY_RSI_MAX_SIGNAL_AGE_MS=5000
 
 ACTIVITY_RSI_EXIT_DOWN_CROSS=70
 ACTIVITY_RSI_EXIT_OVERBOUGHT=80
-ACTIVITY_RSI_TRAILING_ACTIVATE_PCT=30
+ACTIVITY_RSI_TRAILING_ACTIVATE_PCT=20
 ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT=10
 
-BURST_WATCHLIST_MAX_AGE_MS=3600000
+BURST_WATCHLIST_MAX_AGE_MS=1500000
+WATCHDOG_AGE_CHECK_INTERVAL_MS=1000
 WATCHDOG_CHECK_INTERVAL_MS=60000
 MIN_FDV_USD=15000
 MAX_FDV_USD=1000000
@@ -98,7 +100,7 @@ SWAP_EVENT_LOG_ENABLED=true
 
 ~~~text
 Entry: ACTIVITY_RSI (1m volume >$10000, RSI(7,5s) crosses above 30, SOL=$75.5)
-Exit only: RSI(7,5s) crosses below 70 or >80; trailing +30% / drawdown 10%
+Exit only: RSI(7,5s) crosses below 70 or >80; trailing +20% / drawdown 10%
 Legacy entries/exits: disabled
-Watchdog: ... migrationAge=1h
+Watchdog: ... migrationAge=25min
 ~~~

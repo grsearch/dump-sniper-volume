@@ -1,6 +1,6 @@
 'use strict';
 
-process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT = '30';
+process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT = '20';
 process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT = '10';
 process.env.ACTIVITY_RSI_EXIT_DOWN_CROSS = '70';
 process.env.ACTIVITY_RSI_EXIT_OVERBOUGHT = '80';
@@ -77,7 +77,7 @@ function run() {
   assert.strictEqual(config.strategy.fixedStopLossPct, 0);
   assert.strictEqual(config.strategy.maxHoldMs, 0);
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
-  assert.strictEqual(config.strategy.trailingActivatePct, 30);
+  assert.strictEqual(config.strategy.trailingActivatePct, 20);
   assert.strictEqual(config.strategy.trailingDrawdownPct, 10);
   assert.strictEqual(config.strategy.rsi5sExitDownCross, 70);
   assert.strictEqual(config.strategy.rsi5sExitOverbought, 80);
@@ -90,11 +90,19 @@ function run() {
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 1.3);
-    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+30% must arm trailing');
+    manager._checkExit('p1', 1.2);
+    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+20% must arm trailing');
     assert.strictEqual(manager._exitCalls.length, 0);
-    manager._checkExit('p1', 1.17);
+    manager._checkExit('p1', 1.08);
     assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
+  }
+
+  {
+    const manager = managerWith(position('p1', mint), position('p2', mint));
+    const requested = manager.forceExitAllByMint(mint, 'TOKEN_AGE_EXPIRED');
+    assert.strictEqual(requested, 2);
+    assert.strictEqual(manager._exitCalls.length, 2);
+    assert(manager._exitCalls.every((call) => call.reason === 'TOKEN_AGE_EXPIRED'));
   }
 
   {

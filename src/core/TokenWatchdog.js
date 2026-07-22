@@ -49,7 +49,7 @@ class TokenWatchdog {
     ) {
       console.warn(
         '[TokenWatchdog] MAX_TOKEN_AGE_MS is legacy and ignored; ' +
-          'use BURST_WATCHLIST_MAX_AGE_MS (default 3600000ms)',
+          'use BURST_WATCHLIST_MAX_AGE_MS (default 1500000ms)',
       );
     }
 
@@ -80,9 +80,14 @@ class TokenWatchdog {
       0,
       parseInt(process.env.WATCHDOG_MARKET_FALLBACK_MAX_PER_CYCLE || '10', 10),
     );
+    this.ageCheckIntervalMs = Math.max(
+      250,
+      parseInt(process.env.WATCHDOG_AGE_CHECK_INTERVAL_MS || '1000', 10),
+    );
 
     this._pendingExitMints = new Set();
     this._checkInterval = null;
+    this._ageCheckInterval = null;
     this._checking = false;
     this._lastMarketAttemptAt = new Map();
 
@@ -96,7 +101,10 @@ class TokenWatchdog {
     if (this.minLiquidityUsd > 0) features.push(`minLiquidity=$${this.minLiquidityUsd}`);
     if (this.minVolume24hUsd > 0) features.push(`minVol24h=$${this.minVolume24hUsd}`);
     if (this.noBuyRemoveMs > 0) features.push(`noBuyRemove=${this.noBuyRemoveMs / 3600000}h`);
-    if (this.maxTokenAgeMs > 0) features.push(`maxAge=${this.maxTokenAgeMs / 3600000}h`);
+    if (this.maxTokenAgeMs > 0) {
+      features.push(`maxAge=${this.maxTokenAgeMs / 60000}min`);
+      features.push(`ageCheck=${this.ageCheckIntervalMs / 1000}s`);
+    }
     console.log(`[TokenWatchdog] enabled: ${features.join(', ')}`);
   }
 
@@ -115,12 +123,20 @@ class TokenWatchdog {
 
     this._checkInterval = setInterval(() => this._runCheck(), this.checkIntervalMs);
     setTimeout(() => this._runCheck(), 10_000);
+    if (this.maxTokenAgeMs > 0) {
+      this._ageCheckInterval = setInterval(() => this._runAgeCheck(), this.ageCheckIntervalMs);
+      setTimeout(() => this._runAgeCheck(), Math.min(250, this.ageCheckIntervalMs));
+    }
   }
 
   stop() {
     if (this._checkInterval) {
       clearInterval(this._checkInterval);
       this._checkInterval = null;
+    }
+    if (this._ageCheckInterval) {
+      clearInterval(this._ageCheckInterval);
+      this._ageCheckInterval = null;
     }
   }
 
@@ -141,10 +157,89 @@ class TokenWatchdog {
     }
   }
 
+  _runAgeCheck() {
+    try {
+      this._checkAges();
+    } catch (err) {
+      monitor.recordError('TokenWatchdog', err, { phase: 'age_check' });
+      console.error(`[TokenWatchdog] age check error: ${err.message}`);
+    }
+  }
+
   _getMigrationAgeMs(token, now = Date.now()) {
     const migrationTime = Number(token?.migration_time);
     if (!Number.isFinite(migrationTime) || migrationTime <= 0) return null;
     return now - migrationTime;
+  }
+
+  _removeToken(token, reasonStr) {
+    if (!token?.mint) return false;
+    const symbol = token.symbol || token.mint.slice(0, 8);
+    console.log(`[TokenWatchdog] REMOVE ${symbol}: ${reasonStr}`);
+    this.tokenRegistry.removeToken(token.mint);
+    this._pendingExitMints.delete(token.mint);
+    this._lastMarketAttemptAt.delete(token.mint);
+    if (this.onTokenRemoved) this.onTokenRemoved();
+    monitor.inc('TokenWatchdog.tokensRemoved', 1, 'TokenWatchdog');
+    return true;
+  }
+
+  _checkAges(now = Date.now()) {
+    if (this.maxTokenAgeMs <= 0) return { removed: 0, exitsRequested: 0 };
+
+    let removed = 0;
+    let exitsRequested = 0;
+    for (const token of this.tokenRegistry.listActive()) {
+      const migrationAge = this._getMigrationAgeMs(token, now);
+      if (migrationAge == null || migrationAge <= this.maxTokenAgeMs) continue;
+
+      const symbol = token.symbol || token.mint.slice(0, 8);
+      const reason = `migration_too_old(${Math.ceil(migrationAge / 1000)}s > ` +
+        `${Math.floor(this.maxTokenAgeMs / 1000)}s)`;
+      if (this.positionManager.hasOpenPosition(token.mint)) {
+        if (!this._pendingExitMints.has(token.mint)) {
+          const requested = this.positionManager.forceExitAllByMint(
+            token.mint,
+            'TOKEN_AGE_EXPIRED',
+          );
+          this._pendingExitMints.add(token.mint);
+          exitsRequested++;
+          console.warn(
+            `[TokenWatchdog] AGE_EXIT ${symbol}: ${reason} - ` +
+              `requested=${requested}, keep monitoring until sell confirms`,
+          );
+          monitor.inc('TokenWatchdog.ageExitRequested', 1, 'TokenWatchdog');
+        }
+        continue;
+      }
+
+      if (this._removeToken(token, reason)) removed++;
+    }
+    return { removed, exitsRequested };
+  }
+
+  handlePositionClosed(position) {
+    const mint = position?.mint;
+    if (!mint || !this._pendingExitMints.has(mint)) return false;
+    if (this.positionManager.hasOpenPosition(mint)) return false;
+
+    const token = this.tokenRegistry.getToken?.(mint);
+    const migrationAge = this._getMigrationAgeMs(token);
+    if (
+      !token ||
+      this.maxTokenAgeMs <= 0 ||
+      migrationAge == null ||
+      migrationAge <= this.maxTokenAgeMs
+    ) {
+      this._pendingExitMints.delete(mint);
+      return false;
+    }
+
+    return this._removeToken(
+      token,
+      `migration_too_old(${Math.ceil(migrationAge / 1000)}s > ` +
+        `${Math.floor(this.maxTokenAgeMs / 1000)}s), position closed`,
+    );
   }
 
   _isMarketFresh(token, now = Date.now()) {
@@ -349,18 +444,6 @@ class TokenWatchdog {
         }
       }
 
-      const migrationAge = this._getMigrationAgeMs(token, now);
-      if (
-        this.maxTokenAgeMs > 0 &&
-        migrationAge != null &&
-        migrationAge > this.maxTokenAgeMs
-      ) {
-        reasons.push(
-          `migration_too_old(${Math.ceil(migrationAge / 1000)}s > ` +
-          `${Math.floor(this.maxTokenAgeMs / 1000)}s)`,
-        );
-      }
-
       if (reasons.length === 0) continue;
 
       const symbol = token.symbol || token.mint.slice(0, 8);
@@ -375,14 +458,7 @@ class TokenWatchdog {
         continue;
       }
 
-      console.log(`[TokenWatchdog] REMOVE ${symbol}: ${reasonStr}`);
-      this.tokenRegistry.removeToken(token.mint);
-      this._pendingExitMints.delete(token.mint);
-      this._lastMarketAttemptAt.delete(token.mint);
-      removed++;
-
-      if (this.onTokenRemoved) this.onTokenRemoved();
-      monitor.inc('TokenWatchdog.tokensRemoved', 1, 'TokenWatchdog');
+      if (this._removeToken(token, reasonStr)) removed++;
     }
 
     if (removed > 0 || marketStats.refreshed > 0 || marketStats.failed > 0) {

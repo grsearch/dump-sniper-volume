@@ -49,7 +49,7 @@ async function main() {
   console.log(`Rebuy cooldown: ${config.strategy.rebuyCooldownMs > 0 ? config.strategy.rebuyCooldownMs / 60_000 + 'min after close' : 'disabled'}`);
   console.log(
     `Watchdog: FDV=${watchdogFdvRange}, liquidity>=$${config.strategy.minLiquidityUsd}, ` +
-      `migrationAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 3_600_000) + 'h' : 'disabled'} ` +
+      `migrationAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 60_000) + 'min' : 'disabled'} ` +
       `(check every ${watchdogCheckIntervalMs / 60_000}min)`,
   );
   console.log('Add-on: disabled');
@@ -353,7 +353,7 @@ async function main() {
   }, 3600_000);
 
   // Legacy creation-age cleanup is intentionally disabled. TokenWatchdog owns
-  // the single age rule and removes tokens by migration age after 60 minutes.
+  // the single age rule and exits/removes tokens by migration age after 25 minutes.
   if (process.env.TOKEN_MAX_AGE_MS && process.env.TOKEN_MAX_AGE_MS !== '0') {
     console.warn('[main] TOKEN_MAX_AGE_MS is legacy and ignored');
   }
@@ -801,6 +801,7 @@ async function main() {
       signalEngine._exitCooldowns.set(pos.mint, Date.now() + config.strategy.rebuyCooldownMs);
     }
     server.broadcast({ type: 'positionClosed', position: pos });
+    tokenWatchdog.handlePositionClosed(pos);
   });
 
   // ============ 启动服务器 ============

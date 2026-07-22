@@ -30,11 +30,15 @@ Module._load = function loadWithDependencyStubs(request, parent, isMain) {
   if (request === 'axios') return { get: async () => ({ data: [] }), post: async () => ({ data: {} }) };
   return originalLoad.call(this, request, parent, isMain);
 };
+const previousWatchlistMaxAge = process.env.BURST_WATCHLIST_MAX_AGE_MS;
+process.env.BURST_WATCHLIST_MAX_AGE_MS = '3600000';
 const {
   selectDexScreenerPair,
   normalizeDexScreenerPair,
 } = require('../src/utils/tokenMeta');
 const TokenWatchdog = require('../src/core/TokenWatchdog');
+if (previousWatchlistMaxAge == null) delete process.env.BURST_WATCHLIST_MAX_AGE_MS;
+else process.env.BURST_WATCHLIST_MAX_AGE_MS = previousWatchlistMaxAge;
 Module._load = originalLoad;
 
 const mint = 'M'.repeat(32);
@@ -177,9 +181,10 @@ assert.strictEqual(
   );
   assert.strictEqual(
     watchdog.maxTokenAgeMs,
-    3_600_000,
-    'watchlist migration AGE limit must be 60 minutes',
+    1_500_000,
+    'legacy one-hour config must be clamped to the 25-minute maximum',
   );
+  assert.strictEqual(watchdog.ageCheckIntervalMs, 1_000);
   watchdog.minFdVUsd = 15_000;
   watchdog.minLiquidityUsd = 3_000;
   watchdog.minVolume24hUsd = 0;
@@ -195,7 +200,7 @@ assert.strictEqual(
     ...token,
     fdv: 40_000,
     liquidity: 20_000,
-    migration_time: now - 3_600_001,
+    migration_time: now - 1_500_001,
     market_updated_at: now,
   };
   let ageRemoved = false;
@@ -236,8 +241,55 @@ assert.strictEqual(
   ageWatchdog.minVolume24hUsd = 0;
   ageWatchdog.noBuyRemoveMs = 0;
   ageWatchdog.maxWatchDurationMs = 0;
-  await ageWatchdog._check();
-  assert.strictEqual(ageRemoved, true, 'migration AGE above 60 minutes must remove the token');
+  ageWatchdog._checkAges(now);
+  assert.strictEqual(ageRemoved, true, 'migration AGE above 25 minutes must remove the token');
+
+  const heldToken = {
+    ...agedToken,
+    migration_time: now - 1_500_001,
+  };
+  let heldRemoved = false;
+  let heldOpen = true;
+  let exitRequests = 0;
+  const heldRegistry = {
+    listActive: () => (heldRemoved ? [] : [heldToken]),
+    getToken: () => (heldRemoved ? null : heldToken),
+    updateMarket: () => heldToken,
+    recordMigration: () => heldToken,
+    removeToken: () => { heldRemoved = true; },
+  };
+  const heldWatchdog = new TokenWatchdog({
+    tokenRegistry: heldRegistry,
+    positionManager: {
+      hasOpenPosition: () => heldOpen,
+      forceExitAllByMint: (_mint, reason) => {
+        assert.strictEqual(reason, 'TOKEN_AGE_EXPIRED');
+        exitRequests++;
+        return 1;
+      },
+    },
+    tradeLogger: null,
+    fetchMarkets: async () => new Map(),
+    fetchMarket: async () => null,
+  });
+  heldWatchdog.minFdVUsd = 0;
+  heldWatchdog.maxFdVUsd = 0;
+  heldWatchdog.minLiquidityUsd = 0;
+  heldWatchdog.minVolume24hUsd = 0;
+  heldWatchdog.noBuyRemoveMs = 0;
+  heldWatchdog.maxWatchDurationMs = 0;
+
+  heldWatchdog._checkAges(now);
+  heldWatchdog._checkAges(now);
+  assert.strictEqual(exitRequests, 1, 'AGE expiry must request one sell while it is pending');
+  assert.strictEqual(heldRemoved, false, 'the token must remain monitored until the position closes');
+  heldOpen = false;
+  assert.strictEqual(
+    heldWatchdog.handlePositionClosed({ mint }),
+    true,
+    'the token must be removed immediately after the final position closes',
+  );
+  assert.strictEqual(heldRemoved, true);
 
   const staleToken = {
     ...token,

@@ -45,7 +45,7 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT || '30'),
+    trailingActivatePct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT || '20'),
     trailingDrawdownPct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT || '10'),
     trailingMinHwmAgeMs: 0,
 
@@ -191,7 +191,12 @@ const config = {
     maxSignalAgeMs: parseInt(process.env.ACTIVITY_RSI_MAX_SIGNAL_AGE_MS || '5000', 10),
     maxEventsPerMint: parseInt(process.env.ACTIVITY_RSI_MAX_EVENTS_PER_MINT || '0', 10),
     debug: (process.env.ACTIVITY_RSI_DEBUG ?? 'false').toLowerCase() === 'true',
-    watchlistMaxAgeMs: parseInt(process.env.BURST_WATCHLIST_MAX_AGE_MS || '3600000', 10),
+    watchlistMaxAgeMs: (() => {
+      const configured = parseInt(process.env.BURST_WATCHLIST_MAX_AGE_MS || '1500000', 10);
+      return Number.isFinite(configured) && configured > 0
+        ? Math.min(configured, 1_500_000)
+        : 1_500_000;
+    })(),
   },
 
   // ============ Price anomaly filter ============

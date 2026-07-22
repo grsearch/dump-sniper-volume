@@ -372,7 +372,7 @@ class PositionManager extends EventEmitter {
    */
   _exitAllByMint(mint, price, reason) {
     const pids = this.byMint.get(mint);
-    if (!pids || pids.size === 0) return;
+    if (!pids || pids.size === 0) return 0;
     let count = 0;
     for (const pid of pids) {
       const pos = this.positions.get(pid);
@@ -384,6 +384,28 @@ class PositionManager extends EventEmitter {
     console.log(
       `[PositionManager] _exitAllByMint ${mint.slice(0, 8)}: triggered ${count} exits (${reason})`,
     );
+    return count;
+  }
+
+  forceExitAllByMint(mint, reason = 'TOKEN_AGE_EXPIRED') {
+    const pids = this.byMint.get(mint);
+    if (!pids || pids.size === 0) return 0;
+
+    let first = null;
+    for (const positionId of pids) {
+      const pos = this.positions.get(positionId);
+      if (pos && !pos.exiting) {
+        first = pos;
+        break;
+      }
+    }
+    if (!first) return 0;
+
+    let price = this.priceTracker?.getPrice(mint);
+    if (!Number.isFinite(price) || price <= 0) price = this._getPoolPrice(mint);
+    if (!Number.isFinite(price) || price <= 0) price = first._lastTickPrice;
+    if (!Number.isFinite(price) || price <= 0) price = first.entryPrice;
+    return this._exitAllByMint(mint, price, reason);
   }
 
   /**
