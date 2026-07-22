@@ -10,8 +10,8 @@ function close(actual, expected, tolerance = 1e-9) {
 {
   const result = evaluateBuyExecutionGuard({
     signalPrice: 1,
-    expectedPrice: 1.051,
-    maxDeviationPct: 5,
+    expectedPrice: 1.151,
+    maxDeviationPct: 15,
     configuredSlippagePct: 50,
   });
   assert.strictEqual(result.allowed, false);
@@ -21,19 +21,19 @@ function close(actual, expected, tolerance = 1e-9) {
 {
   const result = evaluateBuyExecutionGuard({
     signalPrice: 1,
-    expectedPrice: 1.03,
-    maxDeviationPct: 5,
+    expectedPrice: 1.01,
+    maxDeviationPct: 15,
     configuredSlippagePct: 50,
   });
   assert.strictEqual(result.allowed, true);
-  close(result.effectiveSlippagePct, ((1.05 / 1.03) - 1) * 100);
+  close(result.effectiveSlippagePct, ((1.15 / 1.01) - 1) * 100);
 }
 
 {
   const result = evaluateBuyExecutionGuard({
     signalPrice: 1,
     expectedPrice: 1,
-    maxDeviationPct: 5,
+    maxDeviationPct: 15,
     configuredSlippagePct: 2,
   });
   assert.strictEqual(result.allowed, true);
@@ -44,11 +44,11 @@ function close(actual, expected, tolerance = 1e-9) {
   const result = evaluateBuyExecutionGuard({
     signalPrice: 1,
     expectedPrice: 0.9,
-    maxDeviationPct: 5,
+    maxDeviationPct: 15,
     configuredSlippagePct: 50,
   });
   assert.strictEqual(result.allowed, true);
-  close(result.effectiveSlippagePct, ((1.05 / 0.9) - 1) * 100);
+  close(result.effectiveSlippagePct, ((1.15 / 0.9) - 1) * 100);
 }
 
 console.log('Buy execution price guard tests: PASS');

@@ -73,6 +73,20 @@ class SignalEngine extends EventEmitter {
       return;
     }
 
+    // This map is only populated by execution failures or an explicitly
+    // configured post-sale cooldown. Normal activity/RSI signals remain free
+    // of a same-token strategy cooldown.
+    const executionCooldownUntil = Number(this._exitCooldowns.get(mint)) || 0;
+    if (executionCooldownUntil > now) {
+      monitor.inc('SignalEngine.rejectedExecutionCooldown', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        `buy execution cooldown: ${Math.ceil((executionCooldownUntil - now) / 1000)}s remaining`,
+      );
+      return;
+    }
+    if (executionCooldownUntil > 0) this._exitCooldowns.delete(mint);
+
     const openCount = this.positionManager.openPositionCount();
     const inflightCount = this.inflightBuys.size;
     if (openCount + inflightCount >= config.strategy.maxConcurrentPositions) {

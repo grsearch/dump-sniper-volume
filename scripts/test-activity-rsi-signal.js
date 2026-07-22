@@ -66,6 +66,17 @@ async function run() {
   await blocked.handleActivityRsiSignal(signal(mint));
   assert.strictEqual(blockedOrder, null, 'existing position must block add-on');
 
+  const executionCooldown = makeEngine();
+  executionCooldown._exitCooldowns.set(mint, Date.now() + 60_000);
+  let cooldownOrder = null;
+  executionCooldown.on('buyOrder', (value) => { cooldownOrder = value; });
+  await executionCooldown.handleActivityRsiSignal(signal(mint));
+  assert.strictEqual(cooldownOrder, null, 'a recorded BUY failure cooldown must block fee-burning retries');
+  assert(
+    executionCooldown.loggedSignals[0].rejectReason.includes('buy execution cooldown'),
+    'the rejection must identify the execution cooldown',
+  );
+
   const lowVolume = makeEngine();
   let lowVolumeOrder = null;
   lowVolume.on('buyOrder', (value) => { lowVolumeOrder = value; });
