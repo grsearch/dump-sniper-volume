@@ -21,10 +21,10 @@ RSI 使用每根 5 秒 K 线的最新收盘价和 Wilder 平滑计算，与 Trad
 旧的第一次爆量、TPS 扩张、回撤确认、买卖比、大砸单、多窗口反转、追高过滤、
 固定冷却和加仓均不参与买入。
 
-实盘构造 BUY 前会同步刷新超过 500ms 的池状态，并以信号成交价为基准执行独立的
-`+15%` 价格上限。`BUY_SLIPPAGE_BPS=5000` 只是链上绝对上限；每笔交易会按剩余
-价格空间动态收紧。例如刷新后的预估价已高于信号价 3%，链上滑点允许约 11.65%。
-刷新后预估价已经超过信号价 15% 时，本地直接拒绝，不提交交易也不消耗优先费。
+实盘构造 BUY 前会强制读取最新池状态，并使用 PumpSwap SDK 1.19 的
+`virtual_quote_reserves` 计算真实报价。买入使用 `buy_exact_quote_in`：每笔最多只花设定的
+仓位 SOL，并把剩余价格空间转换成最少到手代币数。刷新后的预估价已经超过信号价 15%
+时，本地直接拒绝；上链后价格越过该上限时交易也会拒绝，不会通过放大滑点超额支出。
 
 ## 卖出策略
 
@@ -88,6 +88,7 @@ ACTIVITY_RSI_MAX_SIGNAL_AGE_MS=5000
 BUY_SLIPPAGE_BPS=5000
 BUY_MAX_PRICE_DEVIATION_PCT=15
 BUY_MAX_POOL_STATE_AGE_MS=500
+BUY_FORCE_FRESH_POOL_STATE=true
 COMPUTE_UNIT_LIMIT=250000
 
 ACTIVITY_RSI_STOP_LOSS_PCT=-10

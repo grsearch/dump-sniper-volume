@@ -67,4 +67,16 @@ function evaluateBuyExecutionGuard({
   };
 }
 
-module.exports = { evaluateBuyExecutionGuard };
+function calculateMinBaseAmountOut(quotedBaseAmount, effectiveSlippagePct) {
+  const quoted = BigInt(quotedBaseAmount.toString());
+  if (quoted <= 0n) throw new Error('quotedBaseAmount must be positive');
+
+  const slippage = Math.max(0, Number(effectiveSlippagePct) || 0);
+  // Four decimal places of percentage precision. 1% = 10,000 units.
+  const percentScale = 1_000_000n;
+  const slippageUnits = BigInt(Math.floor(slippage * 10_000));
+  const denominator = percentScale + slippageUnits;
+  return (quoted * percentScale + denominator - 1n) / denominator;
+}
+
+module.exports = { evaluateBuyExecutionGuard, calculateMinBaseAmountOut };

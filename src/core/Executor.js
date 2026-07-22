@@ -22,6 +22,7 @@ const {
   Connection,
   Keypair,
   PublicKey,
+  TransactionInstruction,
   VersionedTransaction,
   TransactionMessage,
   ComputeBudgetProgram,
@@ -41,7 +42,10 @@ const {
 
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
-const { evaluateBuyExecutionGuard } = require('../utils/buyExecutionGuard');
+const {
+  evaluateBuyExecutionGuard,
+  calculateMinBaseAmountOut,
+} = require('../utils/buyExecutionGuard');
 
 // AllenHark Slipstream SDK (lazy load)
 let SlipstreamClient = null;
@@ -100,17 +104,30 @@ class Executor {
     // SDK 在 LIVE 模式才需要
     this.pumpSdk = null;       // PumpAmmSdk（指令构造）
     this.quoteBuyInput = null; // Pure SDK quote calculator used by the price guard.
+    this.pumpAmmProgram = null;
+    this.pumpAmmProgramId = null;
     this.onlineSdk = null;     // OnlinePumpAmmSdk（state 拉取） — 走普通 RPC
     this.cacheSdk = null;      // v3.15 给 PoolStateCache 用，走普通 RPC（与 onlineSdk 实例分开避免共享 socket pool 限流）
     if (!this.dryRun) {
       try {
         const pumpModule = require('@pump-fun/pump-swap-sdk');
-        const { PumpAmmSdk, OnlinePumpAmmSdk, buyQuoteInput } = pumpModule;
-        if (!PumpAmmSdk || !OnlinePumpAmmSdk || !buyQuoteInput) {
-          throw new Error('SDK exports missing PumpAmmSdk / OnlinePumpAmmSdk / buyQuoteInput');
+        const {
+          PumpAmmSdk,
+          OnlinePumpAmmSdk,
+          buyQuoteInput,
+          OFFLINE_PUMP_AMM_PROGRAM,
+          PUMP_AMM_PROGRAM_ID,
+        } = pumpModule;
+        if (
+          !PumpAmmSdk || !OnlinePumpAmmSdk || !buyQuoteInput ||
+          !OFFLINE_PUMP_AMM_PROGRAM || !PUMP_AMM_PROGRAM_ID
+        ) {
+          throw new Error('PumpSwap SDK 1.19+ exports unavailable');
         }
         this.pumpSdk = new PumpAmmSdk();
         this.quoteBuyInput = buyQuoteInput;
+        this.pumpAmmProgram = OFFLINE_PUMP_AMM_PROGRAM;
+        this.pumpAmmProgramId = PUMP_AMM_PROGRAM_ID;
         // v3.15: onlineSdk 改用 this.rpc（普通节点），不再走 stakedRpc
         // 原因：stakedRpc（你的 donetta 专属端点）限流严格，70 token 刷新会打爆
         this.onlineSdk = new OnlinePumpAmmSdk(this.rpc);
@@ -118,6 +135,15 @@ class Executor {
         // 即使 onlineSdk 因 BUY 短时占用也不影响后台刷新
         this.cacheSdk = new OnlinePumpAmmSdk(this.rpc);
         console.log('[Executor] Pump AMM SDK loaded (onlineSdk + cacheSdk 都走普通 RPC，stakedRpc 仅用于 sendTx)');
+        console.log(
+          '[Executor] BUY execution: exact_quote_in + virtual reserves + fresh pool state',
+        );
+        if (process.env.BUY_MIN_EFFECTIVE_SLIPPAGE_PCT) {
+          console.warn(
+            '[Executor] BUY_MIN_EFFECTIVE_SLIPPAGE_PCT is deprecated and ignored; ' +
+            'minimum slippage could exceed the configured price cap',
+          );
+        }
       } catch (err) {
         console.error(`[Executor] failed to load @pump-fun/pump-swap-sdk: ${err.message}`);
       }
@@ -941,6 +967,7 @@ class Executor {
     const sizeSol = order.sizeSol || config.strategy.positionSizeSol;
     const baseDecimals = order.baseDecimals ?? 6;
     const buyDiagnostics = {
+      buyMode: 'exact_quote_in',
       configuredSlippagePct: config.strategy.buySlippageBps / 100,
       effectiveSlippagePct: null,
       maxPriceDeviationPct: config.strategy.buyMaxPriceDeviationPct,
@@ -948,6 +975,8 @@ class Executor {
       expectedPrice: null,
       maxPrice: null,
       maxQuoteSol: null,
+      minBaseAmountRaw: null,
+      virtualQuoteReserveSol: null,
       cacheAgeBeforeMs: null,
       cacheAgeAtBuildMs: null,
       stateSource: null,
@@ -1019,16 +1048,22 @@ class Executor {
         const cachedState = this.poolStateCache.get(order.poolAddress);
         const cacheAge = this.poolStateCache.getAge(order.poolAddress);
         const maxStateAgeMs = config.strategy.buyMaxPoolStateAgeMs;
+        const forceFresh = config.strategy.buyForceFreshPoolState;
         buyDiagnostics.cacheAgeBeforeMs = cacheAge;
         if (
+          !forceFresh &&
           cachedState &&
-          (maxStateAgeMs <= 0 || (cacheAge != null && cacheAge <= maxStateAgeMs))
+          cacheAge != null &&
+          cacheAge <= maxStateAgeMs
         ) {
           swapState = cachedState;
           stateSource = 'cache';
         } else {
-          swapState = await this.poolStateCache.refreshOne(order.poolAddress, maxStateAgeMs);
-          if (swapState) stateSource = cachedState ? 'cache_refresh' : 'cache_fill';
+          swapState = await this.poolStateCache.refreshOne(
+            order.poolAddress,
+            forceFresh ? 0 : maxStateAgeMs,
+          );
+          if (swapState) stateSource = cachedState ? 'rpc_refresh' : 'cache_fill';
         }
         if (swapState) {
           // v3.32: cache hit 时验证 pool 还在 Pump AMM（防迁移到 Raydium 后白烧 fee）
@@ -1174,12 +1209,18 @@ class Executor {
       if (typeof this.quoteBuyInput !== 'function') {
         throw new Error('SDK buyQuoteInput quote calculator unavailable');
       }
+      if (swapState.pool?.virtualQuoteReserves == null) {
+        throw new Error(
+          'pool virtualQuoteReserves missing; install @pump-fun/pump-swap-sdk >=1.19.0',
+        );
+      }
 
       const quoteArgs = {
         quote: sizeLamportsBN,
         slippage: 0,
         baseReserve: swapState.poolBaseAmount,
         quoteReserve: swapState.poolQuoteAmount,
+        virtualQuoteReserves: swapState.pool?.virtualQuoteReserves || new BN(0),
         globalConfig: swapState.globalConfig,
         baseMintAccount: swapState.baseMintAccount,
         baseMint: swapState.baseMint || swapState.pool?.baseMint,
@@ -1189,6 +1230,8 @@ class Executor {
       };
       const preview = this.quoteBuyInput(quoteArgs);
       const baseRaw = BigInt(preview.base.toString());
+      const virtualQuoteReserves = swapState.pool?.virtualQuoteReserves || new BN(0);
+      buyDiagnostics.virtualQuoteReserveSol = Number(virtualQuoteReserves.toString()) / 1e9;
       const actualBaseDecimals = Number(swapState.baseMintAccount?.decimals ?? baseDecimals);
       const tokenAmount = Number(baseRaw) / Math.pow(10, actualBaseDecimals);
       const expectedPrice = tokenAmount > 0 ? sizeSol / tokenAmount : 0;
@@ -1229,11 +1272,13 @@ class Executor {
         };
       }
 
-      const guardedQuote = this.quoteBuyInput({
-        ...quoteArgs,
-        slippage: guard.effectiveSlippagePct,
-      });
-      buyDiagnostics.maxQuoteSol = Number(guardedQuote.maxQuote.toString()) / 1e9;
+      const minBaseAmountRaw = calculateMinBaseAmountOut(
+        preview.base,
+        guard.effectiveSlippagePct,
+      );
+      const minBaseAmountBN = new BN(minBaseAmountRaw.toString());
+      buyDiagnostics.maxQuoteSol = sizeSol;
+      buyDiagnostics.minBaseAmountRaw = minBaseAmountRaw.toString();
       monitor.set(
         'Executor.lastBuyEffectiveSlippageBps',
         Math.round(guard.effectiveSlippagePct * 100),
@@ -1246,25 +1291,46 @@ class Executor {
           `deviation=${guard.deviationPct.toFixed(2)}% ` +
           `slippage=${buyDiagnostics.configuredSlippagePct.toFixed(2)}%->` +
           `${guard.effectiveSlippagePct.toFixed(2)}% ` +
-          `maxQuote=${buyDiagnostics.maxQuoteSol.toFixed(6)}SOL ` +
+          `budget=${buyDiagnostics.maxQuoteSol.toFixed(6)}SOL ` +
+          `minBase=${buyDiagnostics.minBaseAmountRaw} ` +
           `cache=${buyDiagnostics.cacheAgeBeforeMs ?? 'n/a'}ms->` +
           `${buyDiagnostics.cacheAgeAtBuildMs ?? 'n/a'}ms[${stateSource}] ` +
           `reserves=${swapState.poolBaseAmount.toString()}/` +
-          `${swapState.poolQuoteAmount.toString()}`,
+          `${swapState.poolQuoteAmount.toString()}+virtual:` +
+          `${virtualQuoteReserves.toString()}`,
       );
 
       const tB0 = Date.now();
-      const buyResult = await this.pumpSdk.buyQuoteInput(
+      const buyResult = await this.pumpSdk.buyInstructions(
         swapState,
+        preview.base,
         sizeLamportsBN,
-        guard.effectiveSlippagePct,
       );
-      const buildLatencyMs = Date.now() - tB0;
-
       const swapIxs = this._extractInstructions(buyResult);
       if (!swapIxs || swapIxs.length === 0) {
-        throw new Error('SDK buyQuoteInput returned no instructions');
+        throw new Error('SDK buyInstructions returned no instructions');
       }
+
+      const buyIxIndex = swapIxs.findIndex(
+        (ix) => ix.programId.equals(this.pumpAmmProgramId) && ix.data.length > 8,
+      );
+      if (buyIxIndex < 0) throw new Error('PumpSwap buy instruction not found');
+
+      const exactQuoteData = this.pumpAmmProgram.coder.instruction.encode(
+        'buyExactQuoteIn',
+        {
+          spendableQuoteIn: sizeLamportsBN,
+          minBaseAmountOut: minBaseAmountBN,
+          trackVolume: { 0: true },
+        },
+      );
+      const templateIx = swapIxs[buyIxIndex];
+      swapIxs[buyIxIndex] = new TransactionInstruction({
+        programId: templateIx.programId,
+        keys: templateIx.keys,
+        data: exactQuoteData,
+      });
+      const buildLatencyMs = Date.now() - tB0;
 
       const realPrice = tokenAmount > 0 ? sizeSol / tokenAmount : 0;
 

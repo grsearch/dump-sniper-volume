@@ -1,7 +1,10 @@
 'use strict';
 
 const assert = require('assert');
-const { evaluateBuyExecutionGuard } = require('../src/utils/buyExecutionGuard');
+const {
+  evaluateBuyExecutionGuard,
+  calculateMinBaseAmountOut,
+} = require('../src/utils/buyExecutionGuard');
 
 function close(actual, expected, tolerance = 1e-9) {
   assert(Math.abs(actual - expected) <= tolerance, `${actual} != ${expected}`);
@@ -50,5 +53,9 @@ function close(actual, expected, tolerance = 1e-9) {
   assert.strictEqual(result.allowed, true);
   close(result.effectiveSlippagePct, ((1.15 / 0.9) - 1) * 100);
 }
+
+assert.strictEqual(calculateMinBaseAmountOut(1_000n, 15), 870n);
+assert.strictEqual(calculateMinBaseAmountOut(1_000n, 2.1), 980n);
+assert.strictEqual(calculateMinBaseAmountOut(1_000n, 0), 1_000n);
 
 console.log('Buy execution price guard tests: PASS');
