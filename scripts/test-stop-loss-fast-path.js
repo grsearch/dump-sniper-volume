@@ -78,12 +78,17 @@ async function run() {
   assert.strictEqual(updated.state.poolBaseAmount.toString(), '123456789');
   assert.strictEqual(updated.state.poolQuoteAmount.toString(), '42250000000');
   assert.strictEqual(updated.marketSlot, 200);
+  assert.strictEqual(cache.getMarketSlot(poolAddress), 200);
+  assert.strictEqual(cache.getMarketMeta(poolAddress).source, 'chain_swap');
+  assert(cache.getMarketMeta(poolAddress).requestedAt > 0);
+  assert.strictEqual(cache.advanceMarketSlot(poolAddress, 205), true);
+  assert.strictEqual(cache.getMarketSlot(poolAddress), 205);
 
   assert.strictEqual(cache.applySwapBalances(poolAddress, {
     poolBaseAfter: 999,
     poolQuoteAfter: 999,
     baseDecimals: 6,
-    slot: 199,
+    slot: 204,
   }), false, 'an older slot must not overwrite the stop-loss quote state');
   assert.strictEqual(updated.state.poolQuoteAmount.toString(), '42250000000');
 

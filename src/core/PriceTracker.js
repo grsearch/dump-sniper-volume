@@ -55,19 +55,28 @@ class PriceTracker extends EventEmitter {
    * @param {number} ts
    * @param {string} poolAddress
    */
-  update(mint, price, ts = Date.now(), poolAddress = null) {
+  update(mint, price, ts = Date.now(), poolAddress = null, metadata = null) {
     if (!Number.isFinite(price) || price <= 0) {
       monitor.inc('PriceTracker.invalidPrice', 1, 'PriceTracker');
-      return;
+      return false;
     }
     monitor.beat('PriceTracker', 'update');
 
     const last = this.prices.get(mint);
+    const meta = metadata && typeof metadata === 'object' ? metadata : {};
+    const incomingSlot = Number(meta.slot) || 0;
+    const lastSlot = Number(last?.slot) || 0;
+
+    // Stream replay can deliver an older transaction after a newer one.
+    if (last && incomingSlot > 0 && lastSlot > 0 && incomingSlot < lastSlot) {
+      monitor.inc('PriceTracker.outOfOrderSlotRejected', 1, 'PriceTracker');
+      return false;
+    }
 
     // 第一笔：直接接受
     if (!last) {
-      this._commit(mint, price, ts, poolAddress);
-      return;
+      this._commit(mint, price, ts, poolAddress, meta);
+      return true;
     }
 
     // 计算跳变比率
@@ -94,8 +103,8 @@ class PriceTracker extends EventEmitter {
     if (!isSuspicious) {
       // 正常范围，直接接受
       this.suspicious.delete(mint); // 清空可疑缓存
-      this._commit(mint, price, ts, poolAddress);
-      return;
+      this._commit(mint, price, ts, poolAddress, meta);
+      return true;
     }
 
     // 可疑：进入缓存等待确认
@@ -112,7 +121,7 @@ class PriceTracker extends EventEmitter {
     const cutoff = ts - window;
     while (buf.length > 0 && buf[0].ts < cutoff) buf.shift();
 
-    buf.push({ price, ts, direction, poolAddress });
+    buf.push({ price, ts, direction, poolAddress, metadata: meta });
 
     // 检查是否满足"连续 N 次同方向"
     const minSamples = config.priceFilter.confirmMinSamples;
@@ -149,18 +158,48 @@ class PriceTracker extends EventEmitter {
     const latest = recent[recent.length - 1];
     monitor.inc('PriceTracker.suspiciousAccepted', 1, 'PriceTracker');
     this.suspicious.set(mint, []); // 清空
-    this._commit(mint, latest.price, latest.ts, latest.poolAddress);
+    this._commit(mint, latest.price, latest.ts, latest.poolAddress, latest.metadata);
     console.log(
       `[PriceTracker] ${mint.slice(0, 6)} suspicious jump confirmed (${recent.length} samples, ` +
-        `${direction}, last ratio=${(latest.price / last.price).toFixed(3)})`,
+      `${direction}, last ratio=${(latest.price / last.price).toFixed(3)})`,
     );
+    return true;
   }
 
-  _commit(mint, price, ts, poolAddress) {
+  _commit(mint, price, ts, poolAddress, metadata = null) {
     const prev = this.prices.get(mint);
-    this.prices.set(mint, { price, ts, poolAddress });
+    const meta = metadata && typeof metadata === 'object' ? metadata : {};
+    const incomingSlot = Number(meta.slot) || 0;
+    const slot = incomingSlot || Number(prev?.slot) || 0;
+    const signature = meta.signature || null;
+    const source = meta.source || 'price_tick';
+    const snapshotFetchedAt = Number(meta.snapshotFetchedAt) || 0;
+    const snapshotRequestedAt = Number(meta.snapshotRequestedAt) || 0;
+    const marketSource = meta.marketSource || null;
+    this.prices.set(mint, {
+      price,
+      ts,
+      poolAddress,
+      slot,
+      signature,
+      source,
+      snapshotFetchedAt,
+      snapshotRequestedAt,
+      marketSource,
+    });
     monitor.inc('PriceTracker.committed', 1, 'PriceTracker');
-    this.emit('update', { mint, price, ts, prev: prev?.price ?? null });
+    this.emit('update', {
+      mint,
+      price,
+      ts,
+      prev: prev?.price ?? null,
+      slot: incomingSlot,
+      signature,
+      source,
+      snapshotFetchedAt,
+      snapshotRequestedAt,
+      marketSource,
+    });
   }
 
   get(mint) {
@@ -174,10 +213,14 @@ class PriceTracker extends EventEmitter {
   /**
    * 强制设置（用于 BUY 后立即用真实成交价初始化 entryPrice）
    */
-  forceSet(mint, price, ts = Date.now()) {
-    if (!Number.isFinite(price) || price <= 0) return;
+  forceSet(mint, price, ts = Date.now(), metadata = null) {
+    if (!Number.isFinite(price) || price <= 0) return false;
     this.suspicious.delete(mint);
-    this._commit(mint, price, ts, null);
+    this._commit(mint, price, ts, null, {
+      ...(metadata && typeof metadata === 'object' ? metadata : {}),
+      source: metadata?.source || 'force_set',
+    });
+    return true;
   }
 }
 

@@ -92,6 +92,71 @@ function run() {
   }
 
   {
+    const manager = managerWith(position('p1', mint, { buySlot: 200 }));
+    manager._checkExit('p1', 0.8, {
+      slot: 199,
+      signature: 'older-signature',
+      source: 'chain_swap',
+    });
+    manager._checkExit('p1', 0.8, {
+      slot: 200,
+      signature: 'same-slot-signature',
+      source: 'chain_swap',
+    });
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'prices from before or within the BUY landing slot must not trigger a stop',
+    );
+    assert.strictEqual(manager.positions.get('p1').tickCount, undefined);
+    manager._checkExit('p1', 0.8, {
+      slot: 201,
+      signature: 'post-buy-signature',
+      source: 'chain_swap',
+    });
+    assert.strictEqual(manager._exitCalls[0].reason, 'FIXED_STOP_LOSS');
+  }
+
+  {
+    const manager = managerWith(position('p1', mint, {
+      buySlot: 200,
+      reconciledAt: 2_000,
+    }));
+    manager._checkExit('p1', 0.8, {
+      slot: 0,
+      source: 'pool_poll_rpc_cache',
+      marketSource: 'rpc',
+      snapshotRequestedAt: 1_999,
+      snapshotFetchedAt: 2_001,
+    });
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'an RPC request started before BUY reconciliation must not trigger a stop',
+    );
+    assert.strictEqual(manager.positions.get('p1').tickCount, undefined);
+  }
+
+  {
+    const manager = managerWith(position('p1', mint, {
+      buySlot: 200,
+      reconciledAt: 2_000,
+    }));
+    manager._checkExit('p1', 0.8, {
+      slot: 0,
+      source: 'pool_poll_rpc',
+      marketSource: 'rpc',
+      snapshotRequestedAt: 2_001,
+      snapshotFetchedAt: 2_002,
+    });
+    assert.strictEqual(
+      manager._exitCalls[0].reason,
+      'FIXED_STOP_LOSS',
+      'a fresh RPC pool quote must remain eligible for immediate stop loss',
+    );
+  }
+
+  {
     const manager = managerWith(position('p1', mint));
     manager._checkExit('p1', 1.2);
     assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+20% must arm trailing');

@@ -232,6 +232,30 @@ class PoolStateCache {
     return entry ? Date.now() - entry.fetchedAt : null;
   }
 
+  getMarketSlot(poolAddress) {
+    const entry = this.cache.get(poolAddress);
+    return entry ? Number(entry.marketSlot) || 0 : 0;
+  }
+
+  getMarketMeta(poolAddress) {
+    const entry = this.cache.get(poolAddress);
+    if (!entry) return null;
+    return {
+      slot: Number(entry.marketSlot) || 0,
+      fetchedAt: Number(entry.fetchedAt) || 0,
+      requestedAt: Number(entry.requestedAt) || 0,
+      source: entry.marketSource || 'unknown',
+    };
+  }
+
+  advanceMarketSlot(poolAddress, slot) {
+    const numericSlot = Number(slot) || 0;
+    const entry = this.cache.get(poolAddress);
+    if (!entry || numericSlot <= 0) return false;
+    entry.marketSlot = Math.max(Number(entry.marketSlot) || 0, numericSlot);
+    return true;
+  }
+
   /**
    * Apply the post-swap vault balances already present in the parsed transaction.
    * This keeps an emergency SELL quote on the same pool state as the price tick
@@ -266,7 +290,10 @@ class PoolStateCache {
 
     entry.state.poolBaseAmount = new BN(String(baseRaw));
     entry.state.poolQuoteAmount = new BN(String(quoteRaw));
-    entry.fetchedAt = Date.now();
+    const now = Date.now();
+    entry.fetchedAt = now;
+    entry.requestedAt = now;
+    entry.marketSource = 'chain_swap';
     if (numericSlot > 0) entry.marketSlot = numericSlot;
     monitor.inc('PoolStateCache.swapBalanceApplied', 1, 'PoolStateCache');
     return true;
@@ -284,9 +311,16 @@ class PoolStateCache {
       : 500;
     if (cached && Date.now() - cached.fetchedAt <= allowedAgeMs) return cached.state;
     try {
+      const requestedAt = Date.now();
       const state = await this._fetchPoolState(poolAddress);
       if (state) {
-        this.cache.set(poolAddress, { state, fetchedAt: Date.now() });
+        this.cache.set(poolAddress, {
+          state,
+          fetchedAt: Date.now(),
+          requestedAt,
+          marketSlot: Number(cached?.marketSlot) || 0,
+          marketSource: 'rpc',
+        });
         monitor.inc('PoolStateCache.refreshOneOk', 1, 'PoolStateCache');
       }
       return state || null;
@@ -608,9 +642,17 @@ class PoolStateCache {
       let failCount = 0;
       for (const t of slice) {
         try {
+          const requestedAt = Date.now();
           const state = await this._fetchPoolState(t.poolAddress);
           if (state) {
-            this.cache.set(t.poolAddress, { state, fetchedAt: Date.now() });
+            const previous = this.cache.get(t.poolAddress);
+            this.cache.set(t.poolAddress, {
+              state,
+              fetchedAt: Date.now(),
+              requestedAt,
+              marketSlot: Number(previous?.marketSlot) || 0,
+              marketSource: 'rpc',
+            });
             okCount++;
           } else {
             failCount++;

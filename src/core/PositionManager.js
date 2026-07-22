@@ -102,7 +102,17 @@ class PositionManager extends EventEmitter {
     this._priceSampleLastTs = new Map(); // mint → lastSampleTs
     this._priceSampleIntervalMs = parseInt(process.env.PRICE_SAMPLE_INTERVAL_MS || '10000', 10);
 
-    this.priceTracker.on('update', ({ mint, price, ts }) => {
+    this.priceTracker.on('update', ({
+      mint,
+      price,
+      ts,
+      slot,
+      signature,
+      source,
+      snapshotFetchedAt,
+      snapshotRequestedAt,
+      marketSource,
+    }) => {
       const pids = this.byMint.get(mint);
 
       // 价格采样：持仓币才采样，按间隔写入DB
@@ -123,7 +133,12 @@ class PositionManager extends EventEmitter {
         this._checkExit(pid, price, {
           marketTs: Number(ts) || null,
           receivedAt,
-          source: 'price_tick',
+          slot: Number(slot) || 0,
+          signature: signature || null,
+          source: source || 'price_tick',
+          snapshotFetchedAt: Number(snapshotFetchedAt) || 0,
+          snapshotRequestedAt: Number(snapshotRequestedAt) || 0,
+          marketSource: marketSource || null,
         });
       }
     });
@@ -1222,6 +1237,13 @@ class PositionManager extends EventEmitter {
       );
     }
 
+    if (pos.buySlot > 0 && this.executor?.poolStateCache) {
+      const tokenInfo = this.tokenRegistry?.getToken(mint);
+      if (tokenInfo?.pool_address) {
+        this.executor.poolStateCache.advanceMarketSlot?.(tokenInfo.pool_address, pos.buySlot);
+      }
+    }
+
     // 同步到 DB
     this.tradeLogger.updatePositionEntry(positionId, {
       entrySol: pos.entrySol,
@@ -1390,11 +1412,22 @@ class PositionManager extends EventEmitter {
 
         // 优先用 PoolStateCache 的实时价格
         let price = 0;
+        let priceSlot = 0;
+        let priceSource = 'position_tick';
+        let snapshotFetchedAt = 0;
+        let snapshotRequestedAt = 0;
+        let marketSource = null;
         if (this.executor?.poolStateCache && this.tokenRegistry) {
           const tokenInfo = this.tokenRegistry.getToken(pos.mint);
           if (tokenInfo?.pool_address) {
             const poolState = this.executor.poolStateCache.get(tokenInfo.pool_address);
             if (poolState) {
+              const marketMeta = this.executor.poolStateCache.getMarketMeta?.(tokenInfo.pool_address);
+              snapshotFetchedAt = Number(marketMeta?.fetchedAt) || 0;
+              snapshotRequestedAt = Number(marketMeta?.requestedAt) || 0;
+              marketSource = marketMeta?.source || null;
+              priceSlot = marketSource === 'rpc' ? 0 : Number(marketMeta?.slot) || 0;
+              priceSource = marketSource === 'rpc' ? 'pool_cache_rpc_tick' : 'pool_cache_tick';
               const baseAmt = Number(poolState.poolBaseAmount?.toString() || 0);
               const quoteAmt = Number(poolState.poolQuoteAmount?.toString() || 0);
               if (baseAmt > 0 && quoteAmt > 0) {
@@ -1409,17 +1442,35 @@ class PositionManager extends EventEmitter {
 
         // fallback: 用 priceTracker 的当前价格
         if (!price || !Number.isFinite(price) || price <= 0) {
-          price = this.priceTracker?.getPrice(pos.mint) || 0;
+          const tracked = this.priceTracker?.get(pos.mint);
+          price = tracked?.price || 0;
+          priceSlot = Number(tracked?.slot) || 0;
+          priceSource = tracked?.source || 'price_tracker_fallback';
+          snapshotFetchedAt = Number(tracked?.snapshotFetchedAt) || 0;
+          snapshotRequestedAt = Number(tracked?.snapshotRequestedAt) || 0;
+          marketSource = tracked?.marketSource || null;
         }
 
         if (price > 0 && Number.isFinite(price)) {
           // 同步 priceTracker（让 dashboard 显示正确价格）
           const trackerPrice = this.priceTracker?.getPrice(pos.mint) || 0;
           if (Math.abs(price - trackerPrice) / (trackerPrice || price) > 0.005) {
-            this.priceTracker?.forceSet(pos.mint, price);
+            this.priceTracker?.forceSet(pos.mint, price, Date.now(), {
+              slot: priceSlot,
+              source: priceSource,
+              snapshotFetchedAt,
+              snapshotRequestedAt,
+              marketSource,
+            });
           }
           // 主动检查退出条件
-          this._checkExit(pos.positionId, price);
+          this._checkExit(pos.positionId, price, {
+            slot: priceSlot,
+            source: priceSource,
+            snapshotFetchedAt,
+            snapshotRequestedAt,
+            marketSource,
+          });
         }
       }
     }
@@ -1725,6 +1776,47 @@ class PositionManager extends EventEmitter {
 
     // v3.26: stuck 仓位不再触发退出逻辑（pool已死，卖出会循环失败）
     if (pos.status === 'stuck') return;
+
+    const priceSlot = Number(context?.slot) || 0;
+    const buySlot = Number(pos.buySlot) || 0;
+    const snapshotFetchedAt = Number(context?.snapshotFetchedAt) || 0;
+    const snapshotRequestedAt = Number(context?.snapshotRequestedAt) || 0;
+    const snapshotStartedAt = snapshotRequestedAt || snapshotFetchedAt;
+    // Reconciliation can finish after queued pre-BUY prices arrive. Only
+    // post-BUY chain slots or RPC requests may drive an exit decision.
+    if (
+      !pos.dryRun &&
+      context?.marketSource === 'rpc' &&
+      snapshotStartedAt > 0 &&
+      Number(pos.reconciledAt) > 0 &&
+      snapshotStartedAt < Number(pos.reconciledAt)
+    ) {
+      monitor.inc('PositionManager.preBuyRpcSnapshotRejected', 1, 'PositionManager');
+      const skipKey = `${snapshotStartedAt}:${context?.source || ''}`;
+      if (pos._lastPreBuyRpcSkip !== skipKey) {
+        pos._lastPreBuyRpcSkip = skipKey;
+        console.log(
+          `[PositionManager] PRE_BUY_RPC_SNAPSHOT_IGNORED ${pos.symbol || pos.mint.slice(0, 6)} ` +
+            `snapshot_started_at=${snapshotStartedAt} < reconciled_at=${pos.reconciledAt} ` +
+            `source=${context?.source || 'unknown'}`,
+        );
+      }
+      return;
+    }
+    if (!pos.dryRun && priceSlot > 0 && buySlot > 0 && priceSlot <= buySlot) {
+      monitor.inc('PositionManager.preBuyPriceSlotRejected', 1, 'PositionManager');
+      const skipKey = `${priceSlot}:${context?.signature || ''}`;
+      if (pos._lastPreBuyPriceSkip !== skipKey) {
+        pos._lastPreBuyPriceSkip = skipKey;
+        console.log(
+          `[PositionManager] PRE_BUY_PRICE_IGNORED ${pos.symbol || pos.mint.slice(0, 6)} ` +
+            `price_slot=${priceSlot} <= buy_slot=${buySlot} ` +
+            `source=${context?.source || 'unknown'} ` +
+            `sig=${context?.signature ? context.signature.slice(0, 8) : 'n/a'}`,
+        );
+      }
+      return;
+    }
 
     // v3.20: 获取此仓位的买入前波动率
     const preVol5m = pos.preVol5m;
@@ -3020,28 +3112,54 @@ class PositionManager extends EventEmitter {
             //   保护1: cache miss → fallback 到现查 RPC（保住对未进 hotMints 持仓的兜底）
             //   保护2: 缓存太旧(>1s) → fallback 到现查 RPC（避免过期数据影响 trailing）
             let price = null;
+            let priceSlot = 0;
+            let priceSource = 'pool_poll_rpc';
+            let snapshotFetchedAt = 0;
+            let snapshotRequestedAt = 0;
+            let marketSource = null;
             const cache = this.executor?.poolStateCache;
             if (cache) {
               const cachedState = cache.get(q.poolAddress);
               const cacheAge = cache.getAge(q.poolAddress);
               if (cachedState && cacheAge !== null && cacheAge <= MAX_CACHE_AGE_MS) {
                 price = this._priceFromState(cachedState, q.decimals);
+                const marketMeta = cache.getMarketMeta?.(q.poolAddress);
+                snapshotFetchedAt = Number(marketMeta?.fetchedAt) || 0;
+                snapshotRequestedAt = Number(marketMeta?.requestedAt) || 0;
+                marketSource = marketMeta?.source || null;
+                priceSlot = marketSource === 'rpc' ? 0 : Number(marketMeta?.slot) || 0;
+                priceSource = marketSource === 'rpc' ? 'pool_poll_rpc_cache' : 'pool_poll_cache';
                 monitor.inc('PositionManager.poolPollCacheHit', 1, 'PositionManager');
               }
             }
             // fallback: cache miss 或缓存太旧 → 走 RPC
             if (!price) {
+              snapshotRequestedAt = Date.now();
               price = await this._fetchPoolMidPrice(q.poolAddress, q.decimals);
+              snapshotFetchedAt = Date.now();
+              marketSource = 'rpc';
               monitor.inc('PositionManager.poolPollRpcFallback', 1, 'PositionManager');
             }
             if (price && price > 0) {
-              this.priceTracker.update(q.mint, price, Date.now(), q.poolAddress);
+              this.priceTracker.update(q.mint, price, Date.now(), q.poolAddress, {
+                slot: priceSlot,
+                source: priceSource,
+                snapshotFetchedAt,
+                snapshotRequestedAt,
+                marketSource,
+              });
               monitor.inc('PositionManager.poolPollOk', 1, 'PositionManager');
               // 直接检查退出，不等 priceTracker 事件 — 减少延迟
               const pids = this.byMint.get(q.mint);
               if (pids) {
                 for (const pid of pids) {
-                  this._checkExit(pid, price);
+                  this._checkExit(pid, price, {
+                    slot: priceSlot,
+                    source: priceSource,
+                    snapshotFetchedAt,
+                    snapshotRequestedAt,
+                    marketSource,
+                  });
                 }
               }
             }

@@ -421,7 +421,10 @@ async function main() {
 
       // 喂价给 PriceTracker
       if (info.priceAfter > 0) {
-        priceTracker.update(info.mint, info.priceAfter, info.ts, info.poolAddress);
+        priceTracker.update(info.mint, info.priceAfter, info.ts, info.poolAddress, {
+          slot: info.slot,
+          source: 'vault_watcher',
+        });
       }
 
       // 预热 PoolStateCache
@@ -605,6 +608,7 @@ async function main() {
     price,
     ts,
     slot,
+    signature,
     poolAddress,
     side,
     solVolume,
@@ -612,6 +616,14 @@ async function main() {
     poolBaseAfter,
     baseDecimals,
   }) => {
+    const cachedMarketSlot = executor.poolStateCache && poolAddress
+      ? executor.poolStateCache.getMarketSlot?.(poolAddress) || 0
+      : 0;
+    if (slot > 0 && cachedMarketSlot > slot) {
+      monitor.inc('main.outOfOrderPriceTickRejected', 1, 'main');
+      return;
+    }
+
     // The parsed transaction already contains post-swap vault balances. Apply
     // them before PriceTracker emits the stop-loss check, so the emergency SELL
     // is quoted against the state that caused the threshold crossing.
@@ -623,7 +635,11 @@ async function main() {
         slot,
       });
     }
-    priceTracker.update(mint, price, ts, poolAddress);
+    priceTracker.update(mint, price, ts, poolAddress, {
+      slot,
+      signature,
+      source: 'chain_swap',
+    });
     // v3.17.17: 喂 RSI - 用 feedTrade 带上 volume,RSI 能做 volume-weighted aggregation
     if (rsiCalculator) {
       // v3.17.38-fix: poolQuoteAfter=0 时用 tokenRegistry.liquidity 推算
@@ -794,7 +810,9 @@ async function main() {
 
     // 立即同步 PriceTracker，用真实成交价做 entry baseline
     // （避免下一笔 LaserStream tx 推一个旧价格触发假 TP）
-    priceTracker.forceSet(order.mint, buyResult.price);
+    priceTracker.forceSet(order.mint, buyResult.price, Date.now(), {
+      source: 'buy_estimate',
+    });
 
     if (buyResult.signature) signalEngine.registerOurSignature(buyResult.signature);
   });
