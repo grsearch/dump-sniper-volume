@@ -69,7 +69,9 @@ class SignalEngine extends EventEmitter {
     const mint = position?.mint;
     if (!mint) return 0;
 
-    const isFixedStopLoss = position.exitReason === 'FIXED_STOP_LOSS';
+    const exitReason = String(position.exitReason || '');
+    const isFixedStopLoss = exitReason === 'FIXED_STOP_LOSS' ||
+      exitReason.startsWith('FIXED_STOP_LOSS_');
     const durationMs = isFixedStopLoss
       ? Math.max(Number(rebuyCooldownMs) || 0, Number(stopLossRebuyCooldownMs) || 0)
       : Number(rebuyCooldownMs) || 0;

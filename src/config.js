@@ -84,7 +84,7 @@ const config = {
 
     // 紧急止损（防止灾难性下跌）
     // 设置为 0 可禁用紧急止损（恢复"硬扛"行为）
-    fixedStopLossPct: parseFloat(process.env.ACTIVITY_RSI_STOP_LOSS_PCT || '-10'),
+    fixedStopLossPct: parseFloat(process.env.ACTIVITY_RSI_STOP_LOSS_PCT || '-20'),
     emergencyStopLossPct: parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '0'),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值

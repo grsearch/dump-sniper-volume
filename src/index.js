@@ -40,7 +40,9 @@ async function main() {
       `SOL=$${config.activityRsi.solPriceUsd})`,
   );
   console.log(
-    `Exit only: stop ${config.strategy.fixedStopLossPct}%; ` +
+    `Exit only: stop ${config.strategy.fixedStopLossPct < 0
+      ? `${config.strategy.fixedStopLossPct}%`
+      : 'disabled'}; ` +
       `RSI(${config.activityRsi.rsi5sPeriod},5s) crosses below ` +
       `${config.strategy.rsi5sExitDownCross} or >${config.strategy.rsi5sExitOverbought}; ` +
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +

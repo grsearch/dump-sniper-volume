@@ -97,6 +97,16 @@ async function run() {
   );
   assert.strictEqual(profitExit._exitCooldowns.size, 0);
 
+  const retriedStopExit = makeEngine();
+  const retriedCooldownUntil = retriedStopExit.setPositionExitCooldown(
+    { mint, exitReason: 'FIXED_STOP_LOSS_retry_2' },
+    { rebuyCooldownMs: 0, stopLossRebuyCooldownMs: 120_000 },
+  );
+  assert(
+    retriedCooldownUntil >= Date.now() + 119_000,
+    'a confirmed fixed-stop retry must still start the stop-loss cooldown',
+  );
+
   const lowVolume = makeEngine();
   let lowVolumeOrder = null;
   lowVolume.on('buyOrder', (value) => { lowVolumeOrder = value; });

@@ -30,7 +30,7 @@ RSI 使用每根 5 秒 K 线的最新收盘价和 Wilder 平滑计算，与 Trad
 
 以下任一条件成立即卖出：
 
-- 相对真实成交入场价跌至 **-10%**，立即固定止损。
+- 相对真实成交入场价跌至 **-20%**，立即固定止损；确认卖出后该币进入 **120 秒**冷静期。
 - 实时 5 秒 RSI(7) 从 **>=70 下穿到 <70**。
 - 实时 5 秒 RSI(7) **>80**。
 - 相对真实成交入场价上涨 **20%** 后激活移动止盈；随后从最新最高价回撤
@@ -96,7 +96,7 @@ BUY_MAX_POOL_STATE_AGE_MS=500
 BUY_FORCE_FRESH_POOL_STATE=true
 COMPUTE_UNIT_LIMIT=250000
 
-ACTIVITY_RSI_STOP_LOSS_PCT=-10
+ACTIVITY_RSI_STOP_LOSS_PCT=-20
 STOP_LOSS_REBUY_COOLDOWN_MS=120000
 ACTIVITY_RSI_EXIT_DOWN_CROSS=70
 ACTIVITY_RSI_EXIT_OVERBOUGHT=80
@@ -120,7 +120,7 @@ SWAP_EVENT_LOG_ENABLED=true
 
 ~~~text
 Entry: ACTIVITY_RSI (1m volume >$10000, RSI(7,5s) crosses above 30, SOL=$75.5)
-Exit only: stop -10%; RSI(7,5s) crosses below 70 or >80; trailing +20% / drawdown 10%
+Exit only: stop -20%; RSI(7,5s) crosses below 70 or >80; trailing +20% / drawdown 10%
 Executor: ... BUY chain ceiling=50%, signal-price cap=+15%, pool-state max age=500ms, CU=250000
 Legacy entries/exits: disabled
 Watchdog: ... migrationAge=25min
