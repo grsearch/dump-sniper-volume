@@ -8,11 +8,21 @@ const monitor = getMonitor();
 monitor.registerModule('SignalEngine', { staleMs: 3600_000, label: 'Signal Engine' });
 
 class SignalEngine extends EventEmitter {
-  constructor({ tradeLogger, positionManager, tickStream = null }) {
+  constructor({
+    tradeLogger,
+    positionManager,
+    tickStream = null,
+    tokenRegistry = null,
+    entryMarketProvider = null,
+  }) {
     super();
     this.tradeLogger = tradeLogger;
     this.positionManager = positionManager;
     this.tickStream = tickStream;
+    this.tokenRegistry = tokenRegistry;
+    this.entryMarketProvider = typeof entryMarketProvider === 'function'
+      ? entryMarketProvider
+      : null;
 
     this.lastTriggerTs = new Map();
     this.ourSignatures = new Set();
@@ -43,6 +53,29 @@ class SignalEngine extends EventEmitter {
 
   markBuyDone(mint) {
     this.inflightBuys.delete(mint);
+  }
+
+  setEntryMarketProvider(provider) {
+    this.entryMarketProvider = typeof provider === 'function' ? provider : null;
+  }
+
+  _resolveEntryFdvUsd(mint) {
+    try {
+      const realtime = this.entryMarketProvider?.(mint);
+      const realtimeFdv = Number(realtime?.fdvUsd ?? realtime?.fdv);
+      if (Number.isFinite(realtimeFdv) && realtimeFdv > 0) {
+        return { fdvUsd: realtimeFdv, source: 'chain_realtime' };
+      }
+    } catch (err) {
+      monitor.recordError('SignalEngine', err, { phase: 'entry_fdv_realtime', mint });
+    }
+
+    const token = this.tokenRegistry?.getToken?.(mint);
+    const registryFdv = Number(token?.fdv ?? token?.market_cap);
+    if (Number.isFinite(registryFdv) && registryFdv > 0) {
+      return { fdvUsd: registryFdv, source: token?.market_source || 'registry' };
+    }
+    return { fdvUsd: null, source: 'unavailable' };
   }
 
   setExecutionCooldown(mint, durationMs, reason = 'execution') {
@@ -178,9 +211,27 @@ class SignalEngine extends EventEmitter {
       return;
     }
 
+    const minEntryFdvUsd = Number(config.activityRsi.minFdvUsd) || 0;
+    const entryMarket = this._resolveEntryFdvUsd(mint);
+    if (minEntryFdvUsd > 0 && !(entryMarket.fdvUsd > 0)) {
+      monitor.inc('SignalEngine.rejectedEntryFdvUnavailable', 1, 'SignalEngine');
+      this._logReject(signal, 'ENTRY_FDV_UNAVAILABLE: no realtime or cached FDV');
+      return;
+    }
+    if (minEntryFdvUsd > 0 && entryMarket.fdvUsd < minEntryFdvUsd) {
+      monitor.inc('SignalEngine.rejectedEntryFdvLow', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        `ENTRY_FDV_LOW: $${this._numberLabel(entryMarket.fdvUsd, 0)} < ` +
+          `$${minEntryFdvUsd} source=${entryMarket.source}`,
+      );
+      return;
+    }
+
     const reason =
       `activity_rsi: volume1m=$${volumeUsd.toFixed(0)} ` +
       `(${Number(activity.volumeSol || 0).toFixed(2)}SOL) ` +
+      `fdv=$${this._numberLabel(entryMarket.fdvUsd, 0)} ` +
       `rsi5s=${previousRsi.toFixed(1)}->${currentRsi.toFixed(1)} ` +
       `cross>${config.activityRsi.rsiBuyCross}`;
 
@@ -190,6 +241,8 @@ class SignalEngine extends EventEmitter {
     this.emit('buyOrder', {
       ...signal,
       reason,
+      entryFdvUsd: entryMarket.fdvUsd,
+      entryFdvSource: entryMarket.source,
       sizeSol: config.strategy.positionSizeSol,
       _signalReceivedAt: signalReceivedAt,
     });

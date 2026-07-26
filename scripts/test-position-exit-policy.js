@@ -1,10 +1,8 @@
 'use strict';
 
-process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT = '20';
-process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT = '10';
+process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT = '10';
+process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT = '5';
 process.env.ACTIVITY_RSI_STOP_LOSS_PCT = '-20';
-process.env.ACTIVITY_RSI_EXIT_DOWN_CROSS = '70';
-process.env.ACTIVITY_RSI_EXIT_OVERBOUGHT = '80';
 
 const assert = require('assert');
 const Module = require('module');
@@ -78,10 +76,9 @@ function run() {
   assert.strictEqual(config.strategy.fixedStopLossPct, -20);
   assert.strictEqual(config.strategy.maxHoldMs, 0);
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
-  assert.strictEqual(config.strategy.trailingActivatePct, 20);
-  assert.strictEqual(config.strategy.trailingDrawdownPct, 10);
-  assert.strictEqual(config.strategy.rsi5sExitDownCross, 70);
-  assert.strictEqual(config.strategy.rsi5sExitOverbought, 80);
+  assert.strictEqual(config.strategy.trailingActivatePct, 10);
+  assert.strictEqual(config.strategy.trailingDrawdownPct, 5);
+  assert.strictEqual(config.strategy.rsi5sExitEnabled, false);
 
   {
     const manager = managerWith();
@@ -168,10 +165,10 @@ function run() {
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 1.2);
-    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+20% must arm trailing');
+    manager._checkExit('p1', 1.1);
+    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+10% must arm trailing');
     assert.strictEqual(manager._exitCalls.length, 0);
-    manager._checkExit('p1', 1.08);
+    manager._checkExit('p1', 1.045);
     assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
   }
 
@@ -187,38 +184,13 @@ function run() {
     const manager = managerWith(position('p1', mint));
     manager.handleRsi5sForExit(mint, 1.1, rsi(69));
     manager.handleRsi5sForExit(mint, 1.1, rsi(71));
-    assert.strictEqual(manager._exitCalls.length, 0, 'upward cross of 70 must not sell');
     manager.handleRsi5sForExit(mint, 1.1, rsi(69));
-    assert.strictEqual(manager._exitCalls[0].reason, 'RSI_5S_DOWN_CROSS_70');
-  }
-
-  {
-    const manager = managerWith(position('p1', mint));
     manager.handleRsi5sForExit(mint, 1.1, rsi(80));
-    assert.strictEqual(manager._exitCalls.length, 0, 'RSI exactly 80 must not sell');
     manager.handleRsi5sForExit(mint, 1.1, rsi(80.1));
-    assert.strictEqual(manager._exitCalls[0].reason, 'RSI_5S_OVERBOUGHT');
-  }
-
-  {
-    const manager = managerWith(position('p1', mint, {
-      trailingArmed: true,
-      highWaterMark: 1.3,
-      _armedHwm: 1.3,
-    }));
-    manager._pendingRsi5sExit.set(mint, 'RSI_5S_OVERBOUGHT');
-    manager.handleRsi5sForExit(mint, 1.2, rsi(71));
-    manager.handleRsi5sForExit(mint, 1.2, rsi(69));
-    manager.handleRsi5sForExit(mint, 1.2, rsi(80.1));
     assert.strictEqual(
       manager._exitCalls.length,
       0,
-      'armed trailing must suppress both RSI exit rules',
-    );
-    assert.strictEqual(
-      manager._pendingRsi5sExit.has(mint),
-      false,
-      'arming trailing must clear a pending RSI exit',
+      '5-second RSI down-cross and overbought exits must both remain disabled',
     );
   }
 

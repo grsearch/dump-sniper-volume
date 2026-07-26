@@ -382,6 +382,11 @@ assert.strictEqual(
   assert.strictEqual(healthyRealtime.removed, false);
   assert(Math.abs(healthyRealtime.fdvUsd - 22_650) < 1e-9);
   assert(Math.abs(healthyRealtime.liquidityUsd - 3_020) < 1e-9);
+  assert.strictEqual(
+    realtimeWatchdog.getLatestRealtimeMarket(mint).fdvUsd,
+    healthyRealtime.fdvUsd,
+    'the latest chain FDV must be available in memory without an API call',
+  );
   assert.strictEqual(realtimeToken.market_source, 'chain_pool_realtime');
 
   const lowLiquidityRealtime = realtimeWatchdog.handleRealtimePoolTick({
@@ -393,6 +398,11 @@ assert.strictEqual(
   });
   assert.strictEqual(lowLiquidityRealtime.removed, true);
   assert.strictEqual(realtimeRemoved, true, 'LP below $3,000 must remove on the same tick');
+  assert.strictEqual(
+    realtimeWatchdog.getLatestRealtimeMarket(mint),
+    null,
+    'removing a token must clear its in-memory entry market snapshot',
+  );
 
   let heldRealtimeRemoved = false;
   const heldRealtimeToken = { ...realtimeToken, is_active: 1 };

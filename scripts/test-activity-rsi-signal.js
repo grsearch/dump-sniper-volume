@@ -19,6 +19,10 @@ function makeEngine(openForMint = 0) {
   engine.ourSignatures = new Set();
   engine.inflightBuys = new Set();
   engine._exitCooldowns = new Map();
+  engine.tokenRegistry = {
+    getToken: () => ({ fdv: 60_000, market_source: 'test_registry' }),
+  };
+  engine.entryMarketProvider = null;
   engine.positionManager = {
     openPositionCount: () => openForMint,
     openPositionCountByMint: () => openForMint,
@@ -56,7 +60,9 @@ async function run() {
   await engine.handleActivityRsiSignal(signal(mint));
   await new Promise((resolve) => setImmediate(resolve));
   assert(order, 'valid activity/RSI signal must emit a buy order');
+  assert.strictEqual(order.sizeSol, 0.2, 'each buy order must use 0.2 SOL');
   assert(order.reason.includes('volume1m=$10500'));
+  assert(order.reason.includes('fdv=$60000'));
   assert(order.reason.includes('rsi5s=29.0->31.0'));
   assert.strictEqual(engine.loggedSignals[0].kind, 'ACTIVITY_RSI');
 
@@ -118,6 +124,35 @@ async function run() {
   noCross.on('buyOrder', (value) => { noCrossOrder = value; });
   await noCross.handleActivityRsiSignal(signal(mint, { previousRsi5s: 31, currentRsi5s: 32 }));
   assert.strictEqual(noCrossOrder, null, 'RSI already above 30 is not a fresh cross');
+
+  const lowEntryFdv = makeEngine();
+  lowEntryFdv.entryMarketProvider = () => ({ fdvUsd: 49_999 });
+  let lowEntryFdvOrder = null;
+  lowEntryFdv.on('buyOrder', (value) => { lowEntryFdvOrder = value; });
+  await lowEntryFdv.handleActivityRsiSignal(signal(mint));
+  assert.strictEqual(lowEntryFdvOrder, null, 'entry FDV below $50,000 must be rejected');
+  assert(
+    lowEntryFdv.loggedSignals[0].rejectReason.includes('ENTRY_FDV_LOW'),
+    'the rejection must identify the entry-only FDV filter',
+  );
+
+  const exactEntryFdv = makeEngine();
+  exactEntryFdv.entryMarketProvider = () => ({ fdvUsd: 50_000 });
+  let exactEntryFdvOrder = null;
+  exactEntryFdv.on('buyOrder', (value) => { exactEntryFdvOrder = value; });
+  await exactEntryFdv.handleActivityRsiSignal(signal(mint));
+  assert(exactEntryFdvOrder, 'entry FDV exactly $50,000 must be accepted');
+
+  const missingEntryFdv = makeEngine();
+  missingEntryFdv.tokenRegistry = { getToken: () => null };
+  let missingEntryFdvOrder = null;
+  missingEntryFdv.on('buyOrder', (value) => { missingEntryFdvOrder = value; });
+  await missingEntryFdv.handleActivityRsiSignal(signal(mint));
+  assert.strictEqual(missingEntryFdvOrder, null, 'missing entry FDV must fail closed');
+  assert(
+    missingEntryFdv.loggedSignals[0].rejectReason.includes('ENTRY_FDV_UNAVAILABLE'),
+    'missing market data must identify the entry FDV source failure',
+  );
 
   console.log('Activity/RSI signal engine tests: PASS');
   process.exit(0);

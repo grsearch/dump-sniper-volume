@@ -35,7 +35,8 @@ async function main() {
   console.log(`Mode: ${config.DRY_RUN ? 'DRY_RUN' : '⚠️  LIVE TRADING ⚠️'}`);
   console.log(`Position: ${config.strategy.positionSizeSol} SOL`);
   console.log(
-    `Entry: ACTIVITY_RSI (1m volume >$${config.activityRsi.minVolumeUsd}, ` +
+    `Entry: ACTIVITY_RSI (FDV >=$${config.activityRsi.minFdvUsd}, ` +
+      `1m volume >$${config.activityRsi.minVolumeUsd}, ` +
       `RSI(${config.activityRsi.rsi5sPeriod},5s) crosses above ${config.activityRsi.rsiBuyCross}, ` +
       `SOL=$${config.activityRsi.solPriceUsd})`,
   );
@@ -43,10 +44,9 @@ async function main() {
     `Exit only: stop ${config.strategy.fixedStopLossPct < 0
       ? `${config.strategy.fixedStopLossPct}%`
       : 'disabled'}; ` +
-      `RSI(${config.activityRsi.rsi5sPeriod},5s) crosses below ` +
-      `${config.strategy.rsi5sExitDownCross} or >${config.strategy.rsi5sExitOverbought}; ` +
+      'RSI exit disabled; ' +
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
-      `(trailing overrides RSI after arming)`,
+      '(plus token-age exit)',
   );
   console.log('Legacy entries/exits: disabled');
   console.log(`Rebuy cooldown: ${config.strategy.rebuyCooldownMs > 0 ? config.strategy.rebuyCooldownMs / 60_000 + 'min after close' : 'disabled'}`);
@@ -225,6 +225,7 @@ async function main() {
   const activityRsiTracker = new ActivityRsiTracker({ rsiCalculator });
   console.log(
     `[main] ActivityRsi ${activityRsiTracker.enabled ? 'enabled' : 'disabled'}: ` +
+      `entryFDV>=$${config.activityRsi.minFdvUsd} ` +
       `volume1m>$${activityRsiTracker.minVolumeUsd} ` +
       `RSI(${activityRsiTracker.rsi5sPeriod},5s) cross>${activityRsiTracker.rsiBuyCross} ` +
       `SOL=$${activityRsiTracker.solPriceUsd}`,
@@ -335,6 +336,9 @@ async function main() {
       // v2: 同步 EMA 监控列表
     },
   });
+  signalEngine.setEntryMarketProvider(
+    (mint) => tokenWatchdog.getLatestRealtimeMarket(mint),
+  );
   tokenWatchdog.start();
 
   // Competitor stats periodic logging + cleanup (tracker created earlier, before Server)

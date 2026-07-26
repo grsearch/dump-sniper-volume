@@ -357,9 +357,11 @@ class Server {
         openPositions: this.positionManager.openPositionCount(),
         config: {
           entryMinVolumeUsd: config.activityRsi.minVolumeUsd,
+          entryMinFdvUsd: config.activityRsi.minFdvUsd,
           solPriceUsd: config.activityRsi.solPriceUsd,
           rsi5sPeriod: config.activityRsi.rsi5sPeriod,
           rsiBuyCross: config.activityRsi.rsiBuyCross,
+          rsiExitEnabled: config.strategy.rsi5sExitEnabled,
           rsiExitDownCross: config.strategy.rsi5sExitDownCross,
           rsiExitOverbought: config.strategy.rsi5sExitOverbought,
           trailingActivatePct: config.strategy.trailingActivatePct,

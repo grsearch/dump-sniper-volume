@@ -31,7 +31,7 @@ const config = {
     minPoolQuoteSol: parseFloat(process.env.MIN_POOL_QUOTE_SOL || '30.0'),
 
     // 仓位
-    positionSizeSol: parseFloat(process.env.POSITION_SIZE_SOL || '0.1'),
+    positionSizeSol: parseFloat(process.env.POSITION_SIZE_SOL || '0.2'),
 
     // Dedicated activity/RSI exits. Old production variables cannot reactivate
     // legacy TP/SL, timeout, flow reversal, or any other legacy exit.
@@ -45,14 +45,14 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT || '20'),
-    trailingDrawdownPct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT || '10'),
+    trailingActivatePct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT || '10'),
+    trailingDrawdownPct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT || '5'),
     trailingMinHwmAgeMs: 0,
 
-    // 旧的 1 分钟 RSI 退出关闭；当前策略使用包含实时桶的 5 秒 RSI(7)。
+    // RSI is entry analytics only. Both 1-minute and 5-second RSI exits are disabled.
     rsi1mExitEnabled: false,
     rsi1mExitThreshold: parseFloat(process.env.RSI_1M_EXIT_THRESHOLD || '80'),
-    rsi5sExitEnabled: true,
+    rsi5sExitEnabled: false,
     rsi5sExitDownCross: parseFloat(process.env.ACTIVITY_RSI_EXIT_DOWN_CROSS || '70'),
     rsi5sExitOverbought: parseFloat(process.env.ACTIVITY_RSI_EXIT_OVERBOUGHT || '80'),
 
@@ -194,6 +194,7 @@ const config = {
     enabled: (process.env.ACTIVITY_RSI_ENABLED ?? 'true').toLowerCase() === 'true',
     volumeWindowMs: parseInt(process.env.ACTIVITY_RSI_VOLUME_WINDOW_MS || '60000', 10),
     minVolumeUsd: parseFloat(process.env.ACTIVITY_RSI_MIN_VOLUME_USD || '10000'),
+    minFdvUsd: parseFloat(process.env.ACTIVITY_RSI_MIN_FDV_USD || '50000'),
     solPriceUsd: parseFloat(process.env.ACTIVITY_RSI_SOL_PRICE_USD || '75.5'),
     rsi5sPeriod: parseInt(process.env.ACTIVITY_RSI_5S_PERIOD || '7', 10),
     rsiBuyCross: parseFloat(process.env.ACTIVITY_RSI_BUY_CROSS || '30'),

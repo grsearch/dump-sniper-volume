@@ -100,6 +100,7 @@ class TokenWatchdog {
     this._lastProviderMarketAt = new Map();
     this._lastRealtimePersistAt = new Map();
     this._lastRealtimeKeepLogAt = new Map();
+    this._latestRealtimeMarkets = new Map();
 
     const features = [
       `checkEvery=${this.checkIntervalMs / 60_000}min`,
@@ -154,6 +155,7 @@ class TokenWatchdog {
     this._lastProviderMarketAt.clear();
     this._lastRealtimePersistAt.clear();
     this._lastRealtimeKeepLogAt.clear();
+    this._latestRealtimeMarkets.clear();
   }
 
   async _runCheck() {
@@ -198,6 +200,7 @@ class TokenWatchdog {
     this._lastProviderMarketAt.delete(token.mint);
     this._lastRealtimePersistAt.delete(token.mint);
     this._lastRealtimeKeepLogAt.delete(token.mint);
+    this._latestRealtimeMarkets.delete(token.mint);
     if (this.onTokenRemoved) this.onTokenRemoved();
     monitor.inc('TokenWatchdog.tokensRemoved', 1, 'TokenWatchdog');
     return true;
@@ -336,6 +339,16 @@ class TokenWatchdog {
     ) return null;
 
     const now = Date.now();
+    this._latestRealtimeMarkets.set(mint, {
+      fdvUsd,
+      liquidityUsd,
+      priceUsd,
+      priceSol,
+      supply: supplyUi,
+      poolQuoteSol: quoteSol,
+      poolAddress: resolvedPoolAddress,
+      fetchedAt: now,
+    });
     const reasons = this._realtimeMarketReasons(fdvUsd, liquidityUsd);
     const lastPersistAt = this._lastRealtimePersistAt.get(mint) || 0;
     let currentToken = token;
@@ -375,6 +388,10 @@ class TokenWatchdog {
     const removed = this._removeToken(currentToken, reasonStr);
     if (removed) monitor.inc('TokenWatchdog.realtimeRemoved', 1, 'TokenWatchdog');
     return { removed, fdvUsd, liquidityUsd, priceUsd };
+  }
+
+  getLatestRealtimeMarket(mint) {
+    return mint ? this._latestRealtimeMarkets.get(mint) || null : null;
   }
 
   _isMarketFresh(token, now = Date.now()) {
