@@ -3,6 +3,7 @@
 process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT = '30';
 process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT = '5';
 process.env.ACTIVITY_RSI_STOP_LOSS_PCT = '-20';
+process.env.ACTIVITY_RSI_TAKE_PROFIT_PCT = '10';
 
 const assert = require('assert');
 const Module = require('module');
@@ -72,7 +73,7 @@ function rsi(value) {
 function run() {
   const mint = 'TestMint111111111111111111111111111111111';
   assert.strictEqual(config.strategy.dedicatedExitOnly, true);
-  assert.strictEqual(config.strategy.takeProfitPct, 0);
+  assert.strictEqual(config.strategy.takeProfitPct, 10);
   assert.strictEqual(config.strategy.fixedStopLossPct, -20);
   assert.strictEqual(config.strategy.maxHoldMs, 0);
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
@@ -165,11 +166,25 @@ function run() {
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 1.3);
-    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+30% must arm trailing');
+    manager._checkExit('p1', 1.099);
     assert.strictEqual(manager._exitCalls.length, 0);
-    manager._checkExit('p1', 1.235);
-    assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
+    manager._checkExit('p1', 1.1);
+    assert.strictEqual(manager._exitCalls[0].reason, 'TAKE_PROFIT');
+  }
+
+  {
+    const configuredTakeProfitPct = config.strategy.takeProfitPct;
+    config.strategy.takeProfitPct = 0;
+    try {
+      const manager = managerWith(position('p1', mint));
+      manager._checkExit('p1', 1.3);
+      assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+30% must arm trailing');
+      assert.strictEqual(manager._exitCalls.length, 0);
+      manager._checkExit('p1', 1.235);
+      assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
+    } finally {
+      config.strategy.takeProfitPct = configuredTakeProfitPct;
+    }
   }
 
   {

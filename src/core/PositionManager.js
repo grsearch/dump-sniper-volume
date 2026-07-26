@@ -1918,6 +1918,20 @@ class PositionManager extends EventEmitter {
         }
       }
 
+      const takeProfitPct = Number(config.strategy.takeProfitPct) || 0;
+      if (takeProfitPct > 0 && pnlPct + 1e-9 >= takeProfitPct) {
+        pos._exitTriggeredAt = pos._exitTriggeredAt || now;
+        pos._exitMarketTs = pos._exitMarketTs || context?.marketTs || null;
+        pos._exitTriggerSource = pos._exitTriggerSource || context?.source || 'price_check';
+        console.log(
+          `[PositionManager] TAKE_PROFIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
+            `pnl=+${pnlPct.toFixed(2)}% threshold=+${takeProfitPct}%`,
+        );
+        monitor.inc('PositionManager.takeProfit', 1, 'PositionManager');
+        this._exitForCondition(pos, price, 'TAKE_PROFIT');
+        return;
+      }
+
       const peakPnlPct = ((pos.highWaterMark - pos.entryPrice) / pos.entryPrice) * 100;
       if (!pos.trailingArmed && peakPnlPct + 1e-9 >= config.strategy.trailingActivatePct) {
         pos.trailingArmed = true;

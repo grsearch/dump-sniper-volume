@@ -47,6 +47,9 @@ async function main() {
     `Exit only: stop ${config.strategy.fixedStopLossPct < 0
       ? `${config.strategy.fixedStopLossPct}%`
       : 'disabled'}; ` +
+      `take profit ${config.strategy.takeProfitPct > 0
+        ? `+${config.strategy.takeProfitPct}%`
+        : 'disabled'}; ` +
       'RSI exit disabled; ' +
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
       '(plus token-age exit)',

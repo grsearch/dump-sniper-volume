@@ -36,7 +36,7 @@ const config = {
     // Dedicated activity/RSI exits. Old production variables cannot reactivate
     // legacy TP/SL, timeout, flow reversal, or any other legacy exit.
     dedicatedExitOnly: true,
-    takeProfitPct: 0,
+    takeProfitPct: parseFloat(process.env.ACTIVITY_RSI_TAKE_PROFIT_PCT || '10'),
     tpConfirmCount: parseInt(process.env.TP_CONFIRM_COUNT || '2', 10),
     tpConfirmMinGapMs: parseInt(process.env.TP_CONFIRM_MIN_GAP_MS || '300', 10),
 
