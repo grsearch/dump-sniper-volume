@@ -11,11 +11,12 @@ Module._load = function loadWithDotenvStub(request, parent, isMain) {
 const ActivityRsiTracker = require('../src/core/ActivityRsiTracker');
 Module._load = originalLoad;
 
-function swap(mint, ts, solVolume, price = 1) {
+function swap(mint, ts, solVolume, price = 1, signer = `wallet:${ts}`) {
   return {
     mint,
     symbol: 'TEST',
     side: 'BUY',
+    signer,
     solVolume,
     price,
     priceBefore: price,
@@ -35,6 +36,7 @@ function makeTracker(opts = {}) {
     },
     solPriceUsd: 1,
     minVolumeUsd: 100,
+    minUniqueBuyers1m: 1,
     maxSignalAgeMs: 0,
     ...opts,
   });
@@ -77,6 +79,29 @@ function run() {
     setRsi(30);
     tracker.handleSwap(swap(mint, now, 1));
     assert.strictEqual(signals.length, 0, 'RSI exactly 30 is not an upward cross');
+  }
+
+  {
+    const { tracker, setRsi } = makeTracker({ minUniqueBuyers1m: 3 });
+    const signals = [];
+    tracker.on('activityRsiSignal', (signal) => signals.push(signal));
+    tracker.handleSwap(swap(mint, now - 20_000, 40, 1, 'wallet-a'));
+    tracker.handleSwap(swap(mint, now - 10_000, 40, 1, 'wallet-a'));
+    setRsi(31);
+    tracker.handleSwap(swap(mint, now, 40, 1, 'wallet-b'));
+    assert.strictEqual(signals.length, 0, 'duplicate buyers must count once');
+  }
+
+  {
+    const { tracker, setRsi } = makeTracker({ minUniqueBuyers1m: 3 });
+    const signals = [];
+    tracker.on('activityRsiSignal', (signal) => signals.push(signal));
+    tracker.handleSwap(swap(mint, now - 20_000, 40, 1, 'wallet-a'));
+    tracker.handleSwap(swap(mint, now - 10_000, 40, 1, 'wallet-b'));
+    setRsi(31);
+    tracker.handleSwap(swap(mint, now, 40, 1, 'wallet-c'));
+    assert.strictEqual(signals.length, 1, 'three independent BUY wallets must pass');
+    assert.strictEqual(signals[0]._activity.uniqueBuyers1m, 3);
   }
 
   console.log('Activity/RSI tracker tests: PASS');

@@ -45,7 +45,7 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT || '10'),
+    trailingActivatePct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT || '30'),
     trailingDrawdownPct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT || '5'),
     trailingMinHwmAgeMs: 0,
 
@@ -195,6 +195,10 @@ const config = {
     volumeWindowMs: parseInt(process.env.ACTIVITY_RSI_VOLUME_WINDOW_MS || '60000', 10),
     minVolumeUsd: parseFloat(process.env.ACTIVITY_RSI_MIN_VOLUME_USD || '10000'),
     minFdvUsd: parseFloat(process.env.ACTIVITY_RSI_MIN_FDV_USD || '50000'),
+    maxFdvUsd: parseFloat(process.env.ACTIVITY_RSI_MAX_FDV_USD || '150000'),
+    minMigrationAgeMs: parseInt(process.env.ACTIVITY_RSI_MIN_MIGRATION_AGE_MS || '120000', 10),
+    maxMigrationAgeMs: parseInt(process.env.ACTIVITY_RSI_MAX_MIGRATION_AGE_MS || '300000', 10),
+    minUniqueBuyers1m: parseInt(process.env.ACTIVITY_RSI_MIN_UNIQUE_BUYERS_1M || '60', 10),
     solPriceUsd: parseFloat(process.env.ACTIVITY_RSI_SOL_PRICE_USD || '75.5'),
     rsi5sPeriod: parseInt(process.env.ACTIVITY_RSI_5S_PERIOD || '7', 10),
     rsiBuyCross: parseFloat(process.env.ACTIVITY_RSI_BUY_CROSS || '30'),

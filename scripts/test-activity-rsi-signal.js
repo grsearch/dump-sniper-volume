@@ -12,7 +12,7 @@ Module._load = function loadWithDotenvStub(request, parent, isMain) {
 const SignalEngine = require('../src/core/SignalEngine');
 Module._load = originalLoad;
 
-function makeEngine(openForMint = 0) {
+function makeEngine(openForMint = 0, tokenOverrides = {}) {
   const engine = Object.create(SignalEngine.prototype);
   EventEmitter.call(engine);
   engine.lastTriggerTs = new Map();
@@ -20,7 +20,12 @@ function makeEngine(openForMint = 0) {
   engine.inflightBuys = new Set();
   engine._exitCooldowns = new Map();
   engine.tokenRegistry = {
-    getToken: () => ({ fdv: 60_000, market_source: 'test_registry' }),
+    getToken: () => ({
+      fdv: 60_000,
+      market_source: 'test_registry',
+      migration_time: Date.now() - 180_000,
+      ...tokenOverrides,
+    }),
   };
   engine.entryMarketProvider = null;
   engine.positionManager = {
@@ -45,6 +50,7 @@ function signal(mint, overrides = {}) {
     _activity: {
       volumeSol: 140,
       volumeUsd: 10_500,
+      uniqueBuyers1m: 65,
       previousRsi5s: 29,
       currentRsi5s: 31,
       ...overrides,
@@ -63,6 +69,8 @@ async function run() {
   assert.strictEqual(order.sizeSol, 0.2, 'each buy order must use 0.2 SOL');
   assert(order.reason.includes('volume1m=$10500'));
   assert(order.reason.includes('fdv=$60000'));
+  assert(order.reason.includes('buyers1m=65'));
+  assert(order.reason.includes('age=180s'));
   assert(order.reason.includes('rsi5s=29.0->31.0'));
   assert.strictEqual(engine.loggedSignals[0].kind, 'ACTIVITY_RSI');
 
@@ -125,6 +133,16 @@ async function run() {
   await noCross.handleActivityRsiSignal(signal(mint, { previousRsi5s: 31, currentRsi5s: 32 }));
   assert.strictEqual(noCrossOrder, null, 'RSI already above 30 is not a fresh cross');
 
+  const lowBuyerCount = makeEngine();
+  let lowBuyerCountOrder = null;
+  lowBuyerCount.on('buyOrder', (value) => { lowBuyerCountOrder = value; });
+  await lowBuyerCount.handleActivityRsiSignal(signal(mint, { uniqueBuyers1m: 59 }));
+  assert.strictEqual(lowBuyerCountOrder, null, '59 unique BUY wallets must be rejected');
+  assert(
+    lowBuyerCount.loggedSignals[0].rejectReason.includes('UNIQUE_BUYERS_1M_LOW'),
+    'the rejection must identify the unique BUY-wallet filter',
+  );
+
   const lowEntryFdv = makeEngine();
   lowEntryFdv.entryMarketProvider = () => ({ fdvUsd: 49_999 });
   let lowEntryFdvOrder = null;
@@ -142,6 +160,56 @@ async function run() {
   exactEntryFdv.on('buyOrder', (value) => { exactEntryFdvOrder = value; });
   await exactEntryFdv.handleActivityRsiSignal(signal(mint));
   assert(exactEntryFdvOrder, 'entry FDV exactly $50,000 must be accepted');
+
+  const exactMaxEntryFdv = makeEngine();
+  exactMaxEntryFdv.entryMarketProvider = () => ({ fdvUsd: 150_000 });
+  let exactMaxEntryFdvOrder = null;
+  exactMaxEntryFdv.on('buyOrder', (value) => { exactMaxEntryFdvOrder = value; });
+  await exactMaxEntryFdv.handleActivityRsiSignal(signal(mint));
+  assert(exactMaxEntryFdvOrder, 'entry FDV exactly $150,000 must be accepted');
+
+  const highEntryFdv = makeEngine();
+  highEntryFdv.entryMarketProvider = () => ({ fdvUsd: 150_001 });
+  let highEntryFdvOrder = null;
+  highEntryFdv.on('buyOrder', (value) => { highEntryFdvOrder = value; });
+  await highEntryFdv.handleActivityRsiSignal(signal(mint));
+  assert.strictEqual(highEntryFdvOrder, null, 'entry FDV above $150,000 must be rejected');
+  assert(
+    highEntryFdv.loggedSignals[0].rejectReason.includes('ENTRY_FDV_HIGH'),
+    'the rejection must identify the entry-only maximum FDV filter',
+  );
+
+  const exactMinAge = makeEngine(0, { migration_time: Date.now() - 120_000 });
+  let exactMinAgeOrder = null;
+  exactMinAge.on('buyOrder', (value) => { exactMinAgeOrder = value; });
+  await exactMinAge.handleActivityRsiSignal(signal(mint));
+  assert(exactMinAgeOrder, 'migration AGE exactly 120 seconds must be accepted');
+
+  const tooYoung = makeEngine(0, { migration_time: Date.now() - 119_000 });
+  let tooYoungOrder = null;
+  tooYoung.on('buyOrder', (value) => { tooYoungOrder = value; });
+  await tooYoung.handleActivityRsiSignal(signal(mint));
+  assert.strictEqual(tooYoungOrder, null, 'migration AGE below 120 seconds must be rejected');
+  assert(
+    tooYoung.loggedSignals[0].rejectReason.includes('MIGRATION_TOO_YOUNG'),
+    'the rejection must identify the minimum migration AGE filter',
+  );
+
+  const withinMaxAge = makeEngine(0, { migration_time: Date.now() - 299_000 });
+  let withinMaxAgeOrder = null;
+  withinMaxAge.on('buyOrder', (value) => { withinMaxAgeOrder = value; });
+  await withinMaxAge.handleActivityRsiSignal(signal(mint));
+  assert(withinMaxAgeOrder, 'migration AGE below 300 seconds must be accepted');
+
+  const tooOld = makeEngine(0, { migration_time: Date.now() - 301_000 });
+  let tooOldOrder = null;
+  tooOld.on('buyOrder', (value) => { tooOldOrder = value; });
+  await tooOld.handleActivityRsiSignal(signal(mint));
+  assert.strictEqual(tooOldOrder, null, 'migration AGE above 300 seconds must be rejected');
+  assert(
+    tooOld.loggedSignals[0].rejectReason.includes('MIGRATION_TOO_OLD'),
+    'the rejection must identify the maximum migration AGE filter',
+  );
 
   const missingEntryFdv = makeEngine();
   missingEntryFdv.tokenRegistry = { getToken: () => null };

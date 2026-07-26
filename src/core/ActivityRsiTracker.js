@@ -8,9 +8,9 @@ const monitor = getMonitor();
 
 /**
  * Emits an entry signal only on a real-time RSI(7, 5s) upward cross of 30
- * while the rolling 60-second notional volume is above the configured USD
- * threshold. RSI is supplied by RsiCalculator after the triggering swap has
- * already been added to the live 5-second bucket.
+ * while the rolling 60-second notional volume and distinct BUY-wallet count
+ * satisfy their thresholds. RSI is supplied by RsiCalculator after the
+ * triggering swap has already been added to the live 5-second bucket.
  */
 class ActivityRsiTracker extends EventEmitter {
   constructor({ rsiCalculator, ...opts } = {}) {
@@ -21,6 +21,8 @@ class ActivityRsiTracker extends EventEmitter {
     this.replaceDumpSignal = true;
     this.volumeWindowMs = opts.volumeWindowMs ?? strategy.volumeWindowMs ?? 60_000;
     this.minVolumeUsd = opts.minVolumeUsd ?? strategy.minVolumeUsd ?? 10_000;
+    this.minUniqueBuyers1m = opts.minUniqueBuyers1m ??
+      strategy.minUniqueBuyers1m ?? 60;
     this.solPriceUsd = opts.solPriceUsd ?? strategy.solPriceUsd ?? 75.5;
     this.rsi5sPeriod = opts.rsi5sPeriod ?? strategy.rsi5sPeriod ?? 7;
     this.rsiBuyCross = opts.rsiBuyCross ?? strategy.rsiBuyCross ?? 30;
@@ -43,7 +45,9 @@ class ActivityRsiTracker extends EventEmitter {
     }
 
     const state = this._stateOf(swap.mint);
-    state.events.push({ ts, solVolume });
+    const side = String(swap.side || '').toUpperCase();
+    const buyer = side === 'BUY' && swap.signer ? String(swap.signer) : null;
+    state.events.push({ ts, solVolume, buyer });
     if (state.events.length > 1 && ts < state.events[state.events.length - 2].ts) {
       state.events.sort((a, b) => a.ts - b.ts);
     }
@@ -76,6 +80,17 @@ class ActivityRsiTracker extends EventEmitter {
       );
       return;
     }
+    const uniqueBuyers1m = new Set(
+      state.events.map((item) => item.buyer).filter(Boolean),
+    ).size;
+    if (uniqueBuyers1m < this.minUniqueBuyers1m) {
+      this._debug(
+        swap.mint,
+        `RSI crossed ${this.rsiBuyCross}, unique buyers ` +
+          `${uniqueBuyers1m} < ${this.minUniqueBuyers1m}`,
+      );
+      return;
+    }
 
     const wallNow = Date.now();
     if (this.maxSignalAgeMs > 0 && wallNow - ts > this.maxSignalAgeMs) {
@@ -87,6 +102,7 @@ class ActivityRsiTracker extends EventEmitter {
       volumeWindowMs: this.volumeWindowMs,
       volumeSol,
       volumeUsd,
+      uniqueBuyers1m,
       solPriceUsd: this.solPriceUsd,
       previousRsi5s: previousRsi,
       currentRsi5s: currentRsi,
@@ -116,6 +132,7 @@ class ActivityRsiTracker extends EventEmitter {
     console.log(
       `[ActivityRsi] BUY_CROSS ${signal.symbol || swap.mint.slice(0, 6)} ` +
         `volume1m=$${volumeUsd.toFixed(0)} (${volumeSol.toFixed(2)}SOL @ $${this.solPriceUsd}) ` +
+        `buyers1m=${uniqueBuyers1m} ` +
         `RSI(${this.rsi5sPeriod},5s)=${previousRsi.toFixed(1)}->${currentRsi.toFixed(1)}`,
     );
     monitor.inc('ActivityRsi.signalsEmitted', 1, 'ActivityRsi');

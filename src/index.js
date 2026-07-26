@@ -35,8 +35,11 @@ async function main() {
   console.log(`Mode: ${config.DRY_RUN ? 'DRY_RUN' : '⚠️  LIVE TRADING ⚠️'}`);
   console.log(`Position: ${config.strategy.positionSizeSol} SOL`);
   console.log(
-    `Entry: ACTIVITY_RSI (FDV >=$${config.activityRsi.minFdvUsd}, ` +
+    `Entry: ACTIVITY_RSI (AGE ${config.activityRsi.minMigrationAgeMs / 60_000}-` +
+      `${config.activityRsi.maxMigrationAgeMs / 60_000}min, ` +
+      `FDV $${config.activityRsi.minFdvUsd}-$${config.activityRsi.maxFdvUsd}, ` +
       `1m volume >$${config.activityRsi.minVolumeUsd}, ` +
+      `buyers1m >=${config.activityRsi.minUniqueBuyers1m}, ` +
       `RSI(${config.activityRsi.rsi5sPeriod},5s) crosses above ${config.activityRsi.rsiBuyCross}, ` +
       `SOL=$${config.activityRsi.solPriceUsd})`,
   );
@@ -225,8 +228,11 @@ async function main() {
   const activityRsiTracker = new ActivityRsiTracker({ rsiCalculator });
   console.log(
     `[main] ActivityRsi ${activityRsiTracker.enabled ? 'enabled' : 'disabled'}: ` +
-      `entryFDV>=$${config.activityRsi.minFdvUsd} ` +
+      `entryAge=${config.activityRsi.minMigrationAgeMs / 60_000}-` +
+      `${config.activityRsi.maxMigrationAgeMs / 60_000}min ` +
+      `entryFDV=$${config.activityRsi.minFdvUsd}-$${config.activityRsi.maxFdvUsd} ` +
       `volume1m>$${activityRsiTracker.minVolumeUsd} ` +
+      `buyers1m>=${activityRsiTracker.minUniqueBuyers1m} ` +
       `RSI(${activityRsiTracker.rsi5sPeriod},5s) cross>${activityRsiTracker.rsiBuyCross} ` +
       `SOL=$${activityRsiTracker.solPriceUsd}`,
   );

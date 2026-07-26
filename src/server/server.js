@@ -358,6 +358,10 @@ class Server {
         config: {
           entryMinVolumeUsd: config.activityRsi.minVolumeUsd,
           entryMinFdvUsd: config.activityRsi.minFdvUsd,
+          entryMaxFdvUsd: config.activityRsi.maxFdvUsd,
+          entryMinMigrationAgeMs: config.activityRsi.minMigrationAgeMs,
+          entryMaxMigrationAgeMs: config.activityRsi.maxMigrationAgeMs,
+          entryMinUniqueBuyers1m: config.activityRsi.minUniqueBuyers1m,
           solPriceUsd: config.activityRsi.solPriceUsd,
           rsi5sPeriod: config.activityRsi.rsi5sPeriod,
           rsiBuyCross: config.activityRsi.rsiBuyCross,

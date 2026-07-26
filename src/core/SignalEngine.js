@@ -187,6 +187,7 @@ class SignalEngine extends EventEmitter {
 
     const activity = signal._activity || {};
     const volumeUsd = Number(activity.volumeUsd);
+    const uniqueBuyers1m = Number(activity.uniqueBuyers1m);
     const previousRsi = Number(activity.previousRsi5s);
     const currentRsi = Number(activity.currentRsi5s);
     if (!(volumeUsd > config.activityRsi.minVolumeUsd)) {
@@ -210,8 +211,20 @@ class SignalEngine extends EventEmitter {
       );
       return;
     }
+    if (!(
+      Number.isFinite(uniqueBuyers1m) &&
+      uniqueBuyers1m >= config.activityRsi.minUniqueBuyers1m
+    )) {
+      this._logReject(
+        signal,
+        `UNIQUE_BUYERS_1M_LOW: ${this._numberLabel(uniqueBuyers1m, 0)} < ` +
+          `${config.activityRsi.minUniqueBuyers1m}`,
+      );
+      return;
+    }
 
     const minEntryFdvUsd = Number(config.activityRsi.minFdvUsd) || 0;
+    const maxEntryFdvUsd = Number(config.activityRsi.maxFdvUsd) || 0;
     const entryMarket = this._resolveEntryFdvUsd(mint);
     if (minEntryFdvUsd > 0 && !(entryMarket.fdvUsd > 0)) {
       monitor.inc('SignalEngine.rejectedEntryFdvUnavailable', 1, 'SignalEngine');
@@ -227,11 +240,54 @@ class SignalEngine extends EventEmitter {
       );
       return;
     }
+    if (maxEntryFdvUsd > 0 && entryMarket.fdvUsd > maxEntryFdvUsd) {
+      monitor.inc('SignalEngine.rejectedEntryFdvHigh', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        `ENTRY_FDV_HIGH: $${this._numberLabel(entryMarket.fdvUsd, 0)} > ` +
+          `$${maxEntryFdvUsd} source=${entryMarket.source}`,
+      );
+      return;
+    }
+
+    const token = this.tokenRegistry?.getToken?.(mint);
+    const migrationTime = Number(token?.migration_time);
+    const migrationAgeMs = Number.isFinite(migrationTime) && migrationTime > 0
+      ? now - migrationTime
+      : null;
+    if (!Number.isFinite(migrationAgeMs) || migrationAgeMs < 0) {
+      monitor.inc('SignalEngine.rejectedMigrationAgeUnavailable', 1, 'SignalEngine');
+      this._logReject(signal, 'MIGRATION_AGE_UNAVAILABLE');
+      return;
+    }
+    if (migrationAgeMs < config.activityRsi.minMigrationAgeMs) {
+      monitor.inc('SignalEngine.rejectedMigrationTooYoung', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        `MIGRATION_TOO_YOUNG: ${Math.floor(migrationAgeMs / 1000)}s < ` +
+          `${Math.ceil(config.activityRsi.minMigrationAgeMs / 1000)}s`,
+      );
+      return;
+    }
+    if (
+      config.activityRsi.maxMigrationAgeMs > 0 &&
+      migrationAgeMs > config.activityRsi.maxMigrationAgeMs
+    ) {
+      monitor.inc('SignalEngine.rejectedMigrationTooOld', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        `MIGRATION_TOO_OLD: ${Math.ceil(migrationAgeMs / 1000)}s > ` +
+          `${Math.floor(config.activityRsi.maxMigrationAgeMs / 1000)}s`,
+      );
+      return;
+    }
 
     const reason =
       `activity_rsi: volume1m=$${volumeUsd.toFixed(0)} ` +
       `(${Number(activity.volumeSol || 0).toFixed(2)}SOL) ` +
+      `buyers1m=${uniqueBuyers1m} ` +
       `fdv=$${this._numberLabel(entryMarket.fdvUsd, 0)} ` +
+      `age=${Math.floor(migrationAgeMs / 1000)}s ` +
       `rsi5s=${previousRsi.toFixed(1)}->${currentRsi.toFixed(1)} ` +
       `cross>${config.activityRsi.rsiBuyCross}`;
 
