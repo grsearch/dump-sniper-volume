@@ -181,8 +181,8 @@ assert.strictEqual(
   );
   assert.strictEqual(
     watchdog.maxTokenAgeMs,
-    1_500_000,
-    'legacy one-hour config must be clamped to the 25-minute maximum',
+    1_800_000,
+    'legacy one-hour config must be clamped to the 30-minute maximum',
   );
   assert.strictEqual(watchdog.ageCheckIntervalMs, 1_000);
   watchdog.minFdVUsd = 15_000;
@@ -200,7 +200,7 @@ assert.strictEqual(
     ...token,
     fdv: 40_000,
     liquidity: 20_000,
-    migration_time: now - 1_500_001,
+    migration_time: now - 1_800_001,
     market_updated_at: now,
   };
   let ageRemoved = false;
@@ -242,11 +242,11 @@ assert.strictEqual(
   ageWatchdog.noBuyRemoveMs = 0;
   ageWatchdog.maxWatchDurationMs = 0;
   ageWatchdog._checkAges(now);
-  assert.strictEqual(ageRemoved, true, 'migration AGE above 25 minutes must remove the token');
+  assert.strictEqual(ageRemoved, true, 'migration AGE above 30 minutes must remove the token');
 
   const heldToken = {
     ...agedToken,
-    migration_time: now - 1_500_001,
+    migration_time: now - 1_800_001,
   };
   let heldRemoved = false;
   let heldOpen = true;
@@ -388,6 +388,45 @@ assert.strictEqual(
     'the latest chain FDV must be available in memory without an API call',
   );
   assert.strictEqual(realtimeToken.market_source, 'chain_pool_realtime');
+
+  const noCacheToken = {
+    ...realtimeToken,
+    decimals: 6,
+    meta_json: JSON.stringify({ supply: '1000000000000000' }),
+    is_active: 1,
+  };
+  const noCacheWatchdog = new TokenWatchdog({
+    tokenRegistry: {
+      getToken: () => noCacheToken,
+      updateMarket: (_mint, market) => {
+        Object.assign(noCacheToken, market);
+        return noCacheToken;
+      },
+      removeToken: () => {},
+    },
+    positionManager: { hasOpenPosition: () => false },
+    poolStateCache: null,
+    tradeLogger: null,
+    fetchMarkets: async () => new Map(),
+    fetchMarket: async () => null,
+  });
+  noCacheWatchdog.minFdVUsd = 15_000;
+  noCacheWatchdog.maxFdVUsd = 1_000_000;
+  noCacheWatchdog.minLiquidityUsd = 3_000;
+  const noCacheRealtime = noCacheWatchdog.handleRealtimePoolTick({
+    mint,
+    price: 0.0000003,
+    poolAddress: preferredPool,
+    poolQuoteAfter: 20,
+    baseDecimals: 6,
+  });
+  assert.strictEqual(noCacheRealtime.removed, false);
+  assert(Math.abs(noCacheRealtime.fdvUsd - 22_650) < 1e-9);
+  assert.strictEqual(
+    noCacheWatchdog.getLatestRealtimeMarket(mint).poolQuoteSol,
+    20,
+    'parsed post-swap pool state must support trusted entry data without a cache',
+  );
 
   const lowLiquidityRealtime = realtimeWatchdog.handleRealtimePoolTick({
     mint,

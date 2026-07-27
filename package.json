@@ -1,7 +1,7 @@
 {
   "name": "dump-sniper",
   "version": "4.0.0-clean",
-  "description": "Solana Pump.fun one-minute volume and five-second RSI trader.",
+  "description": "Solana Pump.fun early-flow trader.",
   "main": "src/index-flow.js",
   "scripts": {
     "start": "node src/index-flow.js",
@@ -13,6 +13,9 @@
     "test:rsi": "node scripts/test-rsi-calculator.js",
     "test:activity-rsi": "node scripts/test-activity-rsi-tracker.js",
     "test:activity-rsi-signal": "node scripts/test-activity-rsi-signal.js",
+    "test:early-flow": "node scripts/test-early-flow-entry.js",
+    "test:early-flow-signal": "node scripts/test-early-flow-signal.js",
+    "test:ema15s": "node scripts/test-ema-15s-tracker.js",
     "test:exit-policy": "node scripts/test-position-exit-policy.js",
     "test:buy-guard": "node scripts/test-buy-execution-guard.js",
     "test:buy-exact": "node scripts/test-exact-quote-buy.js",

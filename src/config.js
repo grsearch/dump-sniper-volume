@@ -33,10 +33,10 @@ const config = {
     // 仓位
     positionSizeSol: parseFloat(process.env.POSITION_SIZE_SOL || '0.2'),
 
-    // Dedicated activity/RSI exits. Old production variables cannot reactivate
+    // Dedicated early-flow exits. Old production variables cannot reactivate
     // legacy TP/SL, timeout, flow reversal, or any other legacy exit.
     dedicatedExitOnly: true,
-    takeProfitPct: parseFloat(process.env.ACTIVITY_RSI_TAKE_PROFIT_PCT || '10'),
+    takeProfitPct: 0,
     tpConfirmCount: parseInt(process.env.TP_CONFIRM_COUNT || '2', 10),
     tpConfirmMinGapMs: parseInt(process.env.TP_CONFIRM_MIN_GAP_MS || '300', 10),
 
@@ -45,8 +45,8 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT || '30'),
-    trailingDrawdownPct: parseFloat(process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT || '5'),
+    trailingActivatePct: parseFloat(process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT || '40'),
+    trailingDrawdownPct: parseFloat(process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT || '10'),
     trailingMinHwmAgeMs: 0,
 
     // RSI is entry analytics only. Both 1-minute and 5-second RSI exits are disabled.
@@ -84,8 +84,18 @@ const config = {
 
     // 紧急止损（防止灾难性下跌）
     // 设置为 0 可禁用紧急止损（恢复"硬扛"行为）
-    fixedStopLossPct: parseFloat(process.env.ACTIVITY_RSI_STOP_LOSS_PCT || '-20'),
+    fixedStopLossPct: 0,
     emergencyStopLossPct: parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '0'),
+    emaExitEnabled: (process.env.EARLY_FLOW_EMA_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    emaFastPeriod: parseInt(process.env.EARLY_FLOW_EMA_FAST_PERIOD || '9', 10),
+    emaSlowPeriod: parseInt(process.env.EARLY_FLOW_EMA_SLOW_PERIOD || '20', 10),
+    emaBarMs: parseInt(process.env.EARLY_FLOW_EMA_BAR_MS || '15000', 10),
+    emaResetGapMs: parseInt(process.env.EARLY_FLOW_EMA_RESET_GAP_MS || '300000', 10),
+    emaExecutionDelayMs: parseInt(
+      process.env.EARLY_FLOW_EMA_EXECUTION_DELAY_MS || '500',
+      10,
+    ),
+    fdvExitUsd: parseFloat(process.env.EARLY_FLOW_FDV_EXIT_USD || '10000'),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值
     // 智能规则: trailing已armed时不触发(trailing自行处理回撤), 只救trailing永远不armed的死扛仓位
@@ -131,10 +141,7 @@ const config = {
     // 风控（v3.17 默认 maxConcurrent 5）
     cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '0', 10),
     rebuyCooldownMs: 0,
-    stopLossRebuyCooldownMs: parseInt(
-      process.env.STOP_LOSS_REBUY_COOLDOWN_MS || '120000',
-      10,
-    ),
+    stopLossRebuyCooldownMs: 0,
     maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS || '10', 10),
 
     // v3.17.6: 同砸单去重时间窗（毫秒）
@@ -189,9 +196,9 @@ const config = {
     rsiPriceScaleResetRatio: parseFloat(process.env.RSI_PRICE_SCALE_RESET_RATIO || '100'),
   },
 
-  // ============ 1-minute activity + 5-second RSI cross entry ============
+  // Legacy activity/RSI entry is retained for offline compatibility only.
   activityRsi: {
-    enabled: (process.env.ACTIVITY_RSI_ENABLED ?? 'true').toLowerCase() === 'true',
+    enabled: false,
     volumeWindowMs: parseInt(process.env.ACTIVITY_RSI_VOLUME_WINDOW_MS || '60000', 10),
     minVolumeUsd: parseFloat(process.env.ACTIVITY_RSI_MIN_VOLUME_USD || '10000'),
     minFdvUsd: parseFloat(process.env.ACTIVITY_RSI_MIN_FDV_USD || '50000'),
@@ -207,11 +214,36 @@ const config = {
     maxEventsPerMint: parseInt(process.env.ACTIVITY_RSI_MAX_EVENTS_PER_MINT || '0', 10),
     debug: (process.env.ACTIVITY_RSI_DEBUG ?? 'false').toLowerCase() === 'true',
     watchlistMaxAgeMs: (() => {
-      const configured = parseInt(process.env.BURST_WATCHLIST_MAX_AGE_MS || '1500000', 10);
+      const configured = parseInt(process.env.BURST_WATCHLIST_MAX_AGE_MS || '1800000', 10);
       return Number.isFinite(configured) && configured > 0
-        ? Math.min(configured, 1_500_000)
-        : 1_500_000;
+        ? Math.min(configured, 1_800_000)
+        : 1_800_000;
     })(),
+  },
+
+  // ============ 15-25 second early-flow entry ============
+  earlyFlow: {
+    enabled: (process.env.EARLY_FLOW_ENABLED ?? 'true').toLowerCase() === 'true',
+    minMigrationAgeMs: parseInt(process.env.EARLY_FLOW_MIN_AGE_MS || '15000', 10),
+    maxMigrationAgeMs: parseInt(process.env.EARLY_FLOW_MAX_AGE_MS || '25000', 10),
+    minFdvUsd: parseFloat(process.env.EARLY_FLOW_MIN_FDV_USD || '15000'),
+    maxFdvUsd: parseFloat(process.env.EARLY_FLOW_MAX_FDV_USD || '100000'),
+    solPriceUsd: parseFloat(process.env.EARLY_FLOW_SOL_PRICE_USD || '75.5'),
+    priceWindowMs: parseInt(process.env.EARLY_FLOW_PRICE_WINDOW_MS || '10000', 10),
+    minPriceChangePct: parseFloat(process.env.EARLY_FLOW_MIN_PRICE_CHANGE_PCT || '-10'),
+    maxPriceChangePct: parseFloat(process.env.EARLY_FLOW_MAX_PRICE_CHANGE_PCT || '8'),
+    netFlowWindowMs: parseInt(process.env.EARLY_FLOW_NET_FLOW_WINDOW_MS || '1000', 10),
+    activityWindowMs: parseInt(process.env.EARLY_FLOW_ACTIVITY_WINDOW_MS || '5000', 10),
+    minUniqueBuyers: parseInt(process.env.EARLY_FLOW_MIN_UNIQUE_BUYERS || '3', 10),
+    minTradeCount: parseInt(process.env.EARLY_FLOW_MIN_TRADE_COUNT || '4', 10),
+    maxLargestBuyShare: parseFloat(
+      process.env.EARLY_FLOW_MAX_LARGEST_BUY_SHARE || '0.70',
+    ),
+    executionWindowMs: parseInt(process.env.EARLY_FLOW_EXECUTION_WINDOW_MS || '3000', 10),
+    maxExecutionPriceDeviationPct: parseFloat(
+      process.env.EARLY_FLOW_MAX_EXECUTION_PRICE_DEVIATION_PCT || '15',
+    ),
+    marketFreshMs: parseInt(process.env.EARLY_FLOW_MARKET_FRESH_MS || '1500', 10),
   },
 
   // ============ Price anomaly filter ============

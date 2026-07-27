@@ -18,7 +18,8 @@ const { getMonitor } = require('./monitor/HealthMonitor');
 const AlertChecker = require('./monitor/AlertChecker');
 const TokenWatchdog = require('./core/TokenWatchdog');
 const CompetitorTracker = require('./core/CompetitorTracker');
-const ActivityRsiTracker = require('./core/ActivityRsiTracker');
+const EarlyFlowEntryTracker = require('./core/EarlyFlowEntryTracker');
+const Ema15sTracker = require('./core/Ema15sTracker');
 const PumpGraduationDiscovery = require('./core/PumpGraduationDiscovery');
 const { isLikelyVaultAddress } = require('./utils/pumpMigrationParser');
 
@@ -35,32 +36,23 @@ async function main() {
   console.log(`Mode: ${config.DRY_RUN ? 'DRY_RUN' : '⚠️  LIVE TRADING ⚠️'}`);
   console.log(`Position: ${config.strategy.positionSizeSol} SOL`);
   console.log(
-    `Entry: ACTIVITY_RSI (AGE ${config.activityRsi.minMigrationAgeMs / 60_000}-` +
-      `${config.activityRsi.maxMigrationAgeMs / 60_000}min, ` +
-      `FDV $${config.activityRsi.minFdvUsd}-$${config.activityRsi.maxFdvUsd}, ` +
-      `1m volume >$${config.activityRsi.minVolumeUsd}, ` +
-      `buyers1m >=${config.activityRsi.minUniqueBuyers1m}, ` +
-      `RSI(${config.activityRsi.rsi5sPeriod},5s) crosses above ${config.activityRsi.rsiBuyCross}, ` +
-      `SOL=$${config.activityRsi.solPriceUsd})`,
+    `Entry: EARLY_FLOW (AGE ${config.earlyFlow.minMigrationAgeMs / 1000}-` +
+      `${config.earlyFlow.maxMigrationAgeMs / 1000}s, ` +
+      `FDV $${config.earlyFlow.minFdvUsd}-$${config.earlyFlow.maxFdvUsd}, ` +
+      `change10s ${config.earlyFlow.minPriceChangePct}%..+${config.earlyFlow.maxPriceChangePct}%, ` +
+      `flow1s>0, buyers5s>=${config.earlyFlow.minUniqueBuyers}, ` +
+      `tx5s>=${config.earlyFlow.minTradeCount}, ` +
+      `largestBuyShare<=${config.earlyFlow.maxLargestBuyShare * 100}%)`,
   );
   console.log(
-    `Exit only: stop ${config.strategy.fixedStopLossPct < 0
-      ? `${config.strategy.fixedStopLossPct}%`
-      : 'disabled'}; ` +
-      `take profit ${config.strategy.takeProfitPct > 0
-        ? `+${config.strategy.takeProfitPct}%`
-        : 'disabled'}; ` +
-      'RSI exit disabled; ' +
+    'Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; ' +
+      `EMA${config.strategy.emaFastPeriod}/EMA${config.strategy.emaSlowPeriod} down-cross; ` +
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
-      '(plus token-age exit)',
+      `and FDV <$${config.strategy.fdvExitUsd} (plus token-age exit)`,
   );
   console.log('Legacy entries/exits: disabled');
   console.log(`Rebuy cooldown: ${config.strategy.rebuyCooldownMs > 0 ? config.strategy.rebuyCooldownMs / 60_000 + 'min after close' : 'disabled'}`);
-  console.log(
-    `Stop-loss cooldown: ${config.strategy.stopLossRebuyCooldownMs > 0
-      ? config.strategy.stopLossRebuyCooldownMs / 1000 + 's after FIXED_STOP_LOSS'
-      : 'disabled'}`,
-  );
+  console.log('Stop-loss cooldown: disabled (fixed stop disabled)');
   console.log(
     `Watchdog: FDV=${watchdogFdvRange}, liquidity>=$${config.strategy.minLiquidityUsd}, ` +
       `migrationAge=${maxTokenAgeMs > 0 ? (maxTokenAgeMs / 60_000) + 'min' : 'disabled'} ` +
@@ -158,8 +150,7 @@ async function main() {
   // 只有完全不需要 RSI 数据时才设 null
   if (rsiCalculator) {
     console.log(
-      `[main] RSI analytics enabled, entry requires RSI(${config.activityRsi.rsi5sPeriod},5s) ` +
-        `cross above ${config.activityRsi.rsiBuyCross}`,
+      '[main] RSI analytics enabled for reporting only; RSI does not filter entry or exit',
     );
     if (rsiMode === 'slope') {
       console.warn('[main] ⚠️  RSI_FILTER=slope conflicts with sniper strategy. Consider RSI_FILTER=peak or off.');
@@ -228,24 +219,28 @@ async function main() {
     followSellMinWinRate: parseFloat(process.env.COMPETITOR_FOLLOW_SELL_MIN_WINRATE || '60'),
     followSellMinClosed: parseInt(process.env.COMPETITOR_FOLLOW_SELL_MIN_CLOSED || '10', 10),
   });
-  const activityRsiTracker = new ActivityRsiTracker({ rsiCalculator });
+  const earlyFlowTracker = new EarlyFlowEntryTracker({ tokenRegistry });
+  const ema15sTracker = new Ema15sTracker();
+  ema15sTracker.on('downCross', (cross) => {
+    positionManager.handleEmaDownCross(cross);
+  });
   console.log(
-    `[main] ActivityRsi ${activityRsiTracker.enabled ? 'enabled' : 'disabled'}: ` +
-      `entryAge=${config.activityRsi.minMigrationAgeMs / 60_000}-` +
-      `${config.activityRsi.maxMigrationAgeMs / 60_000}min ` +
-      `entryFDV=$${config.activityRsi.minFdvUsd}-$${config.activityRsi.maxFdvUsd} ` +
-      `volume1m>$${activityRsiTracker.minVolumeUsd} ` +
-      `buyers1m>=${activityRsiTracker.minUniqueBuyers1m} ` +
-      `RSI(${activityRsiTracker.rsi5sPeriod},5s) cross>${activityRsiTracker.rsiBuyCross} ` +
-      `SOL=$${activityRsiTracker.solPriceUsd}`,
+    `[main] EarlyFlow ${earlyFlowTracker.enabled ? 'enabled' : 'disabled'}: ` +
+      `age=${config.earlyFlow.minMigrationAgeMs / 1000}-` +
+      `${config.earlyFlow.maxMigrationAgeMs / 1000}s ` +
+      `fdv=$${config.earlyFlow.minFdvUsd}-$${config.earlyFlow.maxFdvUsd} ` +
+      `change10s=${config.earlyFlow.minPriceChangePct}%..+` +
+      `${config.earlyFlow.maxPriceChangePct}% flow1s>0 ` +
+      `buyers5s>=${config.earlyFlow.minUniqueBuyers} ` +
+      `tx5s>=${config.earlyFlow.minTradeCount}`,
   );
   dumpDetector.on("swapParsed", (swap) => {
     if (config.capture.swapEventsEnabled) {
       try { tradeLogger.logSwapEvent(swap); } catch (_) { /* analytics only */ }
     }
     try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
-    try { activityRsiTracker.handleSwap(swap); } catch (err) {
-      console.warn(`[ActivityRsi] handleSwap failed: ${err.message}`);
+    try { earlyFlowTracker.handleSwap(swap); } catch (err) {
+      console.warn(`[EarlyFlowEntry] handleSwap failed: ${err.message}`);
     }
   });
 
@@ -265,9 +260,9 @@ async function main() {
   });
   // v3.17.41: PositionManager blacklist needs signalEngine reference
   positionManager.signalEngine = signalEngine;
-  activityRsiTracker.on('activityRsiSignal', (signal) => {
-    Promise.resolve(signalEngine.handleActivityRsiSignal(signal)).catch((err) => {
-      console.error(`[ActivityRsi] SignalEngine error: ${err.message}`);
+  earlyFlowTracker.on('earlyFlowSignal', (signal) => {
+    Promise.resolve(signalEngine.handleEarlyFlowSignal(signal)).catch((err) => {
+      console.error(`[EarlyFlowEntry] SignalEngine error: ${err.message}`);
     });
   });
 
@@ -282,7 +277,8 @@ async function main() {
     onTokenListChanged: () => {
       const mints = tokenRegistry.listActive().map((t) => t.mint);
       tickStream.updateSubscription(mints);
-      // v2: 同步 EMA 监控列表
+      earlyFlowTracker.cleanup(mints);
+      ema15sTracker.cleanup(mints);
     },
     onTokenAdded: async (token) => {
       // 新增代币 → 后台异步补 pool 信息
@@ -291,7 +287,6 @@ async function main() {
           console.warn(`[onTokenAdded] fillPool failed for ${token.symbol || token.mint.slice(0,8)}: ${err.message}`);
         });
       }
-      // v2: 新币加入 EMA 监控
     },
   });
 
@@ -300,7 +295,8 @@ async function main() {
     onBeforeAdd: (mint) => server._evictIfNeeded(mint),
     onMigrationDetected: (migration) => {
       if (rsiCalculator) rsiCalculator.reset(migration.mint, 'pump_migration');
-      activityRsiTracker.reset(migration.mint);
+      earlyFlowTracker.reset(migration.mint);
+      ema15sTracker.reset(migration.mint);
       positionManager.resetRsi5sForExit(migration.mint);
     },
     onTokenAdded: async ({ token, migration, screening, evicted }) => {
@@ -342,10 +338,14 @@ async function main() {
     onTokenRemoved: () => {
       const mints = tokenRegistry.listActive().map((t) => t.mint);
       tickStream.updateSubscription(mints);
-      // v2: 同步 EMA 监控列表
+      earlyFlowTracker.cleanup(mints);
+      ema15sTracker.cleanup(mints);
     },
   });
   signalEngine.setEntryMarketProvider(
+    (mint) => tokenWatchdog.getLatestRealtimeMarket(mint),
+  );
+  earlyFlowTracker.setMarketProvider(
     (mint) => tokenWatchdog.getLatestRealtimeMarket(mint),
   );
   tokenWatchdog.start();
@@ -379,7 +379,7 @@ async function main() {
   }, 3600_000);
 
   // Legacy creation-age cleanup is intentionally disabled. TokenWatchdog owns
-  // the single age rule and exits/removes tokens by migration age after 25 minutes.
+  // the single age rule and exits/removes tokens by migration age after 30 minutes.
   if (process.env.TOKEN_MAX_AGE_MS && process.env.TOKEN_MAX_AGE_MS !== '0') {
     console.warn('[main] TOKEN_MAX_AGE_MS is legacy and ignored');
   }
@@ -678,6 +678,24 @@ async function main() {
       monitor.inc('main.realtimeMarketTickRemoved', 1, 'main');
       return;
     }
+    if (realtimeMarketResult?.fdvUsd > 0) {
+      positionManager.handleFdvForExit({
+        mint,
+        price,
+        fdvUsd: realtimeMarketResult.fdvUsd,
+        ts,
+        slot,
+        signature,
+      });
+    }
+    ema15sTracker.handlePriceTick({
+      mint,
+      price,
+      ts,
+      slot,
+      signature,
+      poolAddress,
+    });
     priceTracker.update(mint, price, ts, poolAddress, {
       slot,
       signature,

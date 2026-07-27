@@ -90,7 +90,7 @@ class TokenWatchdog {
       250,
       parseInt(process.env.WATCHDOG_REALTIME_MARKET_PERSIST_MS || '1000', 10),
     );
-    this.solPriceUsd = Number(config.activityRsi.solPriceUsd) || 0;
+    this.solPriceUsd = Number(config.earlyFlow.solPriceUsd) || 0;
 
     this._pendingExitMints = new Set();
     this._checkInterval = null;
@@ -106,7 +106,7 @@ class TokenWatchdog {
       `checkEvery=${this.checkIntervalMs / 60_000}min`,
       `market=dexscreener(batch ${this.marketBatchSize})+birdeye fallback`,
     ];
-    if (this.poolStateCache && this.solPriceUsd > 0) {
+    if (this.solPriceUsd > 0) {
       features.push(`realtimeFDV/LP=${this.realtimeMarketPersistMs}ms`);
     }
     if (this.maxWatchDurationMs > 0) features.push(`maxWatch=${this.maxWatchDurationMs / 60000}min`);
@@ -301,30 +301,46 @@ class TokenWatchdog {
     poolQuoteAfter,
     baseDecimals,
   } = {}) {
-    if (!mint || !this.poolStateCache || this.solPriceUsd <= 0) return null;
+    if (!mint || this.solPriceUsd <= 0) return null;
 
     const token = this.tokenRegistry.getToken?.(mint);
     if (!token || Number(token.is_active) !== 1) return null;
 
     const resolvedPoolAddress = poolAddress || token.pool_address;
     if (!resolvedPoolAddress) return null;
-    const state = this.poolStateCache.get(resolvedPoolAddress);
-    if (!state?.baseMintAccount || !state.poolQuoteAmount) return null;
+    const state = this.poolStateCache?.get?.(resolvedPoolAddress) || null;
 
     const priceSol = this._number(price);
-    const supplyRaw = this._number(state.baseMintAccount.supply);
-    const decimals = this._number(state.baseMintAccount.decimals) ??
+    const supplyRaw = this._number(state?.baseMintAccount?.supply);
+    const decimals = this._number(state?.baseMintAccount?.decimals) ??
       this._number(baseDecimals) ??
       this._number(token.decimals) ??
       6;
     const supplyScale = 10 ** decimals;
-    const supplyUi = supplyRaw != null && supplyRaw > 0 && Number.isFinite(supplyScale)
+    let supplyUi = supplyRaw != null && supplyRaw > 0 && Number.isFinite(supplyScale)
       ? supplyRaw / supplyScale
       : null;
+    if (!(supplyUi > 0)) {
+      let tokenMeta = {};
+      try {
+        tokenMeta = token.meta_json ? JSON.parse(token.meta_json) : {};
+      } catch (_) {}
+      supplyUi = this._number(tokenMeta.supplyUi ?? token.supplyUi);
+      if (!(supplyUi > 0)) {
+        const persistedSupply = this._number(token.supply ?? tokenMeta.supply);
+        if (persistedSupply > 0) {
+          // Helius DAS stores supply in base units. Older realtime snapshots
+          // stored the already-scaled UI value, so retain that compatibility.
+          supplyUi = persistedSupply > 1e12 && Number.isFinite(supplyScale)
+            ? persistedSupply / supplyScale
+            : persistedSupply;
+        }
+      }
+    }
 
     let quoteSol = this._number(poolQuoteAfter);
     if (!(quoteSol > 0)) {
-      const quoteRaw = this._number(state.poolQuoteAmount);
+      const quoteRaw = this._number(state?.poolQuoteAmount);
       quoteSol = quoteRaw != null ? quoteRaw / 1e9 : null;
     }
     if (!(priceSol > 0) || !(supplyUi > 0) || !(quoteSol > 0)) return null;
@@ -358,7 +374,7 @@ class TokenWatchdog {
         liquidity: liquidityUsd,
         price: priceUsd,
         priceSol,
-        supply: supplyUi,
+        supplyUi,
         poolQuoteSol: quoteSol,
         marketSource: 'chain_pool_realtime',
         fetchedAt: now,

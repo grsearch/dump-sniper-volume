@@ -124,6 +124,207 @@ class SignalEngine extends EventEmitter {
     if (timer.unref) timer.unref();
   }
 
+  async _handleEarlyFlowSignal(signal, signalReceivedAt) {
+    const { mint, symbol, signature, ts, slot } = signal;
+    const now = Date.now();
+    const details = signal._earlyFlowDetails || {};
+    const signalPrice = Number(details.signalPrice);
+    const executionPrice = Number(details.executionPrice);
+    const executionDelayMs = Number(details.executionDelayMs);
+    const signalAgeMs = Number(details.signalMigrationAgeMs);
+    const fdvUsd = Number(details.fdvUsd);
+    const priceChangePct = Number(details.priceChangePct);
+    const netFlow1sSol = Number(details.netFlow1sSol);
+    const uniqueBuyers5s = Number(details.uniqueBuyers5s);
+    const tradeCount5s = Number(details.tradeCount5s);
+    const largestBuyShare5s = Number(details.largestBuyShare5s);
+    const maxSignalAgeMs = Math.max(config.earlyFlow.executionWindowMs, 5_000);
+
+    if (
+      !mint ||
+      !Number.isFinite(signalPrice) ||
+      signalPrice <= 0 ||
+      !Number.isFinite(executionPrice) ||
+      executionPrice <= 0
+    ) {
+      this._logReject(signal, 'invalid early-flow signal');
+      return;
+    }
+    if (ts && now - ts > maxSignalAgeMs) {
+      monitor.inc('SignalEngine.rejectedPushLag', 1, 'SignalEngine');
+      this._logReject(signal, `signal stale: ${now - ts}ms > ${maxSignalAgeMs}ms`);
+      return;
+    }
+    if (signature && this.ourSignatures.has(signature)) {
+      monitor.inc('SignalEngine.rejectedSelfTrigger', 1, 'SignalEngine');
+      this._logReject(signal, 'self-triggered');
+      return;
+    }
+
+    const executionCooldownUntil = Number(this._exitCooldowns.get(mint)) || 0;
+    if (executionCooldownUntil > now) {
+      monitor.inc('SignalEngine.rejectedExecutionCooldown', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        `buy execution cooldown: ${Math.ceil((executionCooldownUntil - now) / 1000)}s remaining`,
+      );
+      return;
+    }
+    if (executionCooldownUntil > 0) this._exitCooldowns.delete(mint);
+
+    const openCount = this.positionManager.openPositionCount();
+    const inflightCount = this.inflightBuys.size;
+    if (openCount + inflightCount >= config.strategy.maxConcurrentPositions) {
+      monitor.inc('SignalEngine.rejectedMaxConcurrent', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        `max concurrent (${openCount} open + ${inflightCount} inflight / ` +
+          `${config.strategy.maxConcurrentPositions})`,
+      );
+      return;
+    }
+    if (this.inflightBuys.has(mint)) {
+      monitor.inc('SignalEngine.rejectedInflightBuy', 1, 'SignalEngine');
+      this._logReject(signal, 'buy in-flight');
+      return;
+    }
+    const mintOpenCount = this.positionManager.openPositionCountByMint
+      ? this.positionManager.openPositionCountByMint(mint)
+      : (this.positionManager.hasOpenPosition(mint) ? 1 : 0);
+    if (mintOpenCount > 0) {
+      monitor.inc('SignalEngine.rejectedAddonCondition', 1, 'SignalEngine');
+      this._logReject(signal, 'existing position; add-on disabled');
+      return;
+    }
+
+    if (
+      !Number.isFinite(signalAgeMs) ||
+      signalAgeMs < config.earlyFlow.minMigrationAgeMs ||
+      signalAgeMs > config.earlyFlow.maxMigrationAgeMs
+    ) {
+      this._logReject(
+        signal,
+        `ENTRY_AGE_OUT_OF_RANGE: ${this._numberLabel(signalAgeMs / 1000, 2)}s`,
+      );
+      return;
+    }
+    if (
+      !Number.isFinite(fdvUsd) ||
+      fdvUsd < config.earlyFlow.minFdvUsd ||
+      fdvUsd > config.earlyFlow.maxFdvUsd
+    ) {
+      this._logReject(signal, `ENTRY_FDV_OUT_OF_RANGE: $${this._numberLabel(fdvUsd, 0)}`);
+      return;
+    }
+    if (
+      !Number.isFinite(priceChangePct) ||
+      priceChangePct < config.earlyFlow.minPriceChangePct ||
+      priceChangePct > config.earlyFlow.maxPriceChangePct
+    ) {
+      this._logReject(
+        signal,
+        `PRICE_CHANGE_10S_OUT_OF_RANGE: ${this._numberLabel(priceChangePct, 2)}%`,
+      );
+      return;
+    }
+    if (!(netFlow1sSol > 0)) {
+      this._logReject(signal, `NET_FLOW_1S_NOT_POSITIVE: ${this._numberLabel(netFlow1sSol, 3)}SOL`);
+      return;
+    }
+    if (
+      !Number.isFinite(uniqueBuyers5s) ||
+      uniqueBuyers5s < config.earlyFlow.minUniqueBuyers
+    ) {
+      this._logReject(signal, `UNIQUE_BUYERS_5S_LOW: ${uniqueBuyers5s}`);
+      return;
+    }
+    if (
+      !Number.isFinite(tradeCount5s) ||
+      tradeCount5s < config.earlyFlow.minTradeCount
+    ) {
+      this._logReject(signal, `TRADE_COUNT_5S_LOW: ${tradeCount5s}`);
+      return;
+    }
+    if (
+      !Number.isFinite(largestBuyShare5s) ||
+      largestBuyShare5s > config.earlyFlow.maxLargestBuyShare
+    ) {
+      this._logReject(
+        signal,
+        `LARGEST_BUY_SHARE_5S_HIGH: ${this._numberLabel(largestBuyShare5s * 100, 1)}%`,
+      );
+      return;
+    }
+    if (
+      !Number.isFinite(executionDelayMs) ||
+      executionDelayMs < 0 ||
+      executionDelayMs > config.earlyFlow.executionWindowMs
+    ) {
+      this._logReject(signal, `EXECUTION_WINDOW_MISSED: ${executionDelayMs}ms`);
+      return;
+    }
+    const maxExecutionPrice = signalPrice *
+      (1 + config.earlyFlow.maxExecutionPriceDeviationPct / 100);
+    if (executionPrice > maxExecutionPrice) {
+      this._logReject(
+        signal,
+        `EXECUTION_PRICE_HIGH: ${((executionPrice / signalPrice - 1) * 100).toFixed(2)}%`,
+      );
+      return;
+    }
+
+    const reason =
+      `early_flow: age=${(signalAgeMs / 1000).toFixed(1)}s ` +
+      `fdv=$${fdvUsd.toFixed(0)} change10s=${priceChangePct.toFixed(2)}% ` +
+      `flow1s=${netFlow1sSol.toFixed(3)}SOL buyers5s=${uniqueBuyers5s} ` +
+      `tx5s=${tradeCount5s} largestBuyShare=${(largestBuyShare5s * 100).toFixed(1)}% ` +
+      `execution=${executionDelayMs}ms/${((executionPrice / signalPrice - 1) * 100).toFixed(2)}%`;
+
+    this.inflightBuys.add(mint);
+    this.lastTriggerTs.set(mint, now);
+    monitor.inc('SignalEngine.signalsAccepted', 1, 'SignalEngine');
+    this.emit('buyOrder', {
+      ...signal,
+      reason,
+      entryFdvUsd: fdvUsd,
+      entryFdvSource: 'chain_realtime_signal',
+      sizeSol: config.strategy.positionSizeSol,
+      _signalReceivedAt: signalReceivedAt,
+    });
+    console.log(
+      `[SignalEngine] BUY_SIGNAL ${symbol || mint.slice(0, 6)}: ${reason}` +
+        (slot ? ` slot=${slot}` : ''),
+    );
+
+    setImmediate(() => {
+      try {
+        this.tradeLogger.logSignal({
+          ts,
+          mint,
+          symbol,
+          kind: 'EARLY_FLOW',
+          sellSol: 0,
+          priceImpactPct: 0,
+          seller: null,
+          sellerTx: signature,
+          notes: reason,
+          accepted: true,
+        });
+      } catch (err) {
+        monitor.recordError('SignalEngine', err, { phase: 'logEarlyFlowSignal_async' });
+      }
+    });
+  }
+
+  async handleEarlyFlowSignal(signal) {
+    monitor.beat('SignalEngine', 'signal');
+    const signalReceivedAt = Date.now();
+    if (!signal || !signal._earlyFlow) {
+      throw new Error('SignalEngine only accepts early-flow entry signals');
+    }
+    return this._handleEarlyFlowSignal(signal, signalReceivedAt);
+  }
+
   async _handleActivityRsiSignal(signal, signalReceivedAt) {
     const { mint, symbol, signature, ts, slot } = signal;
     const now = Date.now();
@@ -346,7 +547,9 @@ class SignalEngine extends EventEmitter {
         ts: signal.ts,
         mint: signal.mint,
         symbol: signal.symbol,
-        kind: signal._activityRsi ? 'ACTIVITY_RSI' : 'LEGACY_ENTRY',
+        kind: signal._earlyFlow
+          ? 'EARLY_FLOW'
+          : (signal._activityRsi ? 'ACTIVITY_RSI' : 'LEGACY_ENTRY'),
         sellSol: signal.sellSol,
         priceImpactPct: signal.priceImpactPct,
         seller: signal.seller,

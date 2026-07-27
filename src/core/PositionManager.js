@@ -162,6 +162,95 @@ class PositionManager extends EventEmitter {
     return pids != null && pids.size > 0;
   }
 
+  handleFdvForExit({ mint, price, fdvUsd, ts, slot, signature } = {}) {
+    const threshold = Number(config.strategy.fdvExitUsd) || 0;
+    if (!config.strategy.dedicatedExitOnly || threshold <= 0 || !mint) return false;
+    const currentFdv = Number(fdvUsd);
+    const currentPrice = Number(price);
+    if (
+      !Number.isFinite(currentFdv) ||
+      currentFdv >= threshold ||
+      !Number.isFinite(currentPrice) ||
+      currentPrice <= 0
+    ) {
+      return false;
+    }
+
+    const pids = this.byMint.get(mint);
+    if (!pids || pids.size === 0) return false;
+    let triggered = false;
+    for (const pid of pids) {
+      const pos = this.positions.get(pid);
+      if (
+        !pos ||
+        pos.exiting ||
+        pos.status === 'stuck' ||
+        (!pos.reconciled && !pos.dryRun)
+      ) {
+        continue;
+      }
+      pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
+      pos._exitMarketTs = pos._exitMarketTs || Number(ts) || null;
+      pos._exitTriggerSource = pos._exitTriggerSource || 'chain_realtime_fdv';
+      console.warn(
+        `[PositionManager] FDV_STOP ${pos.symbol || mint.slice(0, 6)} ` +
+          `fdv=$${currentFdv.toFixed(0)} < $${threshold} price=${currentPrice.toExponential(6)}`,
+      );
+      monitor.inc('PositionManager.fdvStop', 1, 'PositionManager');
+      this._exitForCondition(pos, currentPrice, 'FDV_STOP');
+      triggered = true;
+    }
+    return triggered;
+  }
+
+  handleEmaDownCross({
+    mint,
+    price,
+    ts,
+    slot,
+    signature,
+    emaFast,
+    emaSlow,
+  } = {}) {
+    if (
+      !config.strategy.dedicatedExitOnly ||
+      !config.strategy.emaExitEnabled ||
+      !mint
+    ) {
+      return false;
+    }
+    const currentPrice = Number(price);
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) return false;
+    const pids = this.byMint.get(mint);
+    if (!pids || pids.size === 0) return false;
+
+    let triggered = false;
+    for (const pid of pids) {
+      const pos = this.positions.get(pid);
+      if (
+        !pos ||
+        pos.exiting ||
+        pos.status === 'stuck' ||
+        (!pos.reconciled && !pos.dryRun)
+      ) {
+        continue;
+      }
+      pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
+      pos._exitMarketTs = pos._exitMarketTs || Number(ts) || null;
+      pos._exitTriggerSource = pos._exitTriggerSource || 'ema15s_down_cross';
+      const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+      console.log(
+        `[PositionManager] EMA9_CROSS_BELOW_EMA20 ${pos.symbol || mint.slice(0, 6)} ` +
+          `pnl=${pnlPct.toFixed(2)}% ema9=${Number(emaFast).toExponential(4)} ` +
+          `ema20=${Number(emaSlow).toExponential(4)}`,
+      );
+      monitor.inc('PositionManager.emaExit', 1, 'PositionManager');
+      this._exitForCondition(pos, currentPrice, 'EMA9_CROSS_BELOW_EMA20');
+      triggered = true;
+    }
+    return triggered;
+  }
+
   handleSwapForExit(swap) {
     const s = config.strategy;
     if (s.dedicatedExitOnly) return;

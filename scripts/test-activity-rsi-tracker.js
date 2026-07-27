@@ -31,6 +31,7 @@ function swap(mint, ts, solVolume, price = 1, signer = `wallet:${ts}`) {
 function makeTracker(opts = {}) {
   let rsi = 29;
   const tracker = new ActivityRsiTracker({
+    enabled: true,
     rsiCalculator: {
       snapshot: () => ({ rsi5s: rsi, bucketCount5s: 8 }),
     },

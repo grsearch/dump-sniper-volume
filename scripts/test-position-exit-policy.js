@@ -1,9 +1,8 @@
 'use strict';
 
-process.env.ACTIVITY_RSI_TRAILING_ACTIVATE_PCT = '30';
-process.env.ACTIVITY_RSI_TRAILING_DRAWDOWN_PCT = '5';
-process.env.ACTIVITY_RSI_STOP_LOSS_PCT = '-20';
-process.env.ACTIVITY_RSI_TAKE_PROFIT_PCT = '10';
+process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT = '40';
+process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT = '10';
+process.env.EARLY_FLOW_FDV_EXIT_USD = '10000';
 
 const assert = require('assert');
 const Module = require('module');
@@ -73,12 +72,14 @@ function rsi(value) {
 function run() {
   const mint = 'TestMint111111111111111111111111111111111';
   assert.strictEqual(config.strategy.dedicatedExitOnly, true);
-  assert.strictEqual(config.strategy.takeProfitPct, 10);
-  assert.strictEqual(config.strategy.fixedStopLossPct, -20);
+  assert.strictEqual(config.strategy.takeProfitPct, 0);
+  assert.strictEqual(config.strategy.fixedStopLossPct, 0);
   assert.strictEqual(config.strategy.maxHoldMs, 0);
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
-  assert.strictEqual(config.strategy.trailingActivatePct, 30);
-  assert.strictEqual(config.strategy.trailingDrawdownPct, 5);
+  assert.strictEqual(config.strategy.trailingActivatePct, 40);
+  assert.strictEqual(config.strategy.trailingDrawdownPct, 10);
+  assert.strictEqual(config.strategy.emaExitEnabled, true);
+  assert.strictEqual(config.strategy.fdvExitUsd, 10_000);
   assert.strictEqual(config.strategy.rsi5sExitEnabled, false);
 
   {
@@ -93,98 +94,37 @@ function run() {
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 0.801);
-    assert.strictEqual(manager._exitCalls.length, 0, '-19.9% must not trigger the fixed stop');
-    manager._checkExit('p1', 0.8);
-    assert.strictEqual(manager._exitCalls[0].reason, 'FIXED_STOP_LOSS');
-  }
-
-  {
-    const manager = managerWith(position('p1', mint, { buySlot: 200 }));
-    manager._checkExit('p1', 0.8, {
-      slot: 199,
-      signature: 'older-signature',
-      source: 'chain_swap',
-    });
-    manager._checkExit('p1', 0.8, {
-      slot: 200,
-      signature: 'same-slot-signature',
-      source: 'chain_swap',
-    });
-    assert.strictEqual(
-      manager._exitCalls.length,
-      0,
-      'prices from before or within the BUY landing slot must not trigger a stop',
-    );
-    assert.strictEqual(manager.positions.get('p1').tickCount, undefined);
-    manager._checkExit('p1', 0.8, {
-      slot: 201,
-      signature: 'post-buy-signature',
-      source: 'chain_swap',
-    });
-    assert.strictEqual(manager._exitCalls[0].reason, 'FIXED_STOP_LOSS');
-  }
-
-  {
-    const manager = managerWith(position('p1', mint, {
-      buySlot: 200,
-      reconciledAt: 2_000,
-    }));
-    manager._checkExit('p1', 0.8, {
-      slot: 0,
-      source: 'pool_poll_rpc_cache',
-      marketSource: 'rpc',
-      snapshotRequestedAt: 1_999,
-      snapshotFetchedAt: 2_001,
-    });
-    assert.strictEqual(
-      manager._exitCalls.length,
-      0,
-      'an RPC request started before BUY reconciliation must not trigger a stop',
-    );
-    assert.strictEqual(manager.positions.get('p1').tickCount, undefined);
-  }
-
-  {
-    const manager = managerWith(position('p1', mint, {
-      buySlot: 200,
-      reconciledAt: 2_000,
-    }));
-    manager._checkExit('p1', 0.8, {
-      slot: 0,
-      source: 'pool_poll_rpc',
-      marketSource: 'rpc',
-      snapshotRequestedAt: 2_001,
-      snapshotFetchedAt: 2_002,
-    });
-    assert.strictEqual(
-      manager._exitCalls[0].reason,
-      'FIXED_STOP_LOSS',
-      'a fresh RPC pool quote must remain eligible for immediate stop loss',
-    );
+    manager._checkExit('p1', 0.5);
+    assert.strictEqual(manager._exitCalls.length, 0, 'fixed stop must remain disabled');
   }
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 1.099);
+    manager._checkExit('p1', 1.4);
+    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+40% must arm trailing');
     assert.strictEqual(manager._exitCalls.length, 0);
-    manager._checkExit('p1', 1.1);
-    assert.strictEqual(manager._exitCalls[0].reason, 'TAKE_PROFIT');
+    manager._checkExit('p1', 1.26);
+    assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
   }
 
   {
-    const configuredTakeProfitPct = config.strategy.takeProfitPct;
-    config.strategy.takeProfitPct = 0;
-    try {
-      const manager = managerWith(position('p1', mint));
-      manager._checkExit('p1', 1.3);
-      assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+30% must arm trailing');
-      assert.strictEqual(manager._exitCalls.length, 0);
-      manager._checkExit('p1', 1.235);
-      assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
-    } finally {
-      config.strategy.takeProfitPct = configuredTakeProfitPct;
-    }
+    const manager = managerWith(position('p1', mint));
+    manager.handleFdvForExit({ mint, price: 0.8, fdvUsd: 10_000 });
+    assert.strictEqual(manager._exitCalls.length, 0, 'FDV exactly $10,000 must not exit');
+    manager.handleFdvForExit({ mint, price: 0.8, fdvUsd: 9_999 });
+    assert.strictEqual(manager._exitCalls[0].reason, 'FDV_STOP');
+  }
+
+  {
+    const manager = managerWith(position('p1', mint));
+    manager.handleEmaDownCross({
+      mint,
+      price: 1.05,
+      ts: Date.now(),
+      emaFast: 1.01,
+      emaSlow: 1.02,
+    });
+    assert.strictEqual(manager._exitCalls[0].reason, 'EMA9_CROSS_BELOW_EMA20');
   }
 
   {
@@ -216,7 +156,7 @@ function run() {
     assert.strictEqual(manager._exitCalls.length, 0, 'timeout exit must be disabled');
   }
 
-  console.log('Dedicated activity/RSI exit policy tests: PASS');
+  console.log('Dedicated early-flow exit policy tests: PASS');
   process.exit(0);
 }
 
