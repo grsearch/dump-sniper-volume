@@ -253,8 +253,9 @@ class PositionManager extends EventEmitter {
 
   handleSwapForExit(swap) {
     const s = config.strategy;
-    if (s.dedicatedExitOnly) return;
-    if (!s.flowReversalExitEnabled || !swap || !swap.mint) return;
+    const earlyWrongEnabled = !!s.earlyWrongExitEnabled;
+    const legacyFlowEnabled = !s.dedicatedExitOnly && !!s.flowReversalExitEnabled;
+    if ((!earlyWrongEnabled && !legacyFlowEnabled) || !swap || !swap.mint) return;
 
     const pids = this.byMint.get(swap.mint);
     if (!pids || pids.size === 0) return;
@@ -272,6 +273,7 @@ class PositionManager extends EventEmitter {
       solVolume,
       signer: swap.signer || null,
       ts: Number.isFinite(swap.ts) ? swap.ts : Date.now(),
+      receivedAt: Number.isFinite(swap.receivedAt) ? swap.receivedAt : Date.now(),
       signature: swap.signature || null,
     };
 
@@ -280,13 +282,16 @@ class PositionManager extends EventEmitter {
       events = [];
       this._flowExitEvents.set(swap.mint, events);
     }
-    events.push(ev);
-    this._pruneFlowExitEvents(swap.mint, ev.ts);
+    const duplicate = ev.signature &&
+      events.some((event) => event.signature === ev.signature);
+    if (!duplicate) events.push(ev);
+    this._pruneFlowExitEvents(swap.mint, ev.receivedAt);
 
     for (const pid of pids) {
       const pos = this.positions.get(pid);
       if (pos && !pos.exiting && pos.status !== 'stuck') {
-        this._maybeFlowReversalExit(pos, price, ev.ts);
+        if (earlyWrongEnabled) this._maybeEarlyWrongExit(pos, ev);
+        if (legacyFlowEnabled) this._maybeFlowReversalExit(pos, price, ev.ts);
       }
     }
   }
@@ -296,13 +301,21 @@ class PositionManager extends EventEmitter {
     if (!events) return;
 
     const s = config.strategy;
+    const legacyWindowMs = !s.dedicatedExitOnly && s.flowReversalExitEnabled
+      ? Math.max(
+        s.flowReversalExitWindowMs || 60_000,
+        s.flowReversalExitWindow5Ms || 5_000,
+        s.flowReversalExitWindow15Ms || 15_000,
+      )
+      : 0;
     const maxWindowMs = Math.max(
-      s.flowReversalExitWindowMs || 60_000,
-      s.flowReversalExitWindow5Ms || 5_000,
-      s.flowReversalExitWindow15Ms || 15_000,
+      legacyWindowMs,
+      s.earlyWrongExitEnabled
+        ? (s.earlyWrongExitFlowWindowMs || 3_000) * 2
+        : 0,
     ) + 1_000;
     const cutoff = now - maxWindowMs;
-    const kept = events.filter((ev) => ev.ts >= cutoff);
+    const kept = events.filter((ev) => (ev.receivedAt || ev.ts) >= cutoff);
     if (kept.length > 0) this._flowExitEvents.set(mint, kept);
     else this._flowExitEvents.delete(mint);
   }
@@ -334,6 +347,181 @@ class PositionManager extends EventEmitter {
       lastPrice: last ? last.price : 0,
       lastSide: last ? last.side : null,
     };
+  }
+
+  _resetEarlyWrongCandidate(pos) {
+    if (!pos) return;
+    pos._earlyWrongFirstSeenAt = null;
+    pos._earlyWrongConfirmCount = 0;
+    pos._earlyWrongLastSignature = null;
+  }
+
+  _maybeEarlyWrongExit(pos, event) {
+    const s = config.strategy;
+    if (!s.earlyWrongExitEnabled || !pos || pos.exiting || pos.status === 'stuck') return;
+
+    const now = Number(event?.receivedAt) || Date.now();
+    const holdStart = Number(pos.openedAt) || Number(pos.reconciledAt) || now;
+    const holdMs = now - holdStart;
+    const price = Number(event?.price);
+    const entryPrice = Number(pos.entryPrice);
+    const ownBuy = !!(
+      event?.signature &&
+      pos.buySignature &&
+      event.signature === pos.buySignature
+    );
+    if (
+      holdMs >= 0 &&
+      !ownBuy &&
+      Number.isFinite(price) &&
+      price > 0 &&
+      Number.isFinite(entryPrice) &&
+      entryPrice > 0 &&
+      price / entryPrice >= 0.1 &&
+      price / entryPrice <= 10
+    ) {
+      pos._earlyWrongPeakPrice = Math.max(
+        Number(pos._earlyWrongPeakPrice) || entryPrice,
+        price,
+      );
+    }
+    if (!pos.reconciled && !pos.dryRun) return;
+    if (pos.trailingArmed) {
+      this._resetEarlyWrongCandidate(pos);
+      return;
+    }
+    if (
+      holdMs < s.earlyWrongExitMinHoldMs ||
+      holdMs > s.earlyWrongExitMaxHoldMs
+    ) {
+      this._resetEarlyWrongCandidate(pos);
+      return;
+    }
+
+    const signalPrice = Number(pos.entrySignalPrice) || entryPrice;
+    const preEntryVwap = Number(pos.preEntryVwap5s) || signalPrice;
+    if (
+      !Number.isFinite(price) ||
+      price <= 0 ||
+      !Number.isFinite(entryPrice) ||
+      entryPrice <= 0 ||
+      !Number.isFinite(preEntryVwap) ||
+      preEntryVwap <= 0
+    ) {
+      this._resetEarlyWrongCandidate(pos);
+      return;
+    }
+
+    const peak = Math.max(
+      Number(pos.highWaterMark) || entryPrice,
+      Number(pos._earlyWrongPeakPrice) || entryPrice,
+      entryPrice,
+    );
+    const peakPnlPct = ((peak - entryPrice) / entryPrice) * 100;
+    const priceBreakPct = ((price - preEntryVwap) / preEntryVwap) * 100;
+    const priceStructureFailed =
+      price < signalPrice &&
+      priceBreakPct <= s.earlyWrongExitPriceBreakPct + 1e-9;
+
+    const windowMs = Math.max(1, s.earlyWrongExitFlowWindowMs);
+    const events = (this._flowExitEvents.get(pos.mint) || [])
+      .filter((item) => {
+        const eventTs = Number(item.receivedAt) || Number(item.ts) || 0;
+        if (eventTs < holdStart - windowMs || eventTs > now) return false;
+        return !(
+          item.signature &&
+          pos.buySignature &&
+          item.signature === pos.buySignature
+        );
+      });
+    const currentStart = now - windowMs;
+    const previousStart = currentStart - windowMs;
+    const current = events.filter((item) => {
+      const eventTs = Number(item.receivedAt) || Number(item.ts) || 0;
+      return eventTs > currentStart;
+    });
+    const previous = events.filter((item) => {
+      const eventTs = Number(item.receivedAt) || Number(item.ts) || 0;
+      return eventTs > previousStart && eventTs <= currentStart;
+    });
+    const currentBuys = current.filter((item) => item.side === 'BUY');
+    const currentSells = current.filter((item) => item.side === 'SELL');
+    const buySol = sumSolVolume(currentBuys);
+    const sellSol = sumSolVolume(currentSells);
+    const netFlowSol = buySol - sellSol;
+    const sellBuyRatio = sellSol / Math.max(buySol, 0.001);
+    const currentBuyers = uniqueCount(currentBuys, 'signer');
+    let previousBuyers = uniqueCount(
+      previous.filter((item) => item.side === 'BUY'),
+      'signer',
+    );
+    if (holdMs <= windowMs * 2) {
+      previousBuyers = Math.max(
+        previousBuyers,
+        Number(pos.preEntryUniqueBuyers3s) || 0,
+      );
+    }
+    const buyerExpansionFailed =
+      currentBuyers <= s.earlyWrongExitMaxUniqueBuyers &&
+      currentBuyers < previousBuyers;
+    const flowFailed =
+      netFlowSol < 0 &&
+      sellBuyRatio >= s.earlyWrongExitSellBuyRatio;
+    const neverStrengthened = peakPnlPct < s.earlyWrongExitMaxPeakPnlPct;
+    const candidate =
+      neverStrengthened &&
+      priceStructureFailed &&
+      flowFailed &&
+      buyerExpansionFailed;
+
+    if (!candidate) {
+      this._resetEarlyWrongCandidate(pos);
+      return;
+    }
+
+    const signature = event.signature ||
+      `${event.side}:${event.receivedAt}:${event.price}`;
+    if (!pos._earlyWrongFirstSeenAt) {
+      pos._earlyWrongFirstSeenAt = now;
+      pos._earlyWrongConfirmCount = 1;
+      pos._earlyWrongLastSignature = signature;
+      monitor.inc('PositionManager.earlyWrongExitCandidate', 1, 'PositionManager');
+      console.log(
+        `[PositionManager] EARLY_INVALIDATION_PENDING ${pos.symbol || pos.mint.slice(0, 6)} ` +
+          `hold=${holdMs}ms peak=${peakPnlPct.toFixed(2)}% ` +
+          `vwapBreak=${priceBreakPct.toFixed(2)}% ` +
+          `flow3s=${netFlowSol.toFixed(3)}SOL sell/buy=${sellBuyRatio.toFixed(2)} ` +
+          `buyers3s=${currentBuyers}<${previousBuyers}`,
+      );
+      return;
+    }
+    if (signature !== pos._earlyWrongLastSignature) {
+      pos._earlyWrongConfirmCount = (pos._earlyWrongConfirmCount || 0) + 1;
+      pos._earlyWrongLastSignature = signature;
+    }
+
+    const confirmElapsedMs = now - pos._earlyWrongFirstSeenAt;
+    if (
+      confirmElapsedMs < s.earlyWrongExitConfirmMs ||
+      pos._earlyWrongConfirmCount < s.earlyWrongExitConfirmTrades
+    ) {
+      return;
+    }
+
+    const pnlPct = ((price - entryPrice) / entryPrice) * 100;
+    pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
+    pos._exitMarketTs = pos._exitMarketTs || Number(event.ts) || null;
+    pos._exitTriggerSource = pos._exitTriggerSource || 'chain_swap_early_invalidation';
+    console.warn(
+      `[PositionManager] EARLY_ENTRY_INVALIDATED ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `hold=${holdMs}ms pnl=${pnlPct.toFixed(2)}% peak=${peakPnlPct.toFixed(2)}% ` +
+        `vwapBreak=${priceBreakPct.toFixed(2)}% ` +
+        `flow3s=${netFlowSol.toFixed(3)}SOL sell/buy=${sellBuyRatio.toFixed(2)} ` +
+        `buyers3s=${currentBuyers}<${previousBuyers} ` +
+        `confirm=${pos._earlyWrongConfirmCount}/${confirmElapsedMs}ms`,
+    );
+    monitor.inc('PositionManager.earlyEntryInvalidated', 1, 'PositionManager');
+    this._exitForCondition(pos, price, 'EARLY_ENTRY_INVALIDATED');
   }
 
   _maybeFlowReversalExit(pos, price, now) {
@@ -873,7 +1061,7 @@ class PositionManager extends EventEmitter {
    * @param {string} p.signature
    * @param {number} [p.buyFeeLamports] - BUY tx 的 priority fee + base fee (lamports)
    */
-  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySlot, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, isEmaStrategy = false, isAddOn = false }) {
+  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySlot, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, entrySignalPrice, preEntryVwap5s, preEntryUniqueBuyers3s, isEmaStrategy = false, isAddOn = false }) {
     const pid = positionId || crypto.randomUUID();
     const pos = {
       positionId: pid,
@@ -900,6 +1088,13 @@ class PositionManager extends EventEmitter {
       highWaterMark: entryPrice,
       highWaterMarkTs: Date.now(),
       trailingArmed: false,
+      entrySignalPrice: Number(entrySignalPrice) || entryPrice,
+      preEntryVwap5s: Number(preEntryVwap5s) || Number(entrySignalPrice) || entryPrice,
+      preEntryUniqueBuyers3s: Number(preEntryUniqueBuyers3s) || 0,
+      _earlyWrongPeakPrice: entryPrice,
+      _earlyWrongFirstSeenAt: null,
+      _earlyWrongConfirmCount: 0,
+      _earlyWrongLastSignature: null,
       // v3.17.6: stabilization 期
       //   DRY_RUN：开仓即进入 stabilization(用估算价格作起点)
       //   LIVE：reconcile 完成时进入 stabilization

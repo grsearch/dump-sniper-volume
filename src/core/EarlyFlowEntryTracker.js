@@ -176,6 +176,7 @@ class EarlyFlowEntryTracker extends EventEmitter {
 
     state.pending = null;
     state.done = true;
+    const executionMetrics = this._metrics(state.events, ts, price) || pending.metrics;
     const details = {
       ...pending.metrics,
       fdvUsd: pending.fdvUsd,
@@ -187,6 +188,8 @@ class EarlyFlowEntryTracker extends EventEmitter {
       executionPrice: price,
       executionDelayMs: ts - pending.signalTs,
       maxExecutionPriceDeviationPct: this.maxExecutionPriceDeviationPct,
+      preEntryVwap5s: executionMetrics.priceVwap5s,
+      preEntryUniqueBuyers3s: executionMetrics.uniqueBuyers3s,
     };
     const signal = {
       mint: swap.mint,
@@ -267,12 +270,26 @@ class EarlyFlowEntryTracker extends EventEmitter {
     const activityEvents = events.filter((event) => event.ts > ts - this.activityWindowMs);
     const buys = activityEvents.filter((event) => event.side === 'BUY');
     const totalBuySol = buys.reduce((sum, event) => sum + event.solVolume, 0);
+    const totalVolumeSol = activityEvents.reduce(
+      (sum, event) => sum + event.solVolume,
+      0,
+    );
+    const weightedPrice = activityEvents.reduce(
+      (sum, event) => sum + (event.price * event.solVolume),
+      0,
+    );
     const largestBuySol = buys.reduce(
       (max, event) => Math.max(max, event.solVolume),
       0,
     );
     const uniqueBuyers = new Set(
       buys.map((event) => event.signer).filter(Boolean),
+    ).size;
+    const uniqueBuyers3s = new Set(
+      events
+        .filter((event) => event.ts > ts - 3_000 && event.side === 'BUY')
+        .map((event) => event.signer)
+        .filter(Boolean),
     ).size;
     const netFlow1sSol = flowEvents.reduce(
       (sum, event) => sum + (event.side === 'BUY' ? event.solVolume : -event.solVolume),
@@ -288,6 +305,8 @@ class EarlyFlowEntryTracker extends EventEmitter {
       buySol5s: totalBuySol,
       largestBuySol5s: largestBuySol,
       largestBuyShare5s: totalBuySol > 0 ? largestBuySol / totalBuySol : Infinity,
+      priceVwap5s: totalVolumeSol > 0 ? weightedPrice / totalVolumeSol : currentPrice,
+      uniqueBuyers3s,
     };
   }
 

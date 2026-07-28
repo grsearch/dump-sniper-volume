@@ -50,6 +50,16 @@ async function main() {
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
       `and FDV <$${config.strategy.fdvExitUsd} (plus token-age exit)`,
   );
+  console.log(
+    `Early invalidation: ${config.strategy.earlyWrongExitEnabled ? 'enabled' : 'disabled'} ` +
+      `(${config.strategy.earlyWrongExitMinHoldMs / 1000}-` +
+      `${config.strategy.earlyWrongExitMaxHoldMs / 1000}s, ` +
+      `peak<${config.strategy.earlyWrongExitMaxPeakPnlPct}%, ` +
+      `VWAP break<=${config.strategy.earlyWrongExitPriceBreakPct}%, ` +
+      `sell/buy>=${config.strategy.earlyWrongExitSellBuyRatio}, ` +
+      `confirm=${config.strategy.earlyWrongExitConfirmTrades}/` +
+      `${config.strategy.earlyWrongExitConfirmMs}ms)`,
+  );
   console.log('Legacy entries/exits: disabled');
   console.log(`Rebuy cooldown: ${config.strategy.rebuyCooldownMs > 0 ? config.strategy.rebuyCooldownMs / 60_000 + 'min after close' : 'disabled'}`);
   console.log('Stop-loss cooldown: disabled (fixed stop disabled)');
@@ -241,6 +251,9 @@ async function main() {
     try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
     try { earlyFlowTracker.handleSwap(swap); } catch (err) {
       console.warn(`[EarlyFlowEntry] handleSwap failed: ${err.message}`);
+    }
+    try { positionManager.handleSwapForExit(swap); } catch (err) {
+      console.warn(`[PositionManager] handleSwapForExit failed: ${err.message}`);
     }
   });
 
@@ -867,6 +880,9 @@ async function main() {
       rsiPreDump: order.rsiPreDump,              // v3.17.38: 砸单前 RSI5s
       rsi1sPreDump: order.rsi1sPreDump,          // v3.17.38: 砸单前 RSI1s
       rsi30sPreDump: order.rsi30sPreDump,        // v3.17.42: 砸单前 RSI30s
+      entrySignalPrice: order._earlyFlowDetails?.signalPrice,
+      preEntryVwap5s: order._earlyFlowDetails?.preEntryVwap5s,
+      preEntryUniqueBuyers3s: order._earlyFlowDetails?.preEntryUniqueBuyers3s,
       isEmaStrategy: false,  // EMA removed
       isAddOn: order._isAddOn || false,                 // 加仓标记
     });

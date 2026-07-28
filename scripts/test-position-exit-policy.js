@@ -3,6 +3,16 @@
 process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT = '40';
 process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT = '10';
 process.env.EARLY_FLOW_FDV_EXIT_USD = '10000';
+process.env.EARLY_WRONG_EXIT_ENABLED = 'true';
+process.env.EARLY_WRONG_EXIT_MIN_HOLD_MS = '3000';
+process.env.EARLY_WRONG_EXIT_MAX_HOLD_MS = '15000';
+process.env.EARLY_WRONG_EXIT_MAX_PEAK_PNL_PCT = '3';
+process.env.EARLY_WRONG_EXIT_PRICE_BREAK_PCT = '-3';
+process.env.EARLY_WRONG_EXIT_FLOW_WINDOW_MS = '3000';
+process.env.EARLY_WRONG_EXIT_SELL_BUY_RATIO = '1.5';
+process.env.EARLY_WRONG_EXIT_MAX_UNIQUE_BUYERS = '1';
+process.env.EARLY_WRONG_EXIT_CONFIRM_MS = '500';
+process.env.EARLY_WRONG_EXIT_CONFIRM_TRADES = '2';
 
 const assert = require('assert');
 const Module = require('module');
@@ -33,6 +43,10 @@ function position(id, mint, overrides = {}) {
     trailingArmed: false,
     exiting: false,
     status: 'open',
+    entrySignalPrice: 1,
+    preEntryVwap5s: 1,
+    preEntryUniqueBuyers3s: 3,
+    buySignature: 'our-buy-signature',
     ...overrides,
   };
 }
@@ -44,6 +58,7 @@ function managerWith(...positions) {
   manager._rsiExitSkipLogAt = new Map();
   manager._lastRsi5sByMint = new Map();
   manager._pendingRsi5sExit = new Map();
+  manager._flowExitEvents = new Map();
   manager._exitCalls = [];
   manager._tickCount = 0;
   manager.priceTracker = { getPrice: () => 1, forceSet() {} };
@@ -65,6 +80,20 @@ function managerWith(...positions) {
   return manager;
 }
 
+function exitSwap(mint, receivedAt, overrides = {}) {
+  return {
+    mint,
+    side: 'SELL',
+    price: 0.95,
+    solVolume: 0.2,
+    signer: `seller-${receivedAt}`,
+    signature: `sell-${receivedAt}`,
+    ts: receivedAt,
+    receivedAt,
+    ...overrides,
+  };
+}
+
 function rsi(value) {
   return { rsi5s: value, bucketCount5s: 8 };
 }
@@ -81,6 +110,9 @@ function run() {
   assert.strictEqual(config.strategy.emaExitEnabled, true);
   assert.strictEqual(config.strategy.fdvExitUsd, 10_000);
   assert.strictEqual(config.strategy.rsi5sExitEnabled, false);
+  assert.strictEqual(config.strategy.earlyWrongExitEnabled, true);
+  assert.strictEqual(config.strategy.earlyWrongExitMinHoldMs, 3_000);
+  assert.strictEqual(config.strategy.earlyWrongExitMaxHoldMs, 15_000);
 
   {
     const manager = managerWith();
@@ -146,6 +178,121 @@ function run() {
       manager._exitCalls.length,
       0,
       '5-second RSI down-cross and overbought exits must both remain disabled',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 5_000,
+      reconciledAt: now - 5_000,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'one invalidation trade must only arm confirmation',
+    );
+    manager.handleSwapForExit(exitSwap(mint, now + 600, { price: 0.94 }));
+    assert.strictEqual(manager._exitCalls.length, 1);
+    assert.strictEqual(manager._exitCalls[0].reason, 'EARLY_ENTRY_INVALIDATED');
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 5_000,
+      reconciledAt: now - 5_000,
+      highWaterMark: 1.04,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, { price: 0.94 }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'a position that already gained at least 3% must not be classified as never-strengthened',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const pos = position('p1', mint, {
+      openedAt: now - 5_000,
+      reconciledAt: null,
+      reconciled: false,
+      highWaterMark: 1,
+    });
+    const manager = managerWith(pos);
+    manager.handleSwapForExit(exitSwap(mint, now - 1_000, {
+      side: 'BUY',
+      price: 1.04,
+      signer: 'market-buyer',
+      signature: 'market-buy-before-reconcile',
+    }));
+    pos.reconciled = true;
+    pos.reconciledAt = now - 500;
+    manager.handleSwapForExit(exitSwap(mint, now));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, { price: 0.94 }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'a pre-reconciliation market peak must still protect a position that strengthened',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 5_000,
+      reconciledAt: now - 5_000,
+      trailingArmed: true,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, { price: 0.94 }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'trailing must own the exit after it has armed',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 5_000,
+      reconciledAt: now - 5_000,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now - 100, {
+      side: 'BUY',
+      price: 0.95,
+      solVolume: 0.5,
+      signer: 'our-wallet',
+      signature: 'our-buy-signature',
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now, { solVolume: 0.2 }));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, {
+      price: 0.94,
+      solVolume: 0.2,
+    }));
+    assert.strictEqual(
+      manager._exitCalls[0].reason,
+      'EARLY_ENTRY_INVALIDATED',
+      'the bot buy must be excluded from post-entry flow',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 16_000,
+      reconciledAt: now - 16_000,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, { price: 0.94 }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'entry invalidation must stop evaluating after 15 seconds',
     );
   }
 

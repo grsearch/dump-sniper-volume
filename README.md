@@ -34,13 +34,21 @@ Solana / Pump.fun 实时交易机器人。当前唯一自动策略是
 
 以下任一条件成立即卖出：
 
-1. **15秒已收盘K线 EMA9 下穿 EMA20**。
+1. **买入后快速判错**，退出原因为 `EARLY_ENTRY_INVALIDATED`：
+   - 仅在买入后3～15秒运行；移动止盈激活后永久关闭。
+   - 买入后最高涨幅始终小于3%。
+   - 当前可信价格低于信号价，且跌破买入前5秒VWAP至少3%。
+   - 最近3秒净资金流为负，卖量/买量不低于1.5。
+   - 最近3秒独立买家不超过1个，并少于此前3秒。
+   - 上述条件必须持续至少500ms，并由至少2笔不同的可信成交确认。
+   - 机器人的自身买入不计入资金流和买家数。
+2. **15秒已收盘K线 EMA9 下穿 EMA20**。
    - EMA20 至少需要20根已收盘15秒K线。
    - 不超过5分钟的空档使用上一收盘价补齐；更长空档重置EMA。
    - 下穿后等待收盘时刻至少500ms，并在下一笔可信成交上执行。
-2. **移动止盈：上涨40%激活，从最高点回撤10%卖出**。
-3. **实时 FDV < $10,000** 时应急退出。
-4. 迁移 AGE **>30分钟**仍未退出时，以 `TOKEN_AGE_EXPIRED` 平仓并移出监控。
+3. **移动止盈：上涨40%激活，从最高点回撤10%卖出**。
+4. **实时 FDV < $10,000** 时应急退出。
+5. 迁移 AGE **>30分钟**仍未退出时，以 `TOKEN_AGE_EXPIRED` 平仓并移出监控。
 
 固定止损、固定止盈、RSI卖出、流动反转、趋势/区间止损、防御模式和其他旧自动卖出
 策略均关闭。该策略允许单笔出现较大浮亏，应继续使用小仓位验证。
@@ -105,6 +113,17 @@ EARLY_FLOW_TRAILING_ACTIVATE_PCT=40
 EARLY_FLOW_TRAILING_DRAWDOWN_PCT=10
 EARLY_FLOW_FDV_EXIT_USD=10000
 
+EARLY_WRONG_EXIT_ENABLED=true
+EARLY_WRONG_EXIT_MIN_HOLD_MS=3000
+EARLY_WRONG_EXIT_MAX_HOLD_MS=15000
+EARLY_WRONG_EXIT_MAX_PEAK_PNL_PCT=3
+EARLY_WRONG_EXIT_PRICE_BREAK_PCT=-3
+EARLY_WRONG_EXIT_FLOW_WINDOW_MS=3000
+EARLY_WRONG_EXIT_SELL_BUY_RATIO=1.5
+EARLY_WRONG_EXIT_MAX_UNIQUE_BUYERS=1
+EARLY_WRONG_EXIT_CONFIRM_MS=500
+EARLY_WRONG_EXIT_CONFIRM_TRADES=2
+
 BUY_SLIPPAGE_BPS=5000
 BUY_MAX_PRICE_DEVIATION_PCT=15
 BUY_MAX_POOL_STATE_AGE_MS=500
@@ -129,6 +148,7 @@ SWAP_EVENT_LOG_ENABLED=true
 ~~~text
 Entry: EARLY_FLOW (AGE 15-25s, FDV $15000-$100000, change10s -10%..+8%, flow1s>0, buyers5s>=3, tx5s>=4, largestBuyShare<=70%)
 Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +40% / drawdown 10% and FDV <$10000 (plus token-age exit)
+Early invalidation: enabled (3-15s, peak<3%, VWAP break<=-3%, sell/buy>=1.5, confirm=2/500ms)
 Executor: ... BUY chain ceiling=50%, signal-price cap=+15%, pool-state max age=500ms, CU=250000
 Legacy entries/exits: disabled
 Watchdog: ... migrationAge=30min

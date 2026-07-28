@@ -112,6 +112,9 @@ function feedQualifyingWindow(tracker, finalPrice = 1.02) {
   assert.strictEqual(signals[0]._earlyFlowDetails.tradeCount5s, 4);
   assert.strictEqual(signals[0]._earlyFlowDetails.executionDelayMs, 400);
   assert.strictEqual(signals[0]._earlyFlowDetails.signalMigrationAgeMs, 15_000);
+  assert(Number.isFinite(signals[0]._earlyFlowDetails.preEntryVwap5s));
+  assert(signals[0]._earlyFlowDetails.preEntryVwap5s > 1);
+  assert.strictEqual(signals[0]._earlyFlowDetails.preEntryUniqueBuyers3s, 2);
 }
 
 {

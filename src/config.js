@@ -96,6 +96,44 @@ const config = {
       10,
     ),
     fdvExitUsd: parseFloat(process.env.EARLY_FLOW_FDV_EXIT_USD || '10000'),
+    // High-precision post-entry invalidation. This is deliberately not a
+    // percentage stop: price structure, order flow, and buyer expansion must
+    // all fail before the position is closed.
+    earlyWrongExitEnabled:
+      (process.env.EARLY_WRONG_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    earlyWrongExitMinHoldMs: parseInt(
+      process.env.EARLY_WRONG_EXIT_MIN_HOLD_MS || '3000',
+      10,
+    ),
+    earlyWrongExitMaxHoldMs: parseInt(
+      process.env.EARLY_WRONG_EXIT_MAX_HOLD_MS || '15000',
+      10,
+    ),
+    earlyWrongExitMaxPeakPnlPct: parseFloat(
+      process.env.EARLY_WRONG_EXIT_MAX_PEAK_PNL_PCT || '3',
+    ),
+    earlyWrongExitPriceBreakPct: parseFloat(
+      process.env.EARLY_WRONG_EXIT_PRICE_BREAK_PCT || '-3',
+    ),
+    earlyWrongExitFlowWindowMs: parseInt(
+      process.env.EARLY_WRONG_EXIT_FLOW_WINDOW_MS || '3000',
+      10,
+    ),
+    earlyWrongExitSellBuyRatio: parseFloat(
+      process.env.EARLY_WRONG_EXIT_SELL_BUY_RATIO || '1.5',
+    ),
+    earlyWrongExitMaxUniqueBuyers: parseInt(
+      process.env.EARLY_WRONG_EXIT_MAX_UNIQUE_BUYERS || '1',
+      10,
+    ),
+    earlyWrongExitConfirmMs: parseInt(
+      process.env.EARLY_WRONG_EXIT_CONFIRM_MS || '500',
+      10,
+    ),
+    earlyWrongExitConfirmTrades: parseInt(
+      process.env.EARLY_WRONG_EXIT_CONFIRM_TRADES || '2',
+      10,
+    ),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值
     // 智能规则: trailing已armed时不触发(trailing自行处理回撤), 只救trailing永远不armed的死扛仓位
