@@ -23,6 +23,26 @@ class TradeLogger {
     this.db = db;
     this._initSchema();
     this._prepareStatements();
+    this._researchBuffer = [];
+    const configuredFlushMs = parseInt(
+      process.env.POSITION_RESEARCH_FLUSH_MS || '250',
+      10,
+    );
+    const configuredFlushMax = parseInt(
+      process.env.POSITION_RESEARCH_FLUSH_MAX || '1000',
+      10,
+    );
+    this._researchFlushMs = Number.isFinite(configuredFlushMs)
+      ? Math.max(50, configuredFlushMs)
+      : 250;
+    this._researchFlushMax = Number.isFinite(configuredFlushMax)
+      ? Math.max(100, configuredFlushMax)
+      : 1000;
+    this._researchFlushTimer = setInterval(
+      () => this.flushResearchEvents(),
+      this._researchFlushMs,
+    );
+    if (this._researchFlushTimer.unref) this._researchFlushTimer.unref();
   }
 
   _initSchema() {
@@ -147,6 +167,49 @@ class TradeLogger {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_events_sig_mint_side
         ON swap_events(signature, mint, side)
         WHERE signature IS NOT NULL AND signature != '';
+
+      CREATE TABLE IF NOT EXISTS position_research_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        position_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        event_type TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        received_at INTEGER NOT NULL,
+        hold_ms INTEGER,
+        slot INTEGER,
+        signature TEXT,
+        side TEXT,
+        signer TEXT,
+        sol_volume REAL,
+        price REAL,
+        raw_price REAL,
+        pool_address TEXT,
+        pool_base_after REAL,
+        pool_quote_after REAL,
+        base_decimals INTEGER,
+        supply_ui REAL,
+        fdv_usd REAL,
+        liquidity_usd REAL,
+        entry_sol REAL,
+        entry_price REAL,
+        signal_price REAL,
+        pre_entry_vwap_5s REAL,
+        token_amount REAL,
+        market_pnl_pct REAL,
+        peak_pnl_pct REAL,
+        drawdown_pct REAL,
+        trailing_armed INTEGER NOT NULL DEFAULT 0,
+        reconciled INTEGER NOT NULL DEFAULT 0,
+        metrics_json TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_position_research_pos_ts
+        ON position_research_events(position_id, received_at);
+      CREATE INDEX IF NOT EXISTS idx_position_research_mint_ts
+        ON position_research_events(mint, received_at);
+      CREATE INDEX IF NOT EXISTS idx_position_research_type_ts
+        ON position_research_events(event_type, received_at);
     `);
 
     // v3.17.19: migrate dump_slot column for upgrading from earlier schemas
@@ -191,6 +254,46 @@ class TradeLogger {
     try {
       this.db.exec('ALTER TABLE positions ADD COLUMN is_addon INTEGER DEFAULT 0');
     } catch (_) { /* column already exists */ }
+
+    const positionResearchColumns = [
+      // Columns referenced by PositionManager/closePosition but absent from
+      // some fresh or older database schemas.
+      'peak_price REAL',
+      'peak_ts INTEGER',
+      'peak_pnl_pct REAL',
+      'time_to_peak_ms INTEGER',
+      'price_tick_count INTEGER DEFAULT 0',
+      'pre_vol_5m_pct REAL',
+      'range_support REAL',
+      'entry_signal_price REAL',
+      'pre_entry_vwap_5s REAL',
+      'pre_entry_unique_buyers_3s INTEGER',
+      'entry_metrics_json TEXT',
+    ];
+    for (const definition of positionResearchColumns) {
+      try {
+        this.db.exec(`ALTER TABLE positions ADD COLUMN ${definition}`);
+      } catch (_) { /* column already exists */ }
+    }
+
+    const swapResearchColumns = [
+      'received_at INTEGER',
+      'raw_price REAL',
+      'pool_base_after REAL',
+      'base_decimals INTEGER',
+      'virtual_quote_reserve_sol REAL',
+      'effective_quote_reserve_sol REAL',
+      'supply_ui REAL',
+      'fdv_usd REAL',
+      'liquidity_usd REAL',
+      'price_usd REAL',
+      'market_fetched_at INTEGER',
+    ];
+    for (const definition of swapResearchColumns) {
+      try {
+        this.db.exec(`ALTER TABLE swap_events ADD COLUMN ${definition}`);
+      } catch (_) { /* column already exists */ }
+    }
   }
 
   _prepareStatements() {
@@ -239,10 +342,16 @@ class TradeLogger {
       insertSwapEvent: this.db.prepare(`
         INSERT OR IGNORE INTO swap_events
           (ts, mint, symbol, signer, side, sol_volume, price, price_before, price_change_pct,
-           slot, signature, pool_address, pool_quote_after)
+           slot, signature, pool_address, pool_quote_after, received_at, raw_price,
+           pool_base_after, base_decimals, virtual_quote_reserve_sol,
+           effective_quote_reserve_sol, supply_ui, fdv_usd, liquidity_usd,
+           price_usd, market_fetched_at)
         VALUES
           (@ts, @mint, @symbol, @signer, @side, @solVolume, @price, @priceBefore, @priceChangePct,
-           @slot, @signature, @poolAddress, @poolQuoteAfter)
+           @slot, @signature, @poolAddress, @poolQuoteAfter, @receivedAt, @rawPrice,
+           @poolBaseAfter, @baseDecimals, @virtualQuoteReserveSol,
+           @effectiveQuoteReserveSol, @supplyUi, @fdvUsd, @liquidityUsd,
+           @priceUsd, @marketFetchedAt)
       `),
 
       swapEventsInRange: this.db.prepare(`
@@ -257,13 +366,15 @@ class TradeLogger {
            entry_fdv, entry_pool_sol, entry_liquidity,
            sell_count_10s, total_sell_sol_10s,
            mint_age_at_buy_sec, rsi_pre_dump, rsi_1s_pre_dump, rsi_30s_pre_dump,
-           is_ema_strategy, is_addon, status)
+           entry_signal_price, pre_entry_vwap_5s, pre_entry_unique_buyers_3s,
+           entry_metrics_json, is_ema_strategy, is_addon, status)
         VALUES (@positionId, @mint, @symbol, @openedAt, @entrySol, @entryPrice, @tokenAmount,
                 @dryRun, @buySignature, @buyFeeLamports, @buySlot, @dumpSlot,
                 @entryFdv, @entryPoolSol, @entryLiquidity,
                 @sellCount10s, @totalSellSol10s,
                 @mintAgeAtBuySec, @rsiPreDump, @rsi1sPreDump, @rsi30sPreDump,
-                @isEmaStrategy, @isAddOn, 'open')
+                @entrySignalPrice, @preEntryVwap5s, @preEntryUniqueBuyers3s,
+                @entryMetricsJson, @isEmaStrategy, @isAddOn, 'open')
         ON CONFLICT(position_id) DO UPDATE SET
           opened_at = excluded.opened_at,
           entry_sol = excluded.entry_sol,
@@ -282,9 +393,33 @@ class TradeLogger {
           rsi_pre_dump = excluded.rsi_pre_dump,
           rsi_1s_pre_dump = excluded.rsi_1s_pre_dump,
           rsi_30s_pre_dump = excluded.rsi_30s_pre_dump,
+          entry_signal_price = excluded.entry_signal_price,
+          pre_entry_vwap_5s = excluded.pre_entry_vwap_5s,
+          pre_entry_unique_buyers_3s = excluded.pre_entry_unique_buyers_3s,
+          entry_metrics_json = excluded.entry_metrics_json,
           is_ema_strategy = excluded.is_ema_strategy,
           is_addon = excluded.is_addon,
           status = 'open'
+      `),
+
+      insertPositionResearchEvent: this.db.prepare(`
+        INSERT INTO position_research_events (
+          position_id, mint, symbol, event_type, ts, received_at, hold_ms,
+          slot, signature, side, signer, sol_volume, price, raw_price,
+          pool_address, pool_base_after, pool_quote_after, base_decimals,
+          supply_ui, fdv_usd, liquidity_usd, entry_sol, entry_price,
+          signal_price, pre_entry_vwap_5s, token_amount, market_pnl_pct,
+          peak_pnl_pct, drawdown_pct, trailing_armed, reconciled,
+          metrics_json, created_at
+        ) VALUES (
+          @positionId, @mint, @symbol, @eventType, @ts, @receivedAt, @holdMs,
+          @slot, @signature, @side, @signer, @solVolume, @price, @rawPrice,
+          @poolAddress, @poolBaseAfter, @poolQuoteAfter, @baseDecimals,
+          @supplyUi, @fdvUsd, @liquidityUsd, @entrySol, @entryPrice,
+          @signalPrice, @preEntryVwap5s, @tokenAmount, @marketPnlPct,
+          @peakPnlPct, @drawdownPct, @trailingArmed, @reconciled,
+          @metricsJson, @createdAt
+        )
       `),
 
       updateEntry: this.db.prepare(`
@@ -399,6 +534,11 @@ class TradeLogger {
         SELECT * FROM positions WHERE status = 'stuck' ORDER BY opened_at DESC
       `),
     };
+    this._insertResearchBatch = this.db.transaction((rows) => {
+      for (const row of rows) {
+        this.stmts.insertPositionResearchEvent.run(row);
+      }
+    });
   }
 
   // ============================================================
@@ -477,8 +617,99 @@ class TradeLogger {
         signature: swap.signature || null,
         poolAddress: swap.poolAddress || null,
         poolQuoteAfter: num(swap.poolQuoteAfter),
+        receivedAt: num(swap.receivedAt) || Date.now(),
+        rawPrice: num(swap.rawPrice),
+        poolBaseAfter: num(swap.poolBaseAfter),
+        baseDecimals: num(swap.baseDecimals),
+        virtualQuoteReserveSol: num(swap.virtualQuoteReserveSol),
+        effectiveQuoteReserveSol: num(swap.effectiveQuoteReserveSol),
+        supplyUi: num(swap.supplyUi),
+        fdvUsd: num(swap.fdvUsd),
+        liquidityUsd: num(swap.liquidityUsd),
+        priceUsd: num(swap.priceUsd),
+        marketFetchedAt: num(swap.marketFetchedAt),
       });
     } catch (_) { /* best effort; strategy must never block on analytics writes */ }
+  }
+
+  logPositionResearchEvent(event) {
+    if (!event || !event.positionId || !event.mint || !event.eventType) return;
+    const num = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    };
+    let metricsJson = null;
+    try {
+      metricsJson = typeof event.metricsJson === 'string'
+        ? event.metricsJson
+        : JSON.stringify(event.metrics || {});
+    } catch (_) {
+      metricsJson = JSON.stringify({ serializationError: true });
+    }
+
+    this._researchBuffer.push({
+      positionId: event.positionId,
+      mint: event.mint,
+      symbol: event.symbol || null,
+      eventType: event.eventType,
+      ts: num(event.ts) || Date.now(),
+      receivedAt: num(event.receivedAt) || Date.now(),
+      holdMs: num(event.holdMs),
+      slot: num(event.slot),
+      signature: event.signature || null,
+      side: event.side || null,
+      signer: event.signer || null,
+      solVolume: num(event.solVolume),
+      price: num(event.price),
+      rawPrice: num(event.rawPrice),
+      poolAddress: event.poolAddress || null,
+      poolBaseAfter: num(event.poolBaseAfter),
+      poolQuoteAfter: num(event.poolQuoteAfter),
+      baseDecimals: num(event.baseDecimals),
+      supplyUi: num(event.supplyUi),
+      fdvUsd: num(event.fdvUsd),
+      liquidityUsd: num(event.liquidityUsd),
+      entrySol: num(event.entrySol),
+      entryPrice: num(event.entryPrice),
+      signalPrice: num(event.signalPrice),
+      preEntryVwap5s: num(event.preEntryVwap5s),
+      tokenAmount: num(event.tokenAmount),
+      marketPnlPct: num(event.marketPnlPct),
+      peakPnlPct: num(event.peakPnlPct),
+      drawdownPct: num(event.drawdownPct),
+      trailingArmed: event.trailingArmed ? 1 : 0,
+      reconciled: event.reconciled ? 1 : 0,
+      metricsJson,
+      createdAt: Date.now(),
+    });
+
+    if (this._researchBuffer.length >= this._researchFlushMax) {
+      this.flushResearchEvents();
+    }
+  }
+
+  flushResearchEvents() {
+    if (!this._researchBuffer || this._researchBuffer.length === 0) return 0;
+    const rows = this._researchBuffer.splice(0, this._researchBuffer.length);
+    try {
+      this._insertResearchBatch(rows);
+      return rows.length;
+    } catch (err) {
+      const retryCapacity = this._researchFlushMax * 10;
+      this._researchBuffer = rows
+        .concat(this._researchBuffer)
+        .slice(-retryCapacity);
+      console.warn(`[TradeLogger] research event flush failed (${rows.length} rows): ${err.message}`);
+      return 0;
+    }
+  }
+
+  shutdown() {
+    if (this._researchFlushTimer) {
+      clearInterval(this._researchFlushTimer);
+      this._researchFlushTimer = null;
+    }
+    this.flushResearchEvents();
   }
 
   // ============================================================
@@ -490,7 +721,8 @@ class TradeLogger {
                  entryFdv, entryPoolSol, entryLiquidity,
                  sellCount10s, totalSellSol10s,
                  mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump,
-                 isEmaStrategy = 0, isAddOn = 0 }) {
+                 entrySignalPrice, preEntryVwap5s, preEntryUniqueBuyers3s,
+                 entryMetrics, isEmaStrategy = 0, isAddOn = 0 }) {
     this.stmts.openPosition.run({
       positionId,
       mint,
@@ -513,6 +745,10 @@ class TradeLogger {
       rsiPreDump: rsiPreDump ?? null,              // v3.17.38: 砸单前 RSI5s
       rsi1sPreDump: rsi1sPreDump ?? null,          // v3.17.38: 砸单前 RSI1s
       rsi30sPreDump: rsi30sPreDump ?? null,        // v3.17.42: 砸单前 RSI30s
+      entrySignalPrice: entrySignalPrice ?? null,
+      preEntryVwap5s: preEntryVwap5s ?? null,
+      preEntryUniqueBuyers3s: preEntryUniqueBuyers3s ?? null,
+      entryMetricsJson: entryMetrics ? JSON.stringify(entryMetrics) : null,
       isEmaStrategy: isEmaStrategy ?? 0,            // EMA策略标记
       isAddOn: isAddOn ?? 0,                       // 加仓标记
     });

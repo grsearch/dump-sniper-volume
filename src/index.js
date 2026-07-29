@@ -51,7 +51,7 @@ async function main() {
       `and FDV <$${config.strategy.fdvExitUsd} (plus token-age exit)`,
   );
   console.log(
-    `Early invalidation: ${config.strategy.earlyWrongExitEnabled ? 'enabled' : 'disabled'} ` +
+    `Early invalidation: ${config.strategy.earlyWrongExitMode} ` +
       `(${config.strategy.earlyWrongExitMinHoldMs / 1000}-` +
       `${config.strategy.earlyWrongExitMaxHoldMs / 1000}s, ` +
       `peak<${config.strategy.earlyWrongExitMaxPeakPnlPct}%, ` +
@@ -59,6 +59,11 @@ async function main() {
       `sell/buy>=${config.strategy.earlyWrongExitSellBuyRatio}, ` +
       `confirm=${config.strategy.earlyWrongExitConfirmTrades}/` +
       `${config.strategy.earlyWrongExitConfirmMs}ms)`,
+  );
+  console.log(
+    `Position research telemetry: ${config.capture.positionResearchEnabled ? 'enabled' : 'disabled'} ` +
+      `(window=${config.capture.researchMetricsWindowMs / 1000}s, ` +
+      `flush=${config.capture.researchEventFlushMs}ms)`,
   );
   console.log('Legacy entries/exits: disabled');
   console.log(`Rebuy cooldown: ${config.strategy.rebuyCooldownMs > 0 ? config.strategy.rebuyCooldownMs / 60_000 + 'min after close' : 'disabled'}`);
@@ -245,14 +250,32 @@ async function main() {
       `tx5s>=${config.earlyFlow.minTradeCount}`,
   );
   dumpDetector.on("swapParsed", (swap) => {
+    const latestMarket = tokenWatchdog.getLatestRealtimeMarket(swap.mint);
+    const receivedAt = Number(swap.receivedAt) || Date.now();
+    const marketMatchesSwap = !!(
+      latestMarket &&
+      Math.abs((Number(latestMarket.fetchedAt) || 0) - receivedAt) <= 2_000 &&
+      (!swap.poolAddress || !latestMarket.poolAddress ||
+        swap.poolAddress === latestMarket.poolAddress)
+    );
+    const matchedMarket = marketMatchesSwap ? latestMarket : null;
+    const enrichedSwap = {
+      ...swap,
+      receivedAt,
+      supplyUi: Number(matchedMarket?.supply) || null,
+      fdvUsd: Number(matchedMarket?.fdvUsd) || null,
+      liquidityUsd: Number(matchedMarket?.liquidityUsd) || null,
+      priceUsd: Number(matchedMarket?.priceUsd) || null,
+      marketFetchedAt: Number(matchedMarket?.fetchedAt) || null,
+    };
     if (config.capture.swapEventsEnabled) {
-      try { tradeLogger.logSwapEvent(swap); } catch (_) { /* analytics only */ }
+      try { tradeLogger.logSwapEvent(enrichedSwap); } catch (_) { /* analytics only */ }
     }
-    try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
-    try { earlyFlowTracker.handleSwap(swap); } catch (err) {
+    try { competitorTracker.handleSwap(enrichedSwap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
+    try { earlyFlowTracker.handleSwap(enrichedSwap); } catch (err) {
       console.warn(`[EarlyFlowEntry] handleSwap failed: ${err.message}`);
     }
-    try { positionManager.handleSwapForExit(swap); } catch (err) {
+    try { positionManager.handleSwapForExit(enrichedSwap); } catch (err) {
       console.warn(`[PositionManager] handleSwapForExit failed: ${err.message}`);
     }
   });
@@ -655,6 +678,7 @@ async function main() {
     rawPrice,
     virtualQuoteReserveSol,
     effectiveQuoteReserveSol,
+    receivedAt,
   }) => {
     const cachedMarketSlot = executor.poolStateCache && poolAddress
       ? executor.poolStateCache.getMarketSlot?.(poolAddress) || 0
@@ -699,6 +723,9 @@ async function main() {
         ts,
         slot,
         signature,
+        liquidityUsd: realtimeMarketResult.liquidityUsd,
+        supplyUi: realtimeMarketResult.supplyUi,
+        poolQuoteSol: realtimeMarketResult.poolQuoteSol,
       });
     }
     ema15sTracker.handlePriceTick({
@@ -716,6 +743,7 @@ async function main() {
       rawPrice,
       virtualQuoteReserveSol,
       effectiveQuoteReserveSol,
+      receivedAt: Number(receivedAt) || Date.now(),
     });
     // v3.17.17: 喂 RSI - 用 feedTrade 带上 volume,RSI 能做 volume-weighted aggregation
     if (rsiCalculator) {
@@ -883,6 +911,7 @@ async function main() {
       entrySignalPrice: order._earlyFlowDetails?.signalPrice,
       preEntryVwap5s: order._earlyFlowDetails?.preEntryVwap5s,
       preEntryUniqueBuyers3s: order._earlyFlowDetails?.preEntryUniqueBuyers3s,
+      entryResearchMetrics: order._earlyFlowDetails || null,
       isEmaStrategy: false,  // EMA removed
       isAddOn: order._isAddOn || false,                 // 加仓标记
     });
@@ -941,6 +970,7 @@ async function main() {
       alertChecker.stop();
       monitor.stop();
       executor.stop && executor.stop();
+      tradeLogger.shutdown && tradeLogger.shutdown();
       await new Promise((r) => setTimeout(r, 200));
     } catch (err) {
       console.error(`[main] shutdown error: ${err.message}`);

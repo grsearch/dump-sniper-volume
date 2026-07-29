@@ -25,9 +25,12 @@
     "test:pool-cache": "node scripts/test-pool-state-cache-watched.js",
     "test:pump-discovery": "node scripts/test-pump-migration-parser.js",
     "test:token-market": "node scripts/test-token-watchdog-market.js",
+    "test:research": "node scripts/test-position-research-telemetry.js",
+    "test:research-export": "node scripts/test-export-position-research.js",
     "fill-pools": "node scripts/fill-pools.js",
     "verify-pools": "node scripts/verify-pools.js",
     "verify-pools:fix": "node scripts/verify-pools.js --fix",
+    "export:research": "node scripts/export-position-research.js",
     "stuck": "node scripts/stuck.js"
   },
   "dependencies": {

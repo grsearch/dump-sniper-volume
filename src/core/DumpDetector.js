@@ -197,6 +197,7 @@ class DumpDetector extends EventEmitter {
         monitor.inc('DumpDetector.parsedNull', 1, 'DumpDetector');
         return;
       }
+      const receivedAt = Date.now();
 
       // emit priceTick (DumpDetector 只 emit "可信"价格--pool 已知的)
       // v3.17.17: 带 side + quoteAmount + poolQuoteAfter 让 RSI 能做 volume-weighted
@@ -216,6 +217,7 @@ class DumpDetector extends EventEmitter {
         rawPrice: parsed.rawPriceAfter,
         virtualQuoteReserveSol: parsed.virtualQuoteReserveSol,
         effectiveQuoteReserveSol: parsed.effectiveQuoteReserveSol,
+        receivedAt,
       });
 
       // v3.17.20: emit swapParsed -- 给 CompetitorTracker 用。
@@ -235,6 +237,12 @@ class DumpDetector extends EventEmitter {
         signature: parsed.signature,
         poolAddress: parsed.poolAddress,
         poolQuoteAfter: parsed.poolQuoteAfter,
+        poolBaseAfter: parsed.poolBaseAfter,
+        baseDecimals: parsed.baseDecimals,
+        rawPrice: parsed.rawPriceAfter,
+        virtualQuoteReserveSol: parsed.virtualQuoteReserveSol,
+        effectiveQuoteReserveSol: parsed.effectiveQuoteReserveSol,
+        receivedAt,
       });
 
       // 仅卖单进入下游判定

@@ -101,6 +101,13 @@ const config = {
     // all fail before the position is closed.
     earlyWrongExitEnabled:
       (process.env.EARLY_WRONG_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    earlyWrongExitMode: (() => {
+      if ((process.env.EARLY_WRONG_EXIT_ENABLED ?? 'true').toLowerCase() !== 'true') {
+        return 'off';
+      }
+      const mode = String(process.env.EARLY_WRONG_EXIT_MODE || 'shadow').toLowerCase();
+      return mode === 'live' ? 'live' : 'shadow';
+    })(),
     earlyWrongExitMinHoldMs: parseInt(
       process.env.EARLY_WRONG_EXIT_MIN_HOLD_MS || '3000',
       10,
@@ -403,6 +410,16 @@ const config = {
 
   capture: {
     swapEventsEnabled: (process.env.SWAP_EVENT_LOG_ENABLED ?? 'true').toLowerCase() === 'true',
+    positionResearchEnabled:
+      (process.env.POSITION_RESEARCH_LOG_ENABLED ?? 'true').toLowerCase() === 'true',
+    researchEventFlushMs: parseInt(
+      process.env.POSITION_RESEARCH_FLUSH_MS || '250',
+      10,
+    ),
+    researchMetricsWindowMs: parseInt(
+      process.env.POSITION_RESEARCH_WINDOW_MS || '10000',
+      10,
+    ),
   },
 
   // Passing this gate only adds a mint to monitoring; it does not buy the token.

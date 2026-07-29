@@ -383,8 +383,18 @@ class TokenWatchdog {
     }
 
     monitor.inc('TokenWatchdog.realtimeMarketTicks', 1, 'TokenWatchdog');
+    const marketResult = {
+      fdvUsd,
+      liquidityUsd,
+      priceUsd,
+      priceSol,
+      supplyUi,
+      poolQuoteSol: quoteSol,
+      poolAddress: resolvedPoolAddress,
+      fetchedAt: now,
+    };
     if (reasons.length === 0) {
-      return { removed: false, fdvUsd, liquidityUsd, priceUsd };
+      return { removed: false, ...marketResult };
     }
 
     const reasonStr = `${reasons.join(', ')} (realtime)`;
@@ -398,12 +408,12 @@ class TokenWatchdog {
         this._lastRealtimeKeepLogAt.set(mint, now);
       }
       monitor.inc('TokenWatchdog.realtimeRetainedForPosition', 1, 'TokenWatchdog');
-      return { removed: false, retainedForPosition: true, fdvUsd, liquidityUsd, priceUsd };
+      return { removed: false, retainedForPosition: true, ...marketResult };
     }
 
     const removed = this._removeToken(currentToken, reasonStr);
     if (removed) monitor.inc('TokenWatchdog.realtimeRemoved', 1, 'TokenWatchdog');
-    return { removed, fdvUsd, liquidityUsd, priceUsd };
+    return { removed, ...marketResult };
   }
 
   getLatestRealtimeMarket(mint) {

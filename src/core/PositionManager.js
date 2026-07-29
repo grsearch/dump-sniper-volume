@@ -162,7 +162,17 @@ class PositionManager extends EventEmitter {
     return pids != null && pids.size > 0;
   }
 
-  handleFdvForExit({ mint, price, fdvUsd, ts, slot, signature } = {}) {
+  handleFdvForExit({
+    mint,
+    price,
+    fdvUsd,
+    liquidityUsd,
+    supplyUi,
+    poolQuoteSol,
+    ts,
+    slot,
+    signature,
+  } = {}) {
     const threshold = Number(config.strategy.fdvExitUsd) || 0;
     if (!config.strategy.dedicatedExitOnly || threshold <= 0 || !mint) return false;
     const currentFdv = Number(fdvUsd);
@@ -192,6 +202,41 @@ class PositionManager extends EventEmitter {
       pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
       pos._exitMarketTs = pos._exitMarketTs || Number(ts) || null;
       pos._exitTriggerSource = pos._exitTriggerSource || 'chain_realtime_fdv';
+      this._recordPositionResearchEvent(
+        pos,
+        {
+          ts,
+          receivedAt: Date.now(),
+          price: currentPrice,
+          slot,
+          signature,
+          fdvUsd: currentFdv,
+          liquidityUsd,
+          supplyUi,
+          poolQuoteAfter: poolQuoteSol,
+        },
+        'FDV_STOP_TRIGGER',
+        {
+          ...(pos._lastResearchMetrics || {}),
+          holdMs: Date.now() - (Number(pos.openedAt) || Date.now()),
+          marketPnlPct: Number(pos.entryPrice) > 0
+            ? ((currentPrice - Number(pos.entryPrice)) / Number(pos.entryPrice)) * 100
+            : null,
+          market: {
+            ...(pos._lastResearchMetrics?.market || {}),
+            fdvUsd: currentFdv,
+            liquidityUsd: Number(liquidityUsd) || null,
+            supplyUi: Number(supplyUi) || null,
+            poolQuoteAfter: Number(poolQuoteSol) || null,
+          },
+        },
+        {
+          fdvStop: {
+            thresholdUsd: threshold,
+            currentFdvUsd: currentFdv,
+          },
+        },
+      );
       console.warn(
         `[PositionManager] FDV_STOP ${pos.symbol || mint.slice(0, 6)} ` +
           `fdv=$${currentFdv.toFixed(0)} < $${threshold} price=${currentPrice.toExponential(6)}`,
@@ -255,7 +300,8 @@ class PositionManager extends EventEmitter {
     const s = config.strategy;
     const earlyWrongEnabled = !!s.earlyWrongExitEnabled;
     const legacyFlowEnabled = !s.dedicatedExitOnly && !!s.flowReversalExitEnabled;
-    if ((!earlyWrongEnabled && !legacyFlowEnabled) || !swap || !swap.mint) return;
+    const researchEnabled = !!config.capture.positionResearchEnabled;
+    if ((!earlyWrongEnabled && !legacyFlowEnabled && !researchEnabled) || !swap || !swap.mint) return;
 
     const pids = this.byMint.get(swap.mint);
     if (!pids || pids.size === 0) return;
@@ -275,6 +321,20 @@ class PositionManager extends EventEmitter {
       ts: Number.isFinite(swap.ts) ? swap.ts : Date.now(),
       receivedAt: Number.isFinite(swap.receivedAt) ? swap.receivedAt : Date.now(),
       signature: swap.signature || null,
+      rawPrice: Number(swap.rawPrice) || null,
+      poolAddress: swap.poolAddress || null,
+      poolBaseAfter: Number(swap.poolBaseAfter) || null,
+      poolQuoteAfter: Number(swap.poolQuoteAfter) || null,
+      baseDecimals: Number.isFinite(Number(swap.baseDecimals))
+        ? Number(swap.baseDecimals)
+        : null,
+      virtualQuoteReserveSol: Number(swap.virtualQuoteReserveSol) || null,
+      effectiveQuoteReserveSol: Number(swap.effectiveQuoteReserveSol) || null,
+      supplyUi: Number(swap.supplyUi) || null,
+      fdvUsd: Number(swap.fdvUsd) || null,
+      liquidityUsd: Number(swap.liquidityUsd) || null,
+      priceUsd: Number(swap.priceUsd) || null,
+      marketFetchedAt: Number(swap.marketFetchedAt) || null,
     };
 
     let events = this._flowExitEvents.get(swap.mint);
@@ -284,15 +344,20 @@ class PositionManager extends EventEmitter {
     }
     const duplicate = ev.signature &&
       events.some((event) => event.signature === ev.signature);
-    if (!duplicate) events.push(ev);
+    if (duplicate) return;
+    events.push(ev);
     this._pruneFlowExitEvents(swap.mint, ev.receivedAt);
 
     for (const pid of pids) {
       const pos = this.positions.get(pid);
-      if (pos && !pos.exiting && pos.status !== 'stuck') {
-        if (earlyWrongEnabled) this._maybeEarlyWrongExit(pos, ev);
-        if (legacyFlowEnabled) this._maybeFlowReversalExit(pos, price, ev.ts);
+      if (!pos || pos.status === 'stuck') continue;
+      const metrics = this._buildPositionResearchMetrics(pos, ev);
+      if (researchEnabled) {
+        this._recordPositionResearchEvent(pos, ev, 'SWAP_METRICS', metrics);
       }
+      if (pos.exiting) continue;
+      if (earlyWrongEnabled) this._maybeEarlyWrongExit(pos, ev, metrics);
+      if (legacyFlowEnabled) this._maybeFlowReversalExit(pos, price, ev.ts);
     }
   }
 
@@ -312,6 +377,9 @@ class PositionManager extends EventEmitter {
       legacyWindowMs,
       s.earlyWrongExitEnabled
         ? (s.earlyWrongExitFlowWindowMs || 3_000) * 2
+        : 0,
+      config.capture.positionResearchEnabled
+        ? config.capture.researchMetricsWindowMs || 10_000
         : 0,
     ) + 1_000;
     const cutoff = now - maxWindowMs;
@@ -349,14 +417,252 @@ class PositionManager extends EventEmitter {
     };
   }
 
+  _researchWindowStats(events, startExclusive, endInclusive, windowMs) {
+    const selected = events.filter((item) => {
+      const eventTs = Number(item.receivedAt) || Number(item.ts) || 0;
+      return eventTs > startExclusive && eventTs <= endInclusive;
+    });
+    const buys = selected.filter((item) => item.side === 'BUY');
+    const sells = selected.filter((item) => item.side === 'SELL');
+    const buySol = sumSolVolume(buys);
+    const sellSol = sumSolVolume(sells);
+    const totalSol = buySol + sellSol;
+    const largestBuySol = buys.reduce(
+      (max, item) => Math.max(max, Number(item.solVolume) || 0),
+      0,
+    );
+    const weightedPrice = selected.reduce(
+      (sum, item) => sum + (Number(item.price) || 0) * (Number(item.solVolume) || 0),
+      0,
+    );
+    const firstPrice = Number(selected[0]?.price) || 0;
+    const lastPrice = Number(selected[selected.length - 1]?.price) || 0;
+    return {
+      windowMs,
+      tradeCount: selected.length,
+      buyCount: buys.length,
+      sellCount: sells.length,
+      buySol,
+      sellSol,
+      totalSol,
+      netFlowSol: buySol - sellSol,
+      sellBuyRatio: sellSol / Math.max(buySol, 0.001),
+      buySellRatio: buySol / Math.max(sellSol, 0.001),
+      uniqueBuyers: uniqueCount(buys, 'signer'),
+      uniqueSellers: uniqueCount(sells, 'signer'),
+      largestBuySol,
+      largestBuyShare: buySol > 0 ? largestBuySol / buySol : 0,
+      vwap: totalSol > 0 ? weightedPrice / totalSol : lastPrice,
+      firstPrice,
+      lastPrice,
+      priceChangePct: firstPrice > 0 && lastPrice > 0
+        ? ((lastPrice - firstPrice) / firstPrice) * 100
+        : null,
+      tradesPerSecond: selected.length / Math.max(windowMs / 1000, 0.001),
+    };
+  }
+
+  _buildPositionResearchMetrics(pos, event) {
+    const now = Number(event?.receivedAt) || Date.now();
+    const holdStart = Number(pos.openedAt) || Number(pos.reconciledAt) || now;
+    const holdMs = now - holdStart;
+    const ownBuy = !!(
+      event?.signature &&
+      pos.buySignature &&
+      event.signature === pos.buySignature
+    );
+    const events = (this._flowExitEvents.get(pos.mint) || []).filter((item) => !(
+      item.signature &&
+      pos.buySignature &&
+      item.signature === pos.buySignature
+    ));
+    const windows = {};
+    const previousWindows = {};
+    for (const windowMs of [1_000, 3_000, 5_000, 10_000]) {
+      windows[`${windowMs / 1000}s`] = this._researchWindowStats(
+        events,
+        now - windowMs,
+        now,
+        windowMs,
+      );
+      previousWindows[`${windowMs / 1000}s`] = this._researchWindowStats(
+        events,
+        now - windowMs * 2,
+        now - windowMs,
+        windowMs,
+      );
+    }
+
+    if (holdMs <= 6_000) {
+      previousWindows['3s'].uniqueBuyers = Math.max(
+        previousWindows['3s'].uniqueBuyers,
+        Number(pos.preEntryUniqueBuyers3s) || 0,
+      );
+    }
+
+    const entryPrice = Number(pos.entryPrice) || 0;
+    const price = Number(event?.price) || 0;
+    const signalPrice = Number(pos.entrySignalPrice) || entryPrice;
+    const preEntryVwap5s = Number(pos.preEntryVwap5s) || signalPrice;
+    const peakPrice = Math.max(
+      Number(pos.highWaterMark) || entryPrice,
+      Number(pos._earlyWrongPeakPrice) || entryPrice,
+      entryPrice,
+    );
+    const marketPnlPct = entryPrice > 0
+      ? ((price - entryPrice) / entryPrice) * 100
+      : null;
+    const peakPnlPct = entryPrice > 0
+      ? ((peakPrice - entryPrice) / entryPrice) * 100
+      : null;
+    const drawdownPct = peakPrice > 0
+      ? ((peakPrice - price) / peakPrice) * 100
+      : null;
+    const signalChangePct = signalPrice > 0
+      ? ((price - signalPrice) / signalPrice) * 100
+      : null;
+    const preEntryVwapChangePct = preEntryVwap5s > 0
+      ? ((price - preEntryVwap5s) / preEntryVwap5s) * 100
+      : null;
+    const current3s = windows['3s'];
+    const previous3s = previousWindows['3s'];
+    const buyerCountDeclining =
+      current3s.uniqueBuyers < previous3s.uniqueBuyers;
+    const priceStructureFailed =
+      price < signalPrice &&
+      price < preEntryVwap5s;
+    const trailingArmed = !!pos.trailingArmed;
+    const lossThresholdsCrossed = [-20, -25, -30, -35, -40, -45, -50]
+      .filter((threshold) => marketPnlPct != null && marketPnlPct <= threshold);
+
+    return {
+      schemaVersion: 1,
+      holdMs,
+      ownBuy,
+      reconciled: !!pos.reconciled,
+      exiting: !!pos.exiting,
+      entryPrice,
+      entrySol: Number(pos.entrySol) || null,
+      tokenAmount: Number(pos.tokenAmount) || null,
+      signalPrice,
+      preEntryVwap5s,
+      preEntryUniqueBuyers3s: Number(pos.preEntryUniqueBuyers3s) || 0,
+      price,
+      rawPrice: Number(event?.rawPrice) || null,
+      marketPnlPct,
+      peakPrice,
+      peakPnlPct,
+      drawdownPct,
+      signalChangePct,
+      preEntryVwapChangePct,
+      trailingArmed,
+      trailingActivatePct: Number(config.strategy.trailingActivatePct) || 0,
+      trailingDrawdownPct: Number(config.strategy.trailingDrawdownPct) || 0,
+      windows,
+      previousWindows,
+      acceleration: {
+        buySol3s: current3s.buySol / Math.max(previous3s.buySol, 0.001),
+        tradeCount3s: current3s.tradeCount / Math.max(previous3s.tradeCount, 1),
+        uniqueBuyers3s:
+          current3s.uniqueBuyers / Math.max(previous3s.uniqueBuyers, 1),
+      },
+      structure: {
+        priceBelowSignal: price < signalPrice,
+        priceBelowPreEntryVwap: price < preEntryVwap5s,
+        priceStructureFailed,
+        netFlow3sNegative: current3s.netFlowSol < 0,
+        buyerCountDeclining,
+      },
+      shadowCandidates: {
+        lossThresholdsCrossed,
+        conditionalTailBase:
+          !trailingArmed &&
+          lossThresholdsCrossed.length > 0 &&
+          priceStructureFailed &&
+          current3s.netFlowSol < 0 &&
+          buyerCountDeclining,
+        sellBuyRatio1_5: current3s.sellBuyRatio >= 1.5,
+        sellBuyRatio2_0: current3s.sellBuyRatio >= 2,
+        sellBuyRatio2_5: current3s.sellBuyRatio >= 2.5,
+        uniqueBuyersLe1: current3s.uniqueBuyers <= 1,
+        uniqueBuyersLe2: current3s.uniqueBuyers <= 2,
+      },
+      market: {
+        supplyUi: Number(event?.supplyUi) || null,
+        fdvUsd: Number(event?.fdvUsd) || null,
+        liquidityUsd: Number(event?.liquidityUsd) || null,
+        priceUsd: Number(event?.priceUsd) || null,
+        poolAddress: event?.poolAddress || null,
+        poolBaseAfter: Number(event?.poolBaseAfter) || null,
+        poolQuoteAfter: Number(event?.poolQuoteAfter) || null,
+        baseDecimals: Number.isFinite(Number(event?.baseDecimals))
+          ? Number(event.baseDecimals)
+          : null,
+        virtualQuoteReserveSol: Number(event?.virtualQuoteReserveSol) || null,
+        effectiveQuoteReserveSol: Number(event?.effectiveQuoteReserveSol) || null,
+        marketFetchedAt: Number(event?.marketFetchedAt) || null,
+      },
+    };
+  }
+
+  _recordPositionResearchEvent(pos, event, eventType, metrics, extra = {}) {
+    if (!config.capture.positionResearchEnabled || !this.tradeLogger) return;
+    const finiteOrNull = (value) => {
+      if (value == null || value === '') return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+    const snapshot = {
+      ...(metrics || {}),
+      ...extra,
+    };
+    pos._lastResearchMetrics = snapshot;
+    this.tradeLogger.logPositionResearchEvent({
+      positionId: pos.positionId,
+      mint: pos.mint,
+      symbol: pos.symbol,
+      eventType,
+      ts: Number(event?.ts) || Date.now(),
+      receivedAt: Number(event?.receivedAt) || Date.now(),
+      holdMs: Number(snapshot.holdMs),
+      slot: Number(event?.slot) || null,
+      signature: event?.signature || null,
+      side: event?.side || null,
+      signer: event?.signer || null,
+      solVolume: Number(event?.solVolume) || null,
+      price: Number(event?.price) || null,
+      rawPrice: Number(event?.rawPrice) || null,
+      poolAddress: event?.poolAddress || null,
+      poolBaseAfter: Number(event?.poolBaseAfter) || null,
+      poolQuoteAfter: Number(event?.poolQuoteAfter) || null,
+      baseDecimals: event?.baseDecimals,
+      supplyUi: Number(event?.supplyUi) || Number(snapshot.market?.supplyUi) || null,
+      fdvUsd: Number(event?.fdvUsd) || Number(snapshot.market?.fdvUsd) || null,
+      liquidityUsd:
+        Number(event?.liquidityUsd) || Number(snapshot.market?.liquidityUsd) || null,
+      entrySol: Number(pos.entrySol) || null,
+      entryPrice: Number(pos.entryPrice) || null,
+      signalPrice: Number(pos.entrySignalPrice) || null,
+      preEntryVwap5s: Number(pos.preEntryVwap5s) || null,
+      tokenAmount: Number(pos.tokenAmount) || null,
+      marketPnlPct: finiteOrNull(snapshot.marketPnlPct),
+      peakPnlPct: finiteOrNull(snapshot.peakPnlPct),
+      drawdownPct: finiteOrNull(snapshot.drawdownPct),
+      trailingArmed: !!pos.trailingArmed,
+      reconciled: !!pos.reconciled,
+      metrics: snapshot,
+    });
+  }
+
   _resetEarlyWrongCandidate(pos) {
     if (!pos) return;
     pos._earlyWrongFirstSeenAt = null;
     pos._earlyWrongConfirmCount = 0;
     pos._earlyWrongLastSignature = null;
+    pos._earlyWrongShadowActive = false;
   }
 
-  _maybeEarlyWrongExit(pos, event) {
+  _maybeEarlyWrongExit(pos, event, researchMetrics = null) {
     const s = config.strategy;
     if (!s.earlyWrongExitEnabled || !pos || pos.exiting || pos.status === 'stuck') return;
 
@@ -486,6 +792,23 @@ class PositionManager extends EventEmitter {
       pos._earlyWrongConfirmCount = 1;
       pos._earlyWrongLastSignature = signature;
       monitor.inc('PositionManager.earlyWrongExitCandidate', 1, 'PositionManager');
+      this._recordPositionResearchEvent(
+        pos,
+        event,
+        'EEI_CANDIDATE',
+        researchMetrics || this._buildPositionResearchMetrics(pos, event),
+        {
+          eei: {
+            stage: 'candidate',
+            peakPnlPct,
+            priceBreakPct,
+            netFlowSol,
+            sellBuyRatio,
+            currentBuyers,
+            previousBuyers,
+          },
+        },
+      );
       console.log(
         `[PositionManager] EARLY_INVALIDATION_PENDING ${pos.symbol || pos.mint.slice(0, 6)} ` +
           `hold=${holdMs}ms peak=${peakPnlPct.toFixed(2)}% ` +
@@ -495,6 +818,7 @@ class PositionManager extends EventEmitter {
       );
       return;
     }
+    if (pos._earlyWrongShadowActive) return;
     if (signature !== pos._earlyWrongLastSignature) {
       pos._earlyWrongConfirmCount = (pos._earlyWrongConfirmCount || 0) + 1;
       pos._earlyWrongLastSignature = signature;
@@ -509,6 +833,50 @@ class PositionManager extends EventEmitter {
     }
 
     const pnlPct = ((price - entryPrice) / entryPrice) * 100;
+    const confirmedMetrics = researchMetrics ||
+      this._buildPositionResearchMetrics(pos, event);
+    const eeiDetails = {
+      eei: {
+        stage: 'confirmed',
+        mode: s.earlyWrongExitMode,
+        peakPnlPct,
+        priceBreakPct,
+        netFlowSol,
+        sellBuyRatio,
+        currentBuyers,
+        previousBuyers,
+        confirmCount: pos._earlyWrongConfirmCount,
+        confirmElapsedMs,
+      },
+    };
+    if (s.earlyWrongExitMode !== 'live') {
+      pos._earlyWrongShadowActive = true;
+      this._recordPositionResearchEvent(
+        pos,
+        event,
+        'EEI_SHADOW_TRIGGER',
+        confirmedMetrics,
+        eeiDetails,
+      );
+      monitor.inc('PositionManager.earlyEntryInvalidatedShadow', 1, 'PositionManager');
+      console.warn(
+        `[PositionManager] EEI_SHADOW_TRIGGER ${pos.symbol || pos.mint.slice(0, 6)} ` +
+          `hold=${holdMs}ms pnl=${pnlPct.toFixed(2)}% peak=${peakPnlPct.toFixed(2)}% ` +
+          `vwapBreak=${priceBreakPct.toFixed(2)}% ` +
+          `flow3s=${netFlowSol.toFixed(3)}SOL sell/buy=${sellBuyRatio.toFixed(2)} ` +
+          `buyers3s=${currentBuyers}<${previousBuyers} ` +
+          `confirm=${pos._earlyWrongConfirmCount}/${confirmElapsedMs}ms`,
+      );
+      return;
+    }
+
+    this._recordPositionResearchEvent(
+      pos,
+      event,
+      'EEI_LIVE_TRIGGER',
+      confirmedMetrics,
+      eeiDetails,
+    );
     pos._exitTriggeredAt = pos._exitTriggeredAt || Date.now();
     pos._exitMarketTs = pos._exitMarketTs || Number(event.ts) || null;
     pos._exitTriggerSource = pos._exitTriggerSource || 'chain_swap_early_invalidation';
@@ -713,6 +1081,34 @@ class PositionManager extends EventEmitter {
    */
   _exitForCondition(pos, price, reason) {
     if (!pos || pos.exiting) return;
+    const now = Date.now();
+    const lastMetrics = pos._lastResearchMetrics || {};
+    const marketPnlPct = Number(pos.entryPrice) > 0 && Number(price) > 0
+      ? ((Number(price) - Number(pos.entryPrice)) / Number(pos.entryPrice)) * 100
+      : null;
+    this._recordPositionResearchEvent(
+      pos,
+      {
+        ts: pos._exitMarketTs || now,
+        receivedAt: now,
+        price,
+        signature: null,
+        side: null,
+      },
+      'ACTUAL_EXIT_TRIGGER',
+      {
+        ...lastMetrics,
+        holdMs: now - (Number(pos.openedAt) || now),
+        marketPnlPct,
+      },
+      {
+        actualExit: {
+          reason,
+          triggerSource: pos._exitTriggerSource || null,
+          triggerMarketTs: pos._exitMarketTs || null,
+        },
+      },
+    );
     const pids = this.byMint.get(pos.mint);
     if (pids && pids.size > 1) {
       this._exitAllByMint(pos.mint, price, reason);
@@ -1021,6 +1417,22 @@ class PositionManager extends EventEmitter {
         // v3.20: 从DB恢复买入前波动率
         preVol5m: row.pre_vol_5m_pct ?? null,
         rangeSupport: row.range_support ?? null,
+        entrySignalPrice: Number(row.entry_signal_price) || row.entry_price,
+        preEntryVwap5s: Number(row.pre_entry_vwap_5s) ||
+          Number(row.entry_signal_price) || row.entry_price,
+        preEntryUniqueBuyers3s: Number(row.pre_entry_unique_buyers_3s) || 0,
+        entryResearchMetrics: (() => {
+          try {
+            return row.entry_metrics_json ? JSON.parse(row.entry_metrics_json) : null;
+          } catch (_) {
+            return null;
+          }
+        })(),
+        _earlyWrongPeakPrice: row.peak_price > 0 ? row.peak_price : row.entry_price,
+        _earlyWrongFirstSeenAt: null,
+        _earlyWrongConfirmCount: 0,
+        _earlyWrongLastSignature: null,
+        _earlyWrongShadowActive: false,
         // EMA 策略：从 DB 持久化字段恢复（不再靠环境变量推断）
         isEmaStrategy: false,  // EMA removed
         isAddOn: !!row.is_addon,
@@ -1061,7 +1473,7 @@ class PositionManager extends EventEmitter {
    * @param {string} p.signature
    * @param {number} [p.buyFeeLamports] - BUY tx 的 priority fee + base fee (lamports)
    */
-  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySlot, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, entrySignalPrice, preEntryVwap5s, preEntryUniqueBuyers3s, isEmaStrategy = false, isAddOn = false }) {
+  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySlot, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, entrySignalPrice, preEntryVwap5s, preEntryUniqueBuyers3s, entryResearchMetrics, isEmaStrategy = false, isAddOn = false }) {
     const pid = positionId || crypto.randomUUID();
     const pos = {
       positionId: pid,
@@ -1091,10 +1503,12 @@ class PositionManager extends EventEmitter {
       entrySignalPrice: Number(entrySignalPrice) || entryPrice,
       preEntryVwap5s: Number(preEntryVwap5s) || Number(entrySignalPrice) || entryPrice,
       preEntryUniqueBuyers3s: Number(preEntryUniqueBuyers3s) || 0,
+      entryResearchMetrics: entryResearchMetrics || null,
       _earlyWrongPeakPrice: entryPrice,
       _earlyWrongFirstSeenAt: null,
       _earlyWrongConfirmCount: 0,
       _earlyWrongLastSignature: null,
+      _earlyWrongShadowActive: false,
       // v3.17.6: stabilization 期
       //   DRY_RUN：开仓即进入 stabilization(用估算价格作起点)
       //   LIVE：reconcile 完成时进入 stabilization
@@ -1156,12 +1570,40 @@ class PositionManager extends EventEmitter {
         rsiPreDump: rsiPreDump ?? null,           // v3.17.38: 砸单前 RSI5s
         rsi1sPreDump: rsi1sPreDump ?? null,       // v3.17.38: 砸单前 RSI1s
         rsi30sPreDump: rsi30sPreDump ?? null,     // v3.17.42: 砸单前 RSI30s
+        entrySignalPrice: pos.entrySignalPrice,
+        preEntryVwap5s: pos.preEntryVwap5s,
+        preEntryUniqueBuyers3s: pos.preEntryUniqueBuyers3s,
+        entryMetrics: pos.entryResearchMetrics,
         isEmaStrategy: 0,  // EMA removed (v3.30: EMA策略标记持久化)
         isAddOn: isAddOn ? 1 : 0,                 // v3.30: 加仓标记持久化
       });
     } catch (dbErr) {
       console.error(`[PositionManager] ❌ openPosition DB write FAILED for ${symbol || mint.slice(0,6)}: ${dbErr.message}`);
     }
+    this._recordPositionResearchEvent(
+      pos,
+      {
+        ts: pos.openedAt,
+        receivedAt: pos.openedAt,
+        price: pos.entryPrice,
+        signature: pos.buySignature,
+        side: 'BUY',
+      },
+      'POSITION_OPENED',
+      {
+        schemaVersion: 1,
+        holdMs: 0,
+        marketPnlPct: 0,
+        peakPnlPct: 0,
+        drawdownPct: 0,
+        entry: pos.entryResearchMetrics,
+        market: {
+          fdvUsd: Number(entryFdv) || null,
+          liquidityUsd: Number(entryLiquidity) || null,
+          poolQuoteAfter: Number(entryPoolSol) || null,
+        },
+      },
+    );
 
     // v3.17.19: log slot lag (砸单 → BUY 落链相差几个 slot, 0 = 同 slot 抢入)
     // ⚠️ 注意：此时 buySlot 是提交前的 latestSlot，不是真实落链 slot
@@ -1223,6 +1665,26 @@ class PositionManager extends EventEmitter {
             p.reconciledAt = Date.now();
             p.stabilizing = true;
             p._stabilizeSamples = [];
+            this._recordPositionResearchEvent(
+              p,
+              {
+                ts: p.reconciledAt,
+                receivedAt: p.reconciledAt,
+                price: p.entryPrice,
+                signature,
+                side: 'BUY',
+              },
+              'BUY_RECONCILED_FALLBACK',
+              {
+                ...(p._lastResearchMetrics || {}),
+                holdMs: p.reconciledAt - p.openedAt,
+                reconcile: {
+                  walletBalance,
+                  usedEstimatedEntry: true,
+                  watchdogRecovery: true,
+                },
+              },
+            );
             if (p._reconcileWatchdog) {
               clearTimeout(p._reconcileWatchdog);
               p._reconcileWatchdog = null;
@@ -1237,6 +1699,25 @@ class PositionManager extends EventEmitter {
           );
           monitor.inc('PositionManager.reconcileWatchdog', 1, 'PositionManager');
           const feeSol = ((p.buyFeeLamports || 0) + 5000) / 1e9;
+          this._recordPositionResearchEvent(
+            p,
+            {
+              ts: Date.now(),
+              receivedAt: Date.now(),
+              price: p.entryPrice,
+              signature,
+              side: 'BUY',
+            },
+            'BUY_RECONCILE_TIMEOUT',
+            {
+              ...(p._lastResearchMetrics || {}),
+              holdMs: Date.now() - p.openedAt,
+              buyFailure: {
+                reason: 'reconcile_watchdog_timeout',
+                feeSol,
+              },
+            },
+          );
           try {
             this.tradeLogger.closePosition(pid, {
               closedAt: Date.now(),
@@ -1307,6 +1788,25 @@ class PositionManager extends EventEmitter {
       // 真实损失 = 已付 priority fee + base fee（链上 tx 失败也扣 fee）
       // 没买到 token，所以 exitSol = 0, tokenAmount 应该是 0
       const feeSol = ((pos.buyFeeLamports || 0) + 5000) / 1e9;
+      this._recordPositionResearchEvent(
+        pos,
+        {
+          ts: Date.now(),
+          receivedAt: Date.now(),
+          price: pos.entryPrice,
+          signature,
+          side: 'BUY',
+        },
+        'BUY_CHAIN_FAILED',
+        {
+          ...(pos._lastResearchMetrics || {}),
+          holdMs: Date.now() - pos.openedAt,
+          buyFailure: {
+            reason: errMsg,
+            feeSol,
+          },
+        },
+      );
 
       this.tradeLogger.closePosition(positionId, {
         closedAt: Date.now(),
@@ -1383,6 +1883,25 @@ class PositionManager extends EventEmitter {
         // 用估算值 reconcile
         pos.reconciled = true;
         pos.reconciledAt = Date.now();
+        this._recordPositionResearchEvent(
+          pos,
+          {
+            ts: pos.reconciledAt,
+            receivedAt: pos.reconciledAt,
+            price: pos.entryPrice,
+            signature,
+            side: 'BUY',
+          },
+          'BUY_RECONCILED_FALLBACK',
+          {
+            ...(pos._lastResearchMetrics || {}),
+            holdMs: pos.reconciledAt - pos.openedAt,
+            reconcile: {
+              walletBalance,
+              usedEstimatedEntry: true,
+            },
+          },
+        );
         monitor.inc('PositionManager.buyReconcileFallback', 1, 'PositionManager');
         if (pos._reconcileWatchdog) {
           clearTimeout(pos._reconcileWatchdog);
@@ -1399,6 +1918,25 @@ class PositionManager extends EventEmitter {
       );
       // 同样按链上失败处理（保险起见）
       const feeSol = ((pos.buyFeeLamports || 0) + 5000) / 1e9;
+      this._recordPositionResearchEvent(
+        pos,
+        {
+          ts: Date.now(),
+          receivedAt: Date.now(),
+          price: pos.entryPrice,
+          signature,
+          side: 'BUY',
+        },
+        'BUY_PARSE_FAILED',
+        {
+          ...(pos._lastResearchMetrics || {}),
+          holdMs: Date.now() - pos.openedAt,
+          buyFailure: {
+            reason: 'confirmed_but_swap_parse_failed',
+            feeSol,
+          },
+        },
+      );
       this.tradeLogger.closePosition(positionId, {
         closedAt: Date.now(),
         exitPrice: pos.entryPrice,
@@ -1533,6 +2071,36 @@ class PositionManager extends EventEmitter {
       buySlot: pos.buySlot,
       dumpSlot: pos.dumpSlot,
     });
+    this._recordPositionResearchEvent(
+      pos,
+      {
+        ts: pos.reconciledAt,
+        receivedAt: pos.reconciledAt,
+        price: pos.entryPrice,
+        signature,
+        side: 'BUY',
+        slot: pos.buySlot,
+      },
+      'BUY_RECONCILED',
+      {
+        ...(pos._lastResearchMetrics || {}),
+        holdMs: pos.reconciledAt - pos.openedAt,
+        marketPnlPct: 0,
+        peakPnlPct: 0,
+        drawdownPct: 0,
+        reconcile: {
+          oldEntrySol,
+          entrySol: pos.entrySol,
+          oldEntryPrice,
+          entryPrice: pos.entryPrice,
+          oldTokenAmount,
+          tokenAmount: pos.tokenAmount,
+          driftPct: drift,
+          buySlot: pos.buySlot,
+          dumpSlot: pos.dumpSlot,
+        },
+      },
+    );
 
     monitor.inc('PositionManager.buyReconciled', 1, 'PositionManager');
     console.log(
@@ -2226,6 +2794,24 @@ class PositionManager extends EventEmitter {
             `peak=+${peakPnlPct.toFixed(2)}% threshold=+${config.strategy.trailingActivatePct}%`,
         );
         monitor.inc('PositionManager.trailingArmed', 1, 'PositionManager');
+        this._recordPositionResearchEvent(
+          pos,
+          {
+            ts: context?.marketTs || now,
+            receivedAt: context?.receivedAt || now,
+            price,
+            slot: context?.slot || null,
+            signature: context?.signature || null,
+          },
+          'TRAILING_ARMED',
+          {
+            ...(pos._lastResearchMetrics || {}),
+            holdMs: now - (Number(pos.openedAt) || now),
+            marketPnlPct: pnlPct,
+            peakPnlPct,
+            trailingArmed: true,
+          },
+        );
       }
 
       if (pos.trailingArmed) {
@@ -3208,6 +3794,34 @@ class PositionManager extends EventEmitter {
     const timeToPeakMs = (pos.highWaterMarkTs && pos.openedAt)
       ? pos.highWaterMarkTs - pos.openedAt
       : null;
+
+    this._recordPositionResearchEvent(
+      pos,
+      {
+        ts: Date.now(),
+        receivedAt: Date.now(),
+        price: exitPrice,
+        signature,
+      },
+      'POSITION_CLOSED',
+      {
+        ...(pos._lastResearchMetrics || {}),
+        holdMs: Date.now() - (Number(pos.openedAt) || Date.now()),
+        marketPnlPct: pnlPct,
+        peakPnlPct,
+      },
+      {
+        realized: {
+          exitReason: finalReason,
+          exitPrice,
+          exitSol,
+          pnlSol,
+          pnlPct,
+          feeSol,
+          sellSignature: signature,
+        },
+      },
+    );
 
     this.tradeLogger.closePosition(pos.positionId, {
       closedAt: Date.now(),

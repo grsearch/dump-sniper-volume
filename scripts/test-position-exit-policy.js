@@ -4,6 +4,7 @@ process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT = '40';
 process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT = '10';
 process.env.EARLY_FLOW_FDV_EXIT_USD = '10000';
 process.env.EARLY_WRONG_EXIT_ENABLED = 'true';
+process.env.EARLY_WRONG_EXIT_MODE = 'live';
 process.env.EARLY_WRONG_EXIT_MIN_HOLD_MS = '3000';
 process.env.EARLY_WRONG_EXIT_MAX_HOLD_MS = '15000';
 process.env.EARLY_WRONG_EXIT_MAX_PEAK_PNL_PCT = '3';
@@ -111,6 +112,7 @@ function run() {
   assert.strictEqual(config.strategy.fdvExitUsd, 10_000);
   assert.strictEqual(config.strategy.rsi5sExitEnabled, false);
   assert.strictEqual(config.strategy.earlyWrongExitEnabled, true);
+  assert.strictEqual(config.strategy.earlyWrongExitMode, 'live');
   assert.strictEqual(config.strategy.earlyWrongExitMinHoldMs, 3_000);
   assert.strictEqual(config.strategy.earlyWrongExitMaxHoldMs, 15_000);
 
@@ -196,6 +198,34 @@ function run() {
     manager.handleSwapForExit(exitSwap(mint, now + 600, { price: 0.94 }));
     assert.strictEqual(manager._exitCalls.length, 1);
     assert.strictEqual(manager._exitCalls[0].reason, 'EARLY_ENTRY_INVALIDATED');
+  }
+
+  {
+    const previousMode = config.strategy.earlyWrongExitMode;
+    config.strategy.earlyWrongExitMode = 'shadow';
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 5_000,
+      reconciledAt: now - 5_000,
+    }));
+    manager._researchEvents = [];
+    manager.tradeLogger = {
+      logPositionResearchEvent(event) {
+        manager._researchEvents.push(event);
+      },
+    };
+    manager.handleSwapForExit(exitSwap(mint, now));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, { price: 0.94 }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'shadow invalidation must never submit a sell',
+    );
+    assert(
+      manager._researchEvents.some((event) => event.eventType === 'EEI_SHADOW_TRIGGER'),
+      'shadow invalidation must persist its confirmed trigger',
+    );
+    config.strategy.earlyWrongExitMode = previousMode;
   }
 
   {
