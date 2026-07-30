@@ -45,8 +45,8 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT || '40'),
-    trailingDrawdownPct: parseFloat(process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT || '10'),
+    trailingActivatePct: parseFloat(process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT || '9'),
+    trailingDrawdownPct: parseFloat(process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT || '5'),
     trailingMinHwmAgeMs: 0,
 
     // RSI is entry analytics only. Both 1-minute and 5-second RSI exits are disabled.
@@ -139,6 +139,17 @@ const config = {
     ),
     earlyWrongExitConfirmTrades: parseInt(
       process.env.EARLY_WRONG_EXIT_CONFIRM_TRADES || '2',
+      10,
+    ),
+    tailStopEnabled:
+      (process.env.EARLY_FLOW_TAIL_STOP_ENABLED ?? 'true').toLowerCase() === 'true',
+    tailStopPnlPct: parseFloat(process.env.EARLY_FLOW_TAIL_STOP_PNL_PCT || '-30'),
+    tailStopConfirmMs: parseInt(
+      process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_MS || '500',
+      10,
+    ),
+    tailStopConfirmTrades: parseInt(
+      process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES || '2',
       10,
     ),
 
@@ -281,6 +292,7 @@ const config = {
     activityWindowMs: parseInt(process.env.EARLY_FLOW_ACTIVITY_WINDOW_MS || '5000', 10),
     minUniqueBuyers: parseInt(process.env.EARLY_FLOW_MIN_UNIQUE_BUYERS || '3', 10),
     minTradeCount: parseInt(process.env.EARLY_FLOW_MIN_TRADE_COUNT || '4', 10),
+    minBuySol5s: parseFloat(process.env.EARLY_FLOW_MIN_BUY_SOL_5S || '2'),
     maxLargestBuyShare: parseFloat(
       process.env.EARLY_FLOW_MAX_LARGEST_BUY_SHARE || '0.70',
     ),
@@ -289,6 +301,53 @@ const config = {
       process.env.EARLY_FLOW_MAX_EXECUTION_PRICE_DEVIATION_PCT || '15',
     ),
     marketFreshMs: parseInt(process.env.EARLY_FLOW_MARKET_FRESH_MS || '1500', 10),
+  },
+
+  // Research-only add-on. It records a hypothetical second entry and tracks
+  // that virtual position independently; it never submits a BUY or SELL.
+  addonShadow: {
+    enabled: (process.env.ADDON_SHADOW_ENABLED ?? 'true').toLowerCase() === 'true',
+    windowMs: parseInt(process.env.ADDON_SHADOW_WINDOW_MS || '60000', 10),
+    lowPnlPct: parseFloat(process.env.ADDON_SHADOW_LOW_PNL_PCT || '-20'),
+    minCurrentPnlPct: parseFloat(
+      process.env.ADDON_SHADOW_MIN_CURRENT_PNL_PCT || '-20',
+    ),
+    maxCurrentPnlPct: parseFloat(
+      process.env.ADDON_SHADOW_MAX_CURRENT_PNL_PCT || '0',
+    ),
+    minReboundPct: parseFloat(process.env.ADDON_SHADOW_MIN_REBOUND_PCT || '3'),
+    minNetFlow3sSol: parseFloat(
+      process.env.ADDON_SHADOW_MIN_NET_FLOW_3S_SOL || '0',
+    ),
+    minBuySellRatio3s: parseFloat(
+      process.env.ADDON_SHADOW_MIN_BUY_SELL_RATIO_3S || '1.5',
+    ),
+    minUniqueBuyers3s: parseInt(
+      process.env.ADDON_SHADOW_MIN_UNIQUE_BUYERS_3S || '2',
+      10,
+    ),
+    minTradeCount3s: parseInt(
+      process.env.ADDON_SHADOW_MIN_TRADE_COUNT_3S || '6',
+      10,
+    ),
+    maxTradeCount3s: parseInt(
+      process.env.ADDON_SHADOW_MAX_TRADE_COUNT_3S || '16',
+      10,
+    ),
+    minBuyAcceleration3s: parseFloat(
+      process.env.ADDON_SHADOW_MIN_BUY_ACCELERATION_3S || '3',
+    ),
+    sizeSol: parseFloat(process.env.ADDON_SHADOW_SIZE_SOL || '0.2'),
+    maxHoldMs: parseInt(process.env.ADDON_SHADOW_MAX_HOLD_MS || '1500000', 10),
+    trailingActivatePct: parseFloat(
+      process.env.ADDON_SHADOW_TRAILING_ACTIVATE_PCT || '50',
+    ),
+    trailingDrawdownPct: parseFloat(
+      process.env.ADDON_SHADOW_TRAILING_DRAWDOWN_PCT || '10',
+    ),
+    executionCostPct: parseFloat(
+      process.env.ADDON_SHADOW_EXECUTION_COST_PCT || '5',
+    ),
   },
 
   // ============ Price anomaly filter ============

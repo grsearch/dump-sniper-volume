@@ -71,13 +71,13 @@ function feedQualifyingWindow(tracker, finalPrice = 1.02) {
   tracker.handleSwap(swap(11_500, {
     price: 1.005,
     side: 'BUY',
-    solVolume: 0.2,
+    solVolume: 0.8,
     signer: 'buyer-a',
   }));
   tracker.handleSwap(swap(12_500, {
     price: 1.01,
     side: 'BUY',
-    solVolume: 0.2,
+    solVolume: 0.7,
     signer: 'buyer-b',
   }));
   tracker.handleSwap(swap(14_200, {
@@ -89,7 +89,7 @@ function feedQualifyingWindow(tracker, finalPrice = 1.02) {
   tracker.handleSwap(swap(15_000, {
     price: finalPrice,
     side: 'BUY',
-    solVolume: 0.2,
+    solVolume: 0.6,
     signer: 'buyer-c',
   }));
 }
@@ -110,6 +110,7 @@ function feedQualifyingWindow(tracker, finalPrice = 1.02) {
   assert.strictEqual(signals[0]._earlyFlow, true);
   assert.strictEqual(signals[0]._earlyFlowDetails.uniqueBuyers5s, 3);
   assert.strictEqual(signals[0]._earlyFlowDetails.tradeCount5s, 4);
+  assert(signals[0]._earlyFlowDetails.buySol5s >= 2);
   assert.strictEqual(signals[0]._earlyFlowDetails.executionDelayMs, 400);
   assert.strictEqual(signals[0]._earlyFlowDetails.signalMigrationAgeMs, 15_000);
   assert(Number.isFinite(signals[0]._earlyFlowDetails.preEntryVwap5s));
@@ -140,13 +141,13 @@ function feedQualifyingWindow(tracker, finalPrice = 1.02) {
   tracker.handleSwap(swap(11_500, {
     price: 1,
     side: 'BUY',
-    solVolume: 0.8,
+    solVolume: 1.6,
     signer: 'buyer-a',
   }));
   tracker.handleSwap(swap(12_500, {
     price: 1,
     side: 'BUY',
-    solVolume: 0.1,
+    solVolume: 0.2,
     signer: 'buyer-b',
   }));
   tracker.handleSwap(swap(14_000, {
@@ -158,11 +159,43 @@ function feedQualifyingWindow(tracker, finalPrice = 1.02) {
   tracker.handleSwap(swap(15_000, {
     price: 1,
     side: 'BUY',
-    solVolume: 0.1,
+    solVolume: 0.2,
     signer: 'buyer-c',
   }));
   tracker.handleSwap(swap(15_500, { price: 1, side: 'BUY', signer: 'buyer-d' }));
   assert.strictEqual(signals.length, 0, 'a single buy above 70% must not arm');
+}
+
+{
+  const tracker = qualifyingTracker();
+  const signals = [];
+  tracker.on('earlyFlowSignal', (signal) => signals.push(signal));
+  tracker.handleSwap(swap(11_500, {
+    price: 1,
+    side: 'BUY',
+    solVolume: 0.6,
+    signer: 'buyer-a',
+  }));
+  tracker.handleSwap(swap(12_500, {
+    price: 1.01,
+    side: 'BUY',
+    solVolume: 0.6,
+    signer: 'buyer-b',
+  }));
+  tracker.handleSwap(swap(14_200, {
+    price: 1.01,
+    side: 'SELL',
+    solVolume: 0.05,
+    signer: 'seller-a',
+  }));
+  tracker.handleSwap(swap(15_000, {
+    price: 1.02,
+    side: 'BUY',
+    solVolume: 0.6,
+    signer: 'buyer-c',
+  }));
+  tracker.handleSwap(swap(15_400, { price: 1.02, side: 'SELL', solVolume: 0.05 }));
+  assert.strictEqual(signals.length, 0, 'less than 2 SOL of real 5s buys must not arm');
 }
 
 {

@@ -378,6 +378,18 @@ function main(argv = process.argv.slice(2)) {
       EEI_CANDIDATE: 'First tick satisfying the early-entry invalidation candidate.',
       EEI_SHADOW_TRIGGER: 'Confirmed EEI shadow signal; no sell was submitted.',
       EEI_LIVE_TRIGGER: 'Confirmed EEI signal in live mode.',
+      TAIL_STOP_CANDIDATE:
+        'First distinct transaction observed at or below the unarmed tail-loss threshold.',
+      CONFIRMED_TAIL_STOP_TRIGGER:
+        'Tail loss persisted for the configured duration and distinct-signature count; all mint positions were submitted for exit.',
+      ADDON_SHADOW_SIGNAL:
+        'Research-only hypothetical add-on entry; no transaction was submitted.',
+      ADDON_SHADOW_ARMED:
+        'The hypothetical add-on reached its independent trailing activation threshold.',
+      ADDON_SHADOW_EXIT:
+        'The hypothetical add-on reached its own exit condition; estimated results are in metric_addonShadow_*.',
+      ADDON_SHADOW_CENSORED:
+        'The hypothetical add-on reached the research horizon without an exit; this is not a simulated sell.',
       TRAILING_ARMED: 'Trailing exit became active.',
       FDV_STOP_TRIGGER: 'Realtime FDV crossed the configured exit threshold.',
       ACTUAL_EXIT_TRIGGER: 'A production exit condition requested a sell.',

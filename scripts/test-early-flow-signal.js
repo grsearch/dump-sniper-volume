@@ -42,6 +42,7 @@ function signal(overrides = {}) {
     netFlow1sSol: 0.1,
     uniqueBuyers5s: 3,
     tradeCount5s: 4,
+    buySol5s: 2.1,
     largestBuyShare5s: 0.5,
     ...overrides,
   };
@@ -60,6 +61,7 @@ function signal(overrides = {}) {
 (async () => {
   assert.strictEqual(config.earlyFlow.minMigrationAgeMs, 15_000);
   assert.strictEqual(config.earlyFlow.maxMigrationAgeMs, 25_000);
+  assert.strictEqual(config.earlyFlow.minBuySol5s, 2);
   assert.strictEqual(config.strategy.positionSizeSol, 0.2);
 
   const accepted = engine();
@@ -74,6 +76,11 @@ function signal(overrides = {}) {
   await missingBuyers.handleEarlyFlowSignal(signal({ uniqueBuyers5s: NaN }));
   assert.strictEqual(missingBuyers.inflightBuys.size, 0);
   assert(missingBuyers.loggedRejects[0].startsWith('UNIQUE_BUYERS_5S_LOW'));
+
+  const lowBuyVolume = engine();
+  await lowBuyVolume.handleEarlyFlowSignal(signal({ buySol5s: 1.999 }));
+  assert.strictEqual(lowBuyVolume.inflightBuys.size, 0);
+  assert(lowBuyVolume.loggedRejects[0].startsWith('BUY_VOLUME_5S_LOW'));
 
   const late = engine();
   await late.handleEarlyFlowSignal(signal({ executionDelayMs: 3_001 }));

@@ -137,6 +137,7 @@ class SignalEngine extends EventEmitter {
     const netFlow1sSol = Number(details.netFlow1sSol);
     const uniqueBuyers5s = Number(details.uniqueBuyers5s);
     const tradeCount5s = Number(details.tradeCount5s);
+    const buySol5s = Number(details.buySol5s);
     const largestBuyShare5s = Number(details.largestBuyShare5s);
     const maxSignalAgeMs = Math.max(config.earlyFlow.executionWindowMs, 5_000);
 
@@ -246,6 +247,16 @@ class SignalEngine extends EventEmitter {
       return;
     }
     if (
+      !Number.isFinite(buySol5s) ||
+      buySol5s < config.earlyFlow.minBuySol5s
+    ) {
+      this._logReject(
+        signal,
+        `BUY_VOLUME_5S_LOW: ${this._numberLabel(buySol5s, 3)}SOL`,
+      );
+      return;
+    }
+    if (
       !Number.isFinite(largestBuyShare5s) ||
       largestBuyShare5s > config.earlyFlow.maxLargestBuyShare
     ) {
@@ -277,7 +288,8 @@ class SignalEngine extends EventEmitter {
       `early_flow: age=${(signalAgeMs / 1000).toFixed(1)}s ` +
       `fdv=$${fdvUsd.toFixed(0)} change10s=${priceChangePct.toFixed(2)}% ` +
       `flow1s=${netFlow1sSol.toFixed(3)}SOL buyers5s=${uniqueBuyers5s} ` +
-      `tx5s=${tradeCount5s} largestBuyShare=${(largestBuyShare5s * 100).toFixed(1)}% ` +
+      `tx5s=${tradeCount5s} buy5s=${buySol5s.toFixed(3)}SOL ` +
+      `largestBuyShare=${(largestBuyShare5s * 100).toFixed(1)}% ` +
       `execution=${executionDelayMs}ms/${((executionPrice / signalPrice - 1) * 100).toFixed(2)}%`;
 
     this.inflightBuys.add(mint);

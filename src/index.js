@@ -42,13 +42,19 @@ async function main() {
       `change10s ${config.earlyFlow.minPriceChangePct}%..+${config.earlyFlow.maxPriceChangePct}%, ` +
       `flow1s>0, buyers5s>=${config.earlyFlow.minUniqueBuyers}, ` +
       `tx5s>=${config.earlyFlow.minTradeCount}, ` +
+      `buy5s>=${config.earlyFlow.minBuySol5s}SOL, ` +
       `largestBuyShare<=${config.earlyFlow.maxLargestBuyShare * 100}%)`,
   );
   console.log(
     'Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; ' +
       `EMA${config.strategy.emaFastPeriod}/EMA${config.strategy.emaSlowPeriod} down-cross; ` +
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
-      `and FDV <$${config.strategy.fdvExitUsd} (plus token-age exit)`,
+      `and FDV <$${config.strategy.fdvExitUsd}; ` +
+      `${config.strategy.tailStopEnabled
+        ? `unarmed tail ${config.strategy.tailStopPnlPct}% for ` +
+          `${config.strategy.tailStopConfirmMs}ms/${config.strategy.tailStopConfirmTrades} signatures`
+        : 'tail stop disabled'} ` +
+      `(plus token-age exit)`,
   );
   console.log(
     `Early invalidation: ${config.strategy.earlyWrongExitMode} ` +
@@ -59,6 +65,14 @@ async function main() {
       `sell/buy>=${config.strategy.earlyWrongExitSellBuyRatio}, ` +
       `confirm=${config.strategy.earlyWrongExitConfirmTrades}/` +
       `${config.strategy.earlyWrongExitConfirmMs}ms)`,
+  );
+  console.log(
+    `Add-on shadow: ${config.addonShadow.enabled ? 'enabled' : 'disabled'} ` +
+      `(low<=${config.addonShadow.lowPnlPct}%, rebound>=${config.addonShadow.minReboundPct}%, ` +
+      `3s buy/sell>=${config.addonShadow.minBuySellRatio3s}, ` +
+      `buyers>=${config.addonShadow.minUniqueBuyers3s}, ` +
+      `trailing +${config.addonShadow.trailingActivatePct}%/` +
+      `${config.addonShadow.trailingDrawdownPct}%; no chain orders)`,
   );
   console.log(
     `Position research telemetry: ${config.capture.positionResearchEnabled ? 'enabled' : 'disabled'} ` +
@@ -247,7 +261,8 @@ async function main() {
       `change10s=${config.earlyFlow.minPriceChangePct}%..+` +
       `${config.earlyFlow.maxPriceChangePct}% flow1s>0 ` +
       `buyers5s>=${config.earlyFlow.minUniqueBuyers} ` +
-      `tx5s>=${config.earlyFlow.minTradeCount}`,
+      `tx5s>=${config.earlyFlow.minTradeCount} ` +
+      `buy5s>=${config.earlyFlow.minBuySol5s}SOL`,
   );
   dumpDetector.on("swapParsed", (swap) => {
     const latestMarket = tokenWatchdog.getLatestRealtimeMarket(swap.mint);

@@ -71,6 +71,7 @@ class PositionManager extends EventEmitter {
     this._rsiExitSkipLogAt = new Map(); // mint -> { ts, reason }; throttle diagnostic logs
     this._lastRsi5sByMint = new Map(); // mint -> previous valid live RSI(7, 5s)
     this._pendingRsi5sExit = new Map(); // mint -> condition seen before BUY reconciliation
+    this._addonShadowsByMint = new Map(); // mint -> Map<sourcePositionId, virtual add-on>
 
     this.positions = new Map(); // positionId → position obj
     this.byMint = new Map();    // mint → Set<positionId> (v3.17.13: 同币多仓)
@@ -155,6 +156,12 @@ class PositionManager extends EventEmitter {
     clearInterval(this.tickTimer);
     clearInterval(this.reconcilerTimer);
     clearInterval(this.poolPollTimer);
+    for (const shadows of this._addonShadowsByMint.values()) {
+      for (const shadow of shadows.values()) {
+        if (shadow.expireTimer) clearTimeout(shadow.expireTimer);
+      }
+    }
+    this._addonShadowsByMint.clear();
   }
 
   hasOpenPosition(mint) {
@@ -299,12 +306,25 @@ class PositionManager extends EventEmitter {
   handleSwapForExit(swap) {
     const s = config.strategy;
     const earlyWrongEnabled = !!s.earlyWrongExitEnabled;
+    const tailStopEnabled = !!s.tailStopEnabled;
+    const addonShadowEnabled = !!config.addonShadow?.enabled;
     const legacyFlowEnabled = !s.dedicatedExitOnly && !!s.flowReversalExitEnabled;
     const researchEnabled = !!config.capture.positionResearchEnabled;
-    if ((!earlyWrongEnabled && !legacyFlowEnabled && !researchEnabled) || !swap || !swap.mint) return;
+    if (
+      (
+        !earlyWrongEnabled &&
+        !tailStopEnabled &&
+        !addonShadowEnabled &&
+        !legacyFlowEnabled &&
+        !researchEnabled
+      ) ||
+      !swap ||
+      !swap.mint
+    ) return;
 
     const pids = this.byMint.get(swap.mint);
-    if (!pids || pids.size === 0) return;
+    const shadows = this._addonShadowsByMint.get(swap.mint);
+    if ((!pids || pids.size === 0) && (!shadows || shadows.size === 0)) return;
 
     const side = String(swap.side || '').toUpperCase();
     if (side !== 'BUY' && side !== 'SELL') return;
@@ -347,7 +367,9 @@ class PositionManager extends EventEmitter {
     if (duplicate) return;
     events.push(ev);
     this._pruneFlowExitEvents(swap.mint, ev.receivedAt);
+    if (addonShadowEnabled) this._updateAddonShadows(swap.mint, ev);
 
+    if (!pids || pids.size === 0) return;
     for (const pid of pids) {
       const pos = this.positions.get(pid);
       if (!pos || pos.status === 'stuck') continue;
@@ -356,6 +378,8 @@ class PositionManager extends EventEmitter {
         this._recordPositionResearchEvent(pos, ev, 'SWAP_METRICS', metrics);
       }
       if (pos.exiting) continue;
+      if (tailStopEnabled && this._maybeConfirmedTailStop(pos, ev, metrics)) break;
+      if (addonShadowEnabled) this._maybeAddonShadowSignal(pos, ev, metrics);
       if (earlyWrongEnabled) this._maybeEarlyWrongExit(pos, ev, metrics);
       if (legacyFlowEnabled) this._maybeFlowReversalExit(pos, price, ev.ts);
     }
@@ -378,6 +402,7 @@ class PositionManager extends EventEmitter {
       s.earlyWrongExitEnabled
         ? (s.earlyWrongExitFlowWindowMs || 3_000) * 2
         : 0,
+      config.addonShadow?.enabled ? 7_000 : 0,
       config.capture.positionResearchEnabled
         ? config.capture.researchMetricsWindowMs || 10_000
         : 0,
@@ -652,6 +677,396 @@ class PositionManager extends EventEmitter {
       reconciled: !!pos.reconciled,
       metrics: snapshot,
     });
+  }
+
+  _resetTailStopCandidate(pos) {
+    if (!pos) return;
+    pos._tailStopFirstSeenAt = null;
+    pos._tailStopLastSignature = null;
+    pos._tailStopSignatures = null;
+  }
+
+  _maybeConfirmedTailStop(pos, event, researchMetrics = null) {
+    const s = config.strategy;
+    if (!s.tailStopEnabled || !pos || pos.exiting || pos.status === 'stuck') return false;
+    if ((!pos.reconciled && !pos.dryRun) || pos.trailingArmed) {
+      this._resetTailStopCandidate(pos);
+      return false;
+    }
+
+    const price = Number(event?.price);
+    const entryPrice = Number(pos.entryPrice);
+    const signature = event?.signature ? String(event.signature) : null;
+    if (
+      !Number.isFinite(price) ||
+      price <= 0 ||
+      !Number.isFinite(entryPrice) ||
+      entryPrice <= 0
+    ) {
+      this._resetTailStopCandidate(pos);
+      return false;
+    }
+
+    const marketPnlPct = ((price - entryPrice) / entryPrice) * 100;
+    if (marketPnlPct > s.tailStopPnlPct + 1e-9) {
+      this._resetTailStopCandidate(pos);
+      return false;
+    }
+    if (!signature || signature === pos.buySignature) return false;
+
+    const now = Number(event.receivedAt) || Date.now();
+    if (!pos._tailStopFirstSeenAt) {
+      pos._tailStopFirstSeenAt = now;
+      pos._tailStopLastSignature = signature;
+      pos._tailStopSignatures = new Set([signature]);
+      monitor.inc('PositionManager.tailStopCandidate', 1, 'PositionManager');
+      this._recordPositionResearchEvent(
+        pos,
+        event,
+        'TAIL_STOP_CANDIDATE',
+        researchMetrics || this._buildPositionResearchMetrics(pos, event),
+        {
+          tailStop: {
+            stage: 'candidate',
+            thresholdPnlPct: s.tailStopPnlPct,
+            marketPnlPct,
+            confirmMs: s.tailStopConfirmMs,
+            requiredSignatures: s.tailStopConfirmTrades,
+            signatureCount: 1,
+          },
+        },
+      );
+      return false;
+    }
+
+    if (!(pos._tailStopSignatures instanceof Set)) {
+      pos._tailStopSignatures = new Set();
+      if (pos._tailStopLastSignature) {
+        pos._tailStopSignatures.add(pos._tailStopLastSignature);
+      }
+    }
+    pos._tailStopSignatures.add(signature);
+    pos._tailStopLastSignature = signature;
+
+    const confirmElapsedMs = now - pos._tailStopFirstSeenAt;
+    const signatureCount = pos._tailStopSignatures.size;
+    if (
+      confirmElapsedMs < s.tailStopConfirmMs ||
+      signatureCount < s.tailStopConfirmTrades
+    ) {
+      return false;
+    }
+
+    const active = [...(this.byMint.get(pos.mint) || [])]
+      .map((positionId) => this.positions.get(positionId))
+      .filter((item) => item && !item.exiting && item.status !== 'stuck');
+    if (active.length === 0) return false;
+
+    console.warn(
+      `[PositionManager] CONFIRMED_TAIL_STOP ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `pnl=${marketPnlPct.toFixed(2)}% <= ${s.tailStopPnlPct}% ` +
+        `confirm=${signatureCount} signatures/${confirmElapsedMs}ms ` +
+        `positions=${active.length}`,
+    );
+    monitor.inc('PositionManager.confirmedTailStop', 1, 'PositionManager');
+
+    for (const item of active) {
+      const itemPnlPct = Number(item.entryPrice) > 0
+        ? ((price - Number(item.entryPrice)) / Number(item.entryPrice)) * 100
+        : null;
+      item._exitTriggeredAt = item._exitTriggeredAt || Date.now();
+      item._exitMarketTs = item._exitMarketTs || Number(event.ts) || null;
+      item._exitTriggerSource =
+        item._exitTriggerSource || 'chain_swap_confirmed_tail_stop';
+      this._recordPositionResearchEvent(
+        item,
+        event,
+        'CONFIRMED_TAIL_STOP_TRIGGER',
+        item === pos
+          ? (researchMetrics || this._buildPositionResearchMetrics(item, event))
+          : this._buildPositionResearchMetrics(item, event),
+        {
+          tailStop: {
+            stage: 'confirmed',
+            thresholdPnlPct: s.tailStopPnlPct,
+            marketPnlPct: itemPnlPct,
+            confirmElapsedMs,
+            signatureCount,
+            sellScope: 'all_positions_for_mint',
+          },
+        },
+      );
+      this._exitForCondition(item, price, 'CONFIRMED_TAIL_STOP');
+    }
+    this._closeAddonShadowsByMint(pos.mint, event, 'CONFIRMED_TAIL_STOP');
+    return true;
+  }
+
+  _maybeAddonShadowSignal(pos, event, researchMetrics = null) {
+    const a = config.addonShadow || {};
+    if (!a.enabled || !pos || pos.isAddOn || pos.exiting || pos.status === 'stuck') return;
+    if ((!pos.reconciled && !pos.dryRun) || pos.trailingArmed || pos._addonShadowSignaled) return;
+
+    const now = Number(event?.receivedAt) || Date.now();
+    const openedAt = Number(pos.openedAt) || Number(pos.reconciledAt) || now;
+    const holdMs = now - openedAt;
+    const price = Number(event?.price);
+    const entryPrice = Number(pos.entryPrice);
+    const ownBuy = !!(
+      event?.signature &&
+      pos.buySignature &&
+      event.signature === pos.buySignature
+    );
+    if (
+      ownBuy ||
+      holdMs < 0 ||
+      holdMs > a.windowMs ||
+      !Number.isFinite(price) ||
+      price <= 0 ||
+      !Number.isFinite(entryPrice) ||
+      entryPrice <= 0 ||
+      price / entryPrice < 0.1 ||
+      price / entryPrice > 10
+    ) return;
+
+    pos._addonShadowLowPrice = Math.min(
+      Number(pos._addonShadowLowPrice) || entryPrice,
+      price,
+    );
+    const currentPnlPct = ((price - entryPrice) / entryPrice) * 100;
+    const lowPnlPct = ((pos._addonShadowLowPrice - entryPrice) / entryPrice) * 100;
+    const reboundPct = ((price - pos._addonShadowLowPrice) / pos._addonShadowLowPrice) * 100;
+    const metrics = researchMetrics || this._buildPositionResearchMetrics(pos, event);
+    const current3s = metrics?.windows?.['3s'];
+    const acceleration = Number(metrics?.acceleration?.buySol3s);
+    if (!current3s) return;
+
+    const candidate =
+      lowPnlPct <= a.lowPnlPct + 1e-9 &&
+      currentPnlPct >= a.minCurrentPnlPct - 1e-9 &&
+      currentPnlPct <= a.maxCurrentPnlPct + 1e-9 &&
+      reboundPct >= a.minReboundPct - 1e-9 &&
+      current3s.netFlowSol > a.minNetFlow3sSol &&
+      current3s.buySellRatio >= a.minBuySellRatio3s &&
+      current3s.uniqueBuyers >= a.minUniqueBuyers3s &&
+      current3s.tradeCount >= a.minTradeCount3s &&
+      current3s.tradeCount <= a.maxTradeCount3s &&
+      acceleration >= a.minBuyAcceleration3s;
+    if (!candidate) return;
+
+    pos._addonShadowSignaled = true;
+    const shadow = {
+      sourcePositionId: pos.positionId,
+      sourcePos: pos,
+      mint: pos.mint,
+      symbol: pos.symbol,
+      entryPrice: price,
+      entryTs: Number(event.ts) || now,
+      receivedAt: now,
+      sizeSol: a.sizeSol,
+      highWaterMark: price,
+      highWaterMarkTs: now,
+      trailingArmed: false,
+      lastEvent: event,
+    };
+    if (a.maxHoldMs > 0) {
+      shadow.expireTimer = setTimeout(() => {
+        this._censorAddonShadow(shadow, 'MAX_HOLD');
+      }, a.maxHoldMs);
+      if (shadow.expireTimer.unref) shadow.expireTimer.unref();
+    }
+    let shadows = this._addonShadowsByMint.get(pos.mint);
+    if (!shadows) {
+      shadows = new Map();
+      this._addonShadowsByMint.set(pos.mint, shadows);
+    }
+    shadows.set(pos.positionId, shadow);
+
+    this._recordPositionResearchEvent(
+      pos,
+      event,
+      'ADDON_SHADOW_SIGNAL',
+      metrics,
+      {
+        addonShadow: {
+          stage: 'signal',
+          sourcePositionId: pos.positionId,
+          entryPrice: price,
+          sizeSol: a.sizeSol,
+          holdMs,
+          currentPnlPct,
+          lowPnlPct,
+          reboundPct,
+          netFlow3sSol: current3s.netFlowSol,
+          buySellRatio3s: current3s.buySellRatio,
+          uniqueBuyers3s: current3s.uniqueBuyers,
+          tradeCount3s: current3s.tradeCount,
+          buyAcceleration3s: acceleration,
+          trailingActivatePct: a.trailingActivatePct,
+          trailingDrawdownPct: a.trailingDrawdownPct,
+        },
+      },
+    );
+    monitor.inc('PositionManager.addonShadowSignal', 1, 'PositionManager');
+    console.log(
+      `[PositionManager] ADDON_SHADOW_SIGNAL ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `hold=${holdMs}ms pnl=${currentPnlPct.toFixed(2)}% ` +
+        `low=${lowPnlPct.toFixed(2)}% rebound=${reboundPct.toFixed(2)}% ` +
+        `flow3s=${current3s.netFlowSol.toFixed(3)}SOL ` +
+        `buy/sell=${current3s.buySellRatio.toFixed(2)} buyers=${current3s.uniqueBuyers} ` +
+        `trades=${current3s.tradeCount} accel=${acceleration.toFixed(2)}`,
+    );
+  }
+
+  _updateAddonShadows(mint, event) {
+    const shadows = this._addonShadowsByMint.get(mint);
+    if (!shadows || shadows.size === 0) return;
+    const a = config.addonShadow || {};
+    const price = Number(event?.price);
+    if (!Number.isFinite(price) || price <= 0) return;
+
+    for (const shadow of [...shadows.values()]) {
+      if (
+        !Number.isFinite(shadow.entryPrice) ||
+        shadow.entryPrice <= 0 ||
+        price / shadow.entryPrice < 0.1 ||
+        price / shadow.entryPrice > 10
+      ) continue;
+
+      const now = Number(event.receivedAt) || Date.now();
+      shadow.lastEvent = event;
+      if (price > shadow.highWaterMark) {
+        shadow.highWaterMark = price;
+        shadow.highWaterMarkTs = now;
+      }
+      const marketPnlPct = ((price - shadow.entryPrice) / shadow.entryPrice) * 100;
+      const peakPnlPct =
+        ((shadow.highWaterMark - shadow.entryPrice) / shadow.entryPrice) * 100;
+
+      if (!shadow.trailingArmed && peakPnlPct + 1e-9 >= a.trailingActivatePct) {
+        shadow.trailingArmed = true;
+        this._recordPositionResearchEvent(
+          shadow.sourcePos,
+          event,
+          'ADDON_SHADOW_ARMED',
+          shadow.sourcePos._lastResearchMetrics || {},
+          {
+            addonShadow: {
+              stage: 'armed',
+              sourcePositionId: shadow.sourcePositionId,
+              entryPrice: shadow.entryPrice,
+              highWaterMark: shadow.highWaterMark,
+              marketPnlPct,
+              peakPnlPct,
+              trailingActivatePct: a.trailingActivatePct,
+            },
+          },
+        );
+        monitor.inc('PositionManager.addonShadowArmed', 1, 'PositionManager');
+      }
+
+      if (!shadow.trailingArmed) continue;
+      const drawdownPct =
+        ((shadow.highWaterMark - price) / shadow.highWaterMark) * 100;
+      if (drawdownPct + 1e-9 >= a.trailingDrawdownPct) {
+        this._closeAddonShadow(shadow, event, 'TRAILING_STOP');
+      }
+    }
+  }
+
+  _closeAddonShadow(shadow, event, reason) {
+    if (!shadow) return;
+    const price = Number(event?.price);
+    if (!Number.isFinite(price) || price <= 0) return;
+    const a = config.addonShadow || {};
+    const marketPnlPct = ((price - shadow.entryPrice) / shadow.entryPrice) * 100;
+    const peakPnlPct =
+      ((shadow.highWaterMark - shadow.entryPrice) / shadow.entryPrice) * 100;
+    const drawdownPct =
+      ((shadow.highWaterMark - price) / shadow.highWaterMark) * 100;
+    const estimatedNetPnlPct = marketPnlPct - (Number(a.executionCostPct) || 0);
+    const estimatedNetPnlSol =
+      (Number(shadow.sizeSol) || 0) * estimatedNetPnlPct / 100;
+    this._recordPositionResearchEvent(
+      shadow.sourcePos,
+      event,
+      'ADDON_SHADOW_EXIT',
+      shadow.sourcePos._lastResearchMetrics || {},
+      {
+        addonShadow: {
+          stage: 'exit',
+          sourcePositionId: shadow.sourcePositionId,
+          reason,
+          entryPrice: shadow.entryPrice,
+          exitPrice: price,
+          sizeSol: shadow.sizeSol,
+          holdMs: (Number(event?.receivedAt) || Date.now()) - shadow.receivedAt,
+          marketPnlPct,
+          peakPnlPct,
+          drawdownPct,
+          executionCostPct: Number(a.executionCostPct) || 0,
+          estimatedNetPnlPct,
+          estimatedNetPnlSol,
+        },
+      },
+    );
+    monitor.inc('PositionManager.addonShadowExit', 1, 'PositionManager');
+    if (shadow.expireTimer) clearTimeout(shadow.expireTimer);
+    const shadows = this._addonShadowsByMint.get(shadow.mint);
+    shadows?.delete(shadow.sourcePositionId);
+    if (shadows && shadows.size === 0) {
+      this._addonShadowsByMint.delete(shadow.mint);
+      if (!this.byMint.has(shadow.mint)) this._flowExitEvents.delete(shadow.mint);
+    }
+  }
+
+  _censorAddonShadow(shadow, reason) {
+    if (!shadow) return;
+    const now = Date.now();
+    const lastEvent = shadow.lastEvent || {};
+    const price = Number(lastEvent.price) || shadow.highWaterMark || shadow.entryPrice;
+    const marketPnlPct =
+      ((price - shadow.entryPrice) / shadow.entryPrice) * 100;
+    this._recordPositionResearchEvent(
+      shadow.sourcePos,
+      {
+        ...lastEvent,
+        ts: Number(lastEvent.ts) || now,
+        receivedAt: now,
+        price,
+      },
+      'ADDON_SHADOW_CENSORED',
+      shadow.sourcePos._lastResearchMetrics || {},
+      {
+        addonShadow: {
+          stage: 'censored',
+          sourcePositionId: shadow.sourcePositionId,
+          reason,
+          entryPrice: shadow.entryPrice,
+          lastPrice: price,
+          sizeSol: shadow.sizeSol,
+          holdMs: now - shadow.receivedAt,
+          marketPnlPct,
+          peakPnlPct:
+            ((shadow.highWaterMark - shadow.entryPrice) / shadow.entryPrice) * 100,
+        },
+      },
+    );
+    monitor.inc('PositionManager.addonShadowCensored', 1, 'PositionManager');
+    const shadows = this._addonShadowsByMint.get(shadow.mint);
+    shadows?.delete(shadow.sourcePositionId);
+    if (shadows && shadows.size === 0) {
+      this._addonShadowsByMint.delete(shadow.mint);
+      if (!this.byMint.has(shadow.mint)) this._flowExitEvents.delete(shadow.mint);
+    }
+  }
+
+  _closeAddonShadowsByMint(mint, event, reason) {
+    const shadows = this._addonShadowsByMint.get(mint);
+    if (!shadows) return;
+    for (const shadow of [...shadows.values()]) {
+      this._closeAddonShadow(shadow, event, reason);
+    }
   }
 
   _resetEarlyWrongCandidate(pos) {
@@ -1028,7 +1443,9 @@ class PositionManager extends EventEmitter {
     pids.delete(positionId);
     if (pids.size === 0) {
       this.byMint.delete(mint);
-      this._flowExitEvents.delete(mint);
+      if (!this._addonShadowsByMint.get(mint)?.size) {
+        this._flowExitEvents.delete(mint);
+      }
       this._rsiExitSkipLogAt.delete(mint);
     }
   }
@@ -1076,8 +1493,9 @@ class PositionManager extends EventEmitter {
   }
 
   /**
-   * 自动退出条件统一入口。同币存在加仓时，任一仓位触发都会让全部仓位
-   * 进入现有的同币串行卖出队列；单仓行为保持不变。
+   * Automatic exits are position-scoped. First entries and add-ons keep their
+   * own entry price, HWM, trailing state and exit reason. Mint-wide emergency
+   * exits must explicitly iterate all positions before calling this method.
    */
   _exitForCondition(pos, price, reason) {
     if (!pos || pos.exiting) return;
@@ -1109,11 +1527,6 @@ class PositionManager extends EventEmitter {
         },
       },
     );
-    const pids = this.byMint.get(pos.mint);
-    if (pids && pids.size > 1) {
-      this._exitAllByMint(pos.mint, price, reason);
-      return;
-    }
     this._exit(pos, price, reason);
   }
 
@@ -1509,6 +1922,11 @@ class PositionManager extends EventEmitter {
       _earlyWrongConfirmCount: 0,
       _earlyWrongLastSignature: null,
       _earlyWrongShadowActive: false,
+      _tailStopFirstSeenAt: null,
+      _tailStopLastSignature: null,
+      _tailStopSignatures: null,
+      _addonShadowLowPrice: entryPrice,
+      _addonShadowSignaled: false,
       // v3.17.6: stabilization 期
       //   DRY_RUN：开仓即进入 stabilization(用估算价格作起点)
       //   LIVE：reconcile 完成时进入 stabilization
@@ -2006,6 +2424,9 @@ class PositionManager extends EventEmitter {
     pos.highWaterMark = pos.entryPrice;
     pos.highWaterMarkTs = Date.now();
     pos.trailingArmed = false;
+    pos._addonShadowLowPrice = pos.entryPrice;
+    pos._addonShadowSignaled = false;
+    this._resetTailStopCandidate(pos);
     pos._tpConfirmCount = 0;
     pos._tpFirstTriggerTs = null;
 
@@ -2724,6 +3145,12 @@ class PositionManager extends EventEmitter {
     // v3.17.42: 记录最新tick价格，供前端API使用(priceTracker可能没追踪该mint)
     pos._lastTickPrice = price;
     const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
+    if (
+      config.strategy.tailStopEnabled &&
+      (pos.trailingArmed || pnlPct > config.strategy.tailStopPnlPct + 1e-9)
+    ) {
+      this._resetTailStopCandidate(pos);
+    }
 
     // Absolute loss cap: no stabilization or legacy emergency-stop grace delay.
     const fixedStopPct = config.strategy.fixedStopLossPct;
@@ -2787,6 +3214,7 @@ class PositionManager extends EventEmitter {
       const peakPnlPct = ((pos.highWaterMark - pos.entryPrice) / pos.entryPrice) * 100;
       if (!pos.trailingArmed && peakPnlPct + 1e-9 >= config.strategy.trailingActivatePct) {
         pos.trailingArmed = true;
+        this._resetTailStopCandidate(pos);
         pos._armedHwm = pos.highWaterMark;
         pos._armedHwmTs = pos.highWaterMarkTs || now;
         console.log(

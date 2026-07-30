@@ -1,8 +1,13 @@
 'use strict';
 
-process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT = '40';
-process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT = '10';
+process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT = '9';
+process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT = '5';
 process.env.EARLY_FLOW_FDV_EXIT_USD = '10000';
+process.env.EARLY_FLOW_TAIL_STOP_ENABLED = 'true';
+process.env.EARLY_FLOW_TAIL_STOP_PNL_PCT = '-30';
+process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_MS = '500';
+process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES = '2';
+process.env.ADDON_SHADOW_ENABLED = 'true';
 process.env.EARLY_WRONG_EXIT_ENABLED = 'true';
 process.env.EARLY_WRONG_EXIT_MODE = 'live';
 process.env.EARLY_WRONG_EXIT_MIN_HOLD_MS = '3000';
@@ -60,6 +65,7 @@ function managerWith(...positions) {
   manager._lastRsi5sByMint = new Map();
   manager._pendingRsi5sExit = new Map();
   manager._flowExitEvents = new Map();
+  manager._addonShadowsByMint = new Map();
   manager._exitCalls = [];
   manager._tickCount = 0;
   manager.priceTracker = { getPrice: () => 1, forceSet() {} };
@@ -106,8 +112,11 @@ function run() {
   assert.strictEqual(config.strategy.fixedStopLossPct, 0);
   assert.strictEqual(config.strategy.maxHoldMs, 0);
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
-  assert.strictEqual(config.strategy.trailingActivatePct, 40);
-  assert.strictEqual(config.strategy.trailingDrawdownPct, 10);
+  assert.strictEqual(config.strategy.trailingActivatePct, 9);
+  assert.strictEqual(config.strategy.trailingDrawdownPct, 5);
+  assert.strictEqual(config.strategy.tailStopPnlPct, -30);
+  assert.strictEqual(config.strategy.tailStopConfirmMs, 500);
+  assert.strictEqual(config.strategy.tailStopConfirmTrades, 2);
   assert.strictEqual(config.strategy.emaExitEnabled, true);
   assert.strictEqual(config.strategy.fdvExitUsd, 10_000);
   assert.strictEqual(config.strategy.rsi5sExitEnabled, false);
@@ -134,10 +143,10 @@ function run() {
 
   {
     const manager = managerWith(position('p1', mint));
-    manager._checkExit('p1', 1.4);
-    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+40% must arm trailing');
+    manager._checkExit('p1', 1.09);
+    assert.strictEqual(manager.positions.get('p1').trailingArmed, true, '+9% must arm trailing');
     assert.strictEqual(manager._exitCalls.length, 0);
-    manager._checkExit('p1', 1.26);
+    manager._checkExit('p1', 1.03);
     assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
   }
 
@@ -167,6 +176,188 @@ function run() {
     assert.strictEqual(requested, 2);
     assert.strictEqual(manager._exitCalls.length, 2);
     assert(manager._exitCalls.every((call) => call.reason === 'TOKEN_AGE_EXPIRED'));
+  }
+
+  {
+    const first = position('p1', mint);
+    const addon = position('p2', mint, {
+      entryPrice: 0.8,
+      highWaterMark: 0.8,
+      isAddOn: true,
+    });
+    const manager = managerWith(first, addon);
+    manager._exitForCondition(first, 1.03, 'TRAILING_STOP');
+    assert.deepStrictEqual(
+      manager._exitCalls.map((call) => call.id),
+      ['p1'],
+      'a normal exit must only sell the position whose own condition fired',
+    );
+    assert.strictEqual(addon.exiting, false);
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(
+      position('p1', mint, { openedAt: now - 5_000 }),
+      position('p2', mint, {
+        openedAt: now - 5_000,
+        entryPrice: 0.9,
+        highWaterMark: 0.9,
+        isAddOn: true,
+      }),
+    );
+    manager.handleSwapForExit(exitSwap(mint, now, {
+      price: 0.69,
+      signature: 'tail-sig-1',
+    }));
+    assert.strictEqual(manager._exitCalls.length, 0);
+    manager.handleSwapForExit(exitSwap(mint, now + 600, {
+      price: 0.68,
+      signature: 'tail-sig-2',
+    }));
+    assert.strictEqual(manager._exitCalls.length, 2);
+    assert(
+      manager._exitCalls.every((call) => call.reason === 'CONFIRMED_TAIL_STOP'),
+      'confirmed tail protection must sell every position for the mint',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 5_000,
+      trailingArmed: true,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now, {
+      price: 0.6,
+      signature: 'armed-tail-1',
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, {
+      price: 0.5,
+      signature: 'armed-tail-2',
+    }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'tail protection must stay disabled after this position arms trailing',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, { openedAt: now - 5_000 }));
+    manager.handleSwapForExit(exitSwap(mint, now, {
+      price: 0.69,
+      signature: 'same-tail-signature',
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, {
+      price: 0.68,
+      signature: 'same-tail-signature',
+    }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'a duplicate transaction signature must not confirm the tail stop',
+    );
+    manager.handleSwapForExit(exitSwap(mint, now + 1_200, {
+      price: 0.67,
+      signature: 'different-tail-signature',
+    }));
+    assert.strictEqual(manager._exitCalls[0].reason, 'CONFIRMED_TAIL_STOP');
+  }
+
+  {
+    const now = Date.now();
+    const pos = position('p1', mint, { openedAt: now - 5_000 });
+    const manager = managerWith(pos);
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now, { price: 0.69, signature: 'reset-tail-1' }),
+      {},
+    );
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now + 300, { price: 0.71, signature: 'reset-recovery' }),
+      {},
+    );
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now + 600, { price: 0.69, signature: 'reset-tail-2' }),
+      {},
+    );
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now + 1_000, { price: 0.68, signature: 'reset-tail-3' }),
+      {},
+    );
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'a recovery above -30% must restart the 500ms confirmation clock',
+    );
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now + 1_200, { price: 0.67, signature: 'reset-tail-4' }),
+      {},
+    );
+    assert.strictEqual(manager._exitCalls[0].reason, 'CONFIRMED_TAIL_STOP');
+  }
+
+  {
+    const now = Date.now();
+    const pos = position('p1', mint, { openedAt: now - 20_000 });
+    const manager = managerWith(pos);
+    manager._researchEvents = [];
+    manager.tradeLogger = {
+      logPositionResearchEvent(event) {
+        manager._researchEvents.push(event);
+      },
+    };
+    const metrics = {
+      holdMs: 20_000,
+      marketPnlPct: -17,
+      windows: {
+        '3s': {
+          netFlowSol: 1,
+          buySellRatio: 2,
+          uniqueBuyers: 3,
+          tradeCount: 8,
+        },
+      },
+      acceleration: { buySol3s: 4 },
+    };
+    manager._maybeAddonShadowSignal(
+      pos,
+      exitSwap(mint, now, { price: 0.79, signature: 'shadow-low' }),
+      metrics,
+    );
+    manager._maybeAddonShadowSignal(
+      pos,
+      exitSwap(mint, now + 100, { price: 0.83, signature: 'shadow-rebound' }),
+      metrics,
+    );
+    assert(
+      manager._researchEvents.some((event) => event.eventType === 'ADDON_SHADOW_SIGNAL'),
+      'a qualifying recovery must create a research-only add-on signal',
+    );
+    assert.strictEqual(manager._exitCalls.length, 0, 'shadow add-on must not submit a trade');
+    manager._updateAddonShadows(
+      mint,
+      exitSwap(mint, now + 1_000, { price: 1.25, signature: 'shadow-peak' }),
+    );
+    manager._updateAddonShadows(
+      mint,
+      exitSwap(mint, now + 2_000, { price: 1.11, signature: 'shadow-drawdown' }),
+    );
+    assert(
+      manager._researchEvents.some((event) => event.eventType === 'ADDON_SHADOW_ARMED'),
+      'the virtual add-on must arm its own trailing exit',
+    );
+    assert(
+      manager._researchEvents.some((event) => event.eventType === 'ADDON_SHADOW_EXIT'),
+      'the virtual add-on must close independently after its own drawdown',
+    );
+    assert.strictEqual(manager._exitCalls.length, 0);
   }
 
   {

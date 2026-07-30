@@ -32,6 +32,7 @@ class EarlyFlowEntryTracker extends EventEmitter {
     this.minUniqueBuyers = opts.minUniqueBuyers ??
       strategy.minUniqueBuyers ?? 3;
     this.minTradeCount = opts.minTradeCount ?? strategy.minTradeCount ?? 4;
+    this.minBuySol5s = opts.minBuySol5s ?? strategy.minBuySol5s ?? 2;
     this.maxLargestBuyShare = opts.maxLargestBuyShare ??
       strategy.maxLargestBuyShare ?? 0.70;
     this.executionWindowMs = opts.executionWindowMs ??
@@ -125,6 +126,7 @@ class EarlyFlowEntryTracker extends EventEmitter {
       !(metrics.netFlow1sSol > 0) ||
       metrics.uniqueBuyers5s < this.minUniqueBuyers ||
       metrics.tradeCount5s < this.minTradeCount ||
+      metrics.buySol5s < this.minBuySol5s ||
       metrics.largestBuyShare5s > this.maxLargestBuyShare
     ) {
       return;
@@ -148,6 +150,7 @@ class EarlyFlowEntryTracker extends EventEmitter {
         `change10s=${metrics.priceChangePct.toFixed(2)}% ` +
         `flow1s=${metrics.netFlow1sSol.toFixed(3)}SOL ` +
         `buyers5s=${metrics.uniqueBuyers5s} tx5s=${metrics.tradeCount5s} ` +
+        `buy5s=${metrics.buySol5s.toFixed(3)}SOL ` +
         `largestBuyShare=${(metrics.largestBuyShare5s * 100).toFixed(1)}%`,
     );
   }
