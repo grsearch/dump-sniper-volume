@@ -455,4 +455,3 @@ function makeScanner(blocks, overrides = {}) {
   console.error(err);
   process.exit(1);
 });
-

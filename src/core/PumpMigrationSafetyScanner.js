@@ -637,4 +637,3 @@ module.exports = {
   anchorDiscriminator,
   resolveAccountKeys,
 };
-

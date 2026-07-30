@@ -199,4 +199,3 @@ module.exports = {
   isLikelyVaultAddress,
   parsePumpMigrationTransaction,
 };
-

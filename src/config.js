@@ -581,4 +581,3 @@ function validateConfig() {
 }
 
 module.exports = { config, validateConfig };
-

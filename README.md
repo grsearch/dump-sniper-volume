@@ -207,4 +207,3 @@ Executor: ... BUY chain ceiling=50%, signal-price cap=+15%, pool-state max age=5
 Legacy entries/exits: disabled
 Watchdog: ... migrationAge=30min
 ~~~
-
