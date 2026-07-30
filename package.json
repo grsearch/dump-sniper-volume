@@ -23,7 +23,8 @@
     "test:stop-fast": "node scripts/test-stop-loss-fast-path.js",
     "test:pricing": "node scripts/test-pump-swap-pricing.js",
     "test:pool-cache": "node scripts/test-pool-state-cache-watched.js",
-    "test:pump-discovery": "node scripts/test-pump-migration-parser.js",
+    "test:pump-discovery": "node scripts/test-pump-migration-parser.js && node scripts/test-pump-migration-safety.js",
+    "test:pump-safety": "node scripts/test-pump-migration-safety.js",
     "test:token-market": "node scripts/test-token-watchdog-market.js",
     "test:research": "node scripts/test-position-research-telemetry.js",
     "test:research-export": "node scripts/test-export-position-research.js",
@@ -56,3 +57,4 @@
     "node": ">=18.0.0"
   }
 }
+

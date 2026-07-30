@@ -492,6 +492,30 @@ const config = {
     marketRetries: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRIES || '8', 10),
     marketRetryMs: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRY_MS || '3000', 10),
     maxConcurrentChecks: parseInt(process.env.PUMP_DISCOVERY_MAX_CONCURRENT_CHECKS || '3', 10),
+    auditEnabled:
+      (process.env.PUMP_DISCOVERY_AUDIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    auditPreSlots: parseInt(process.env.PUMP_DISCOVERY_AUDIT_PRE_SLOTS || '10', 10),
+    auditLargeTransferTokens: parseFloat(
+      process.env.PUMP_DISCOVERY_AUDIT_LARGE_TRANSFER_TOKENS || '100000000',
+    ),
+    auditLargeTransferSupplyPct: parseFloat(
+      process.env.PUMP_DISCOVERY_AUDIT_LARGE_TRANSFER_SUPPLY_PCT || '5',
+    ),
+    auditRpcConcurrency: parseInt(
+      process.env.PUMP_DISCOVERY_AUDIT_RPC_CONCURRENCY || '6',
+      10,
+    ),
+    auditRpcRetries: parseInt(process.env.PUMP_DISCOVERY_AUDIT_RPC_RETRIES || '3', 10),
+    auditBlockCacheMs: parseInt(
+      process.env.PUMP_DISCOVERY_AUDIT_BLOCK_CACHE_MS || '120000',
+      10,
+    ),
+    auditBlockCacheMaxSlots: parseInt(
+      process.env.PUMP_DISCOVERY_AUDIT_BLOCK_CACHE_MAX_SLOTS || '32',
+      10,
+    ),
+    auditFailClosed:
+      (process.env.PUMP_DISCOVERY_AUDIT_FAIL_CLOSED ?? 'true').toLowerCase() === 'true',
     minFdvUsd: parseFloat(process.env.MIN_FDV_USD || '15000'),
     maxFdvUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
     minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '3000'),
@@ -557,3 +581,4 @@ function validateConfig() {
 }
 
 module.exports = { config, validateConfig };
+

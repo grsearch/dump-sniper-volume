@@ -69,7 +69,16 @@ Solana / Pump.fun 实时交易机器人。当前唯一自动策略是
 - Helius WebSocket实时检测Pump.fun migrate / migrateV2。
 - 迁移钱包轮询每5秒补漏。
 - 从确认交易保存mint、pool、vault、blockTime、slot和signature。
-- 符合监控列表FDV与LP条件后加入，不使用mint创建年龄过滤。
+- 符合监控列表FDV与LP条件后，逐块审计迁移前10个slot到程序实际发现迁移时的slot；
+  同一个slot内的其他交易也全部检查，不依赖地址签名分页。
+- 同时解析目标mint的SPL指令和`preTokenBalances/postTokenBalances`真实余额变化，
+  因此Pump内部swap即使没有标准`TransferChecked`也能识别，原始数量统一按decimals换算。
+- 审计发现目标mint的`MintTo`、单笔转移超过1亿枚或总供应量5%、同一交易内外部账户
+  买入并同时Migrate时拒绝加入；同交易买入不设金额下限。
+- Migrate交易中，迁移调用者余币，以及bonding curve、pool authority和
+  `pool_base_vault`之间的正常建池动作不作为买入或大额转移；外部钱包收币不豁免。
+- 审计失败默认拒绝加入，拒绝日志保留slot、完整签名、转账数量、供应量占比和账户证据。
+- 审计通过后才加入监控列表，不使用mint创建年龄过滤。
 
 ## 数据留存
 
@@ -198,3 +207,4 @@ Executor: ... BUY chain ceiling=50%, signal-price cap=+15%, pool-state max age=5
 Legacy entries/exits: disabled
 Watchdog: ... migrationAge=30min
 ~~~
+

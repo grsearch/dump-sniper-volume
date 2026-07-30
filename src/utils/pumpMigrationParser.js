@@ -13,19 +13,25 @@ const MIGRATION_LAYOUTS = [
     version: 'v1',
     discriminator: MIGRATE_DISCRIMINATOR,
     mintIndex: 2,
+    userIndex: 5,
     pumpAmmIndex: 8,
     poolIndex: 9,
+    poolAuthorityIndex: 10,
     baseVaultIndex: 17,
     quoteVaultIndex: 18,
+    migrationTokenAccountIndexes: [4, 11, 17],
   },
   {
     version: 'v2',
     discriminator: MIGRATE_V2_DISCRIMINATOR,
     mintIndex: 2,
+    userIndex: 7,
     pumpAmmIndex: 9,
     poolIndex: 10,
+    poolAuthorityIndex: 11,
     baseVaultIndex: 17,
     quoteVaultIndex: 18,
+    migrationTokenAccountIndexes: [5, 12, 17],
   },
 ];
 
@@ -153,13 +159,22 @@ function parsePumpMigrationTransaction(transactionResult, opts = {}) {
     const blockTime = Number(transactionResult.blockTime);
     return {
       mint,
+      migrationUser: isLikelyPublicKey(accounts[layout.userIndex])
+        ? accounts[layout.userIndex]
+        : null,
       poolAddress,
+      migrationPoolAuthority: isLikelyPublicKey(accounts[layout.poolAuthorityIndex])
+        ? accounts[layout.poolAuthorityIndex]
+        : null,
       poolBaseVault: isLikelyVaultAddress(accounts[layout.baseVaultIndex])
         ? accounts[layout.baseVaultIndex]
         : null,
       poolQuoteVault: isLikelyVaultAddress(accounts[layout.quoteVaultIndex])
         ? accounts[layout.quoteVaultIndex]
         : null,
+      migrationTokenAccounts: layout.migrationTokenAccountIndexes
+        .map((index) => accounts[index])
+        .filter(isLikelyVaultAddress),
       migrationVersion: layout.version,
       signature: opts.signature || null,
       slot: Number(transactionResult.slot) || null,
@@ -184,3 +199,4 @@ module.exports = {
   isLikelyVaultAddress,
   parsePumpMigrationTransaction,
 };
+

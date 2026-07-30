@@ -75,9 +75,15 @@ const parsed = parsePumpMigrationTransaction(parsedTransaction(), {
 });
 assert(parsed, 'official migrate instruction should be detected');
 assert.strictEqual(parsed.mint, key('M'));
+assert.strictEqual(parsed.migrationUser, migrationAccounts()[5]);
 assert.strictEqual(parsed.poolAddress, key('P'));
+assert.strictEqual(parsed.migrationPoolAuthority, migrationAccounts()[10]);
 assert.strictEqual(parsed.poolBaseVault, key('V'));
 assert.strictEqual(parsed.poolQuoteVault, key('W'));
+assert.deepStrictEqual(
+  parsed.migrationTokenAccounts,
+  [migrationAccounts()[4], migrationAccounts()[11], key('V')],
+);
 assert.strictEqual(parsed.slot, 123456);
 assert.strictEqual(parsed.migrationTime, 1_700_000_000_000);
 assert.strictEqual(parsed.migrationTimeSource, 'blockTime');
@@ -91,9 +97,15 @@ const parsedV2 = parsePumpMigrationTransaction(parsedTransaction({
 }));
 assert(parsedV2, 'official migrate_v2 instruction should be detected');
 assert.strictEqual(parsedV2.mint, key('M'));
+assert.strictEqual(parsedV2.migrationUser, migrationV2Accounts()[7]);
 assert.strictEqual(parsedV2.poolAddress, key('P'));
+assert.strictEqual(parsedV2.migrationPoolAuthority, migrationV2Accounts()[11]);
 assert.strictEqual(parsedV2.poolBaseVault, key('V'));
 assert.strictEqual(parsedV2.poolQuoteVault, key('W'));
+assert.deepStrictEqual(
+  parsedV2.migrationTokenAccounts,
+  [migrationV2Accounts()[5], migrationV2Accounts()[12], key('V')],
+);
 assert.notStrictEqual(parsedV2.poolQuoteVault, TOKEN_2022_PROGRAM_ID);
 assert.strictEqual(parsedV2.migrationVersion, 'v2');
 
@@ -295,3 +307,4 @@ assert.strictEqual(
   console.error(err);
   process.exit(1);
 });
+

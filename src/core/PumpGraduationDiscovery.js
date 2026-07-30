@@ -9,6 +9,7 @@ const {
   fetchTokenMarketFromBirdeye,
 } = require('../utils/tokenMeta');
 const { parsePumpMigrationTransaction } = require('../utils/pumpMigrationParser');
+const { PumpMigrationSafetyScanner } = require('./PumpMigrationSafetyScanner');
 const { getMonitor } = require('../monitor/HealthMonitor');
 
 const monitor = getMonitor();
@@ -58,6 +59,11 @@ class PumpGraduationDiscovery extends EventEmitter {
     this.fetchMarket = opts.fetchMarket || fetchTokenMarketFromBirdeye;
     this.fetchAsset = opts.fetchAsset || fetchTokenAssetFromHelius;
     this.rpcRequest = opts.rpcRequest || this._rpcRequest.bind(this);
+    this.migrationSafetyScanner = opts.migrationSafetyScanner ||
+      new PumpMigrationSafetyScanner({
+        rpcRequest: this.rpcRequest,
+        settings: this.settings,
+      });
 
     this.running = false;
     this.ws = null;
@@ -95,7 +101,8 @@ class PumpGraduationDiscovery extends EventEmitter {
     });
     console.log(
       `[PumpDiscovery] enabled: FDV $${this.settings.minFdvUsd}-${this.settings.maxFdvUsd}, ` +
-        `liquidity >= $${this.settings.minLiquidityUsd}, market-only screening`,
+        `liquidity >= $${this.settings.minLiquidityUsd}, ` +
+        `migration audit=${this.settings.auditEnabled ? 'on' : 'off'}`,
     );
 
     this._connectWebSocket();
@@ -202,10 +209,15 @@ class PumpGraduationDiscovery extends EventEmitter {
       return;
     }
 
-    const value = message?.params?.result?.value;
+    const notification = message?.params?.result;
+    const value = notification?.value;
     if (!value?.signature || value.err || !this._hasMigrationHint(value.logs)) return;
     monitor.inc(`${MODULE}.migrationHints`, 1, MODULE);
-    this._processSignature(value.signature, 'websocket').catch((err) => {
+    this._processSignature(
+      value.signature,
+      'websocket',
+      finiteNumber(notification?.context?.slot),
+    ).catch((err) => {
       this._recordError(err, 'websocket_signature');
     });
   }
@@ -229,6 +241,14 @@ class PumpGraduationDiscovery extends EventEmitter {
       if (!Array.isArray(rows)) throw new Error('getSignaturesForAddress returned no rows');
 
       monitor.beat(MODULE, `poll:${rows.length}`);
+      let detectionSlot = null;
+      try {
+        detectionSlot = finiteNumber(await this.rpcRequest('getSlot', [
+          { commitment: 'confirmed' },
+        ]));
+      } catch (err) {
+        console.warn(`[PumpDiscovery] getSlot unavailable during poll: ${err.message}`);
+      }
       for (const row of rows.slice().reverse()) {
         if (!row?.signature || this.seenSignatures.has(row.signature)) continue;
         const blockTimeMs = toMilliseconds(row.blockTime);
@@ -236,14 +256,14 @@ class PumpGraduationDiscovery extends EventEmitter {
           this._markSignatureSeen(row.signature);
           continue;
         }
-        await this._processSignature(row.signature, 'poll');
+        await this._processSignature(row.signature, 'poll', detectionSlot);
       }
     } finally {
       this.polling = false;
     }
   }
 
-  async _processSignature(signature, detectionPath) {
+  async _processSignature(signature, detectionPath, detectionSlot = null) {
     if (!signature || this.seenSignatures.has(signature) || this.processingSignatures.has(signature)) return;
     this.processingSignatures.add(signature);
     try {
@@ -253,6 +273,13 @@ class PumpGraduationDiscovery extends EventEmitter {
       const migration = parsePumpMigrationTransaction(transaction, { signature, detectionPath });
       this._markSignatureSeen(signature);
       if (!migration) return;
+      const observedDetectionSlot = finiteNumber(detectionSlot);
+      migration.detectionSlot = observedDetectionSlot != null
+        ? Math.max(
+          Number(migration.slot) || 0,
+          Math.trunc(observedDetectionSlot),
+        ) || null
+        : null;
 
       if (migration.migrationTimeSource !== 'blockTime' && migration.slot) {
         try {
@@ -344,6 +371,24 @@ class PumpGraduationDiscovery extends EventEmitter {
       return;
     }
 
+    const audit = await this._runMigrationAudit(migration);
+    screening.migrationAudit = audit;
+    if (!audit.allowed) {
+      const auditRejection = {
+        code: `migration_${audit.reasonCode || 'audit_rejected'}`,
+        message: audit.message || 'migration safety audit rejected',
+        evidence: audit.evidence || null,
+      };
+      monitor.inc(`${MODULE}.rejected`, 1, MODULE);
+      monitor.inc(`${MODULE}.rejected.${auditRejection.code}`, 1, MODULE);
+      console.log(
+        `[PumpDiscovery] reject ${migration.mint.slice(0, 8)}..: ${auditRejection.message} ` +
+          `evidence=${JSON.stringify(auditRejection.evidence)}`,
+      );
+      this.emit('rejected', { migration, screening, rejection: auditRejection, audit });
+      return;
+    }
+
     let asset = {};
     try {
       asset = await this.fetchAsset(migration.mint);
@@ -369,11 +414,24 @@ class PumpGraduationDiscovery extends EventEmitter {
     console.log(
       `[PumpDiscovery] added ${token?.symbol || migration.mint.slice(0, 8)} ` +
         `FDV=$${Math.round(screening.market.fdv)} LP=$${Math.round(screening.market.liquidity)} ` +
-        `slot=${migration.slot} via=${migration.detectionPath}`,
+        `slot=${migration.slot} auditSlots=${audit?.summary?.startSlot || migration.slot}` +
+        `-${audit?.summary?.detectionSlot || migration.detectionSlot || migration.slot} ` +
+        `via=${migration.detectionPath}`,
     );
     const event = { token, migration, screening, evicted: evicted || [] };
     if (this.onTokenAdded) await this.onTokenAdded(event);
     this.emit('tokenAdded', event);
+  }
+
+  async _runMigrationAudit(migration) {
+    if (!this.migrationSafetyScanner || this.settings.auditEnabled === false) {
+      return { allowed: true, skipped: true, reason: 'disabled' };
+    }
+    const audit = await this.migrationSafetyScanner.audit(migration);
+    if (audit.allowed && audit.reasonCode === 'audit_incomplete') {
+      console.warn(`[PumpDiscovery] audit allowed after incomplete scan: ${audit.message}`);
+    }
+    return audit;
   }
 
   async _fetchScreeningData(mint) {
@@ -439,3 +497,4 @@ class PumpGraduationDiscovery extends EventEmitter {
 }
 
 module.exports = PumpGraduationDiscovery;
+
