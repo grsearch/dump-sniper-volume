@@ -158,9 +158,9 @@ const config = {
     catastrophicStopPnlPct: parseFloat(
       process.env.EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT || '-50',
     ),
-    // Hard-disabled for live trading. Catastrophic protection remains the only
-    // percentage-based loss protection.
-    slowBleedExitEnabled: false,
+    // Enabled for live trading. This only runs before trailing arms and needs
+    // sustained weak price/action confirmation before exiting.
+    slowBleedExitEnabled: true,
     slowBleedMinHoldMs: parseInt(
       process.env.EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS || '60000',
       10,

@@ -40,11 +40,15 @@ Solana / Pump.fun 实时交易机器人。当前唯一自动策略是
    - 下穿后等待收盘时刻至少500ms，并在下一笔可信成交上执行。
 2. **移动止盈：上涨9%激活，从最高点回撤5%卖出**。
 3. **实时 FDV < $10,000** 时应急退出。
-4. 迁移 AGE **>30分钟**仍未退出时，以 `TOKEN_AGE_EXPIRED` 平仓并移出监控。
+4. **慢性弱势退出**：仅在移动止盈尚未激活时运行；持仓至少60秒、最高盈利
+   低于9%、当前市场PnL不高于-5%，且最近3秒卖买比不低于1.5、独立买家
+   不超过2、净资金流为负。状态持续至少500ms并由2个不同签名确认后卖出。
+5. 迁移 AGE **>30分钟**仍未退出时，以 `TOKEN_AGE_EXPIRED` 平仓并移出监控。
 
-固定止损、确认尾部止损、慢性弱势退出、固定止盈、RSI卖出、流动反转、
-趋势/区间止损、防御模式和其他旧自动卖出策略均关闭。只保留可信单笔成交
-达到 -50% 时触发的灾难保护。该策略允许单笔出现较大浮亏，应继续使用小仓位验证。
+固定止损、确认尾部止损、固定止盈、RSI卖出、流动反转、趋势/区间止损、
+防御模式和其他旧自动卖出策略均关闭。亏损保护保留慢性弱势退出，以及可信
+单笔成交达到 -50% 时触发的灾难保护。该策略允许单笔出现较大浮亏，应继续
+使用小仓位验证。
 
 原“买入后快速判错”条件默认以 `shadow` 模式运行：仍逐笔计算、确认并写入
 `EEI_CANDIDATE` / `EEI_SHADOW_TRIGGER`，但不会提交卖单。只有显式设置
@@ -156,7 +160,7 @@ EARLY_FLOW_TAIL_STOP_CONFIRM_MS=500
 EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES=2
 EARLY_FLOW_CATASTROPHIC_STOP_ENABLED=true
 EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT=-50
-EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED=false
+EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED=true
 EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS=60000
 EARLY_FLOW_SLOW_BLEED_MAX_PEAK_PNL_PCT=9
 EARLY_FLOW_SLOW_BLEED_MAX_PNL_PCT=-5
@@ -222,7 +226,7 @@ POSITION_RESEARCH_FLUSH_MAX=1000
 
 ~~~text
 Entry: EARLY_FLOW (...) with LIVE composite risk rejection at score >=4
-Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +9% / drawdown 5%; tail stop disabled; slow bleed disabled; trusted single-swap catastrophe at -50%; FDV <$10000 (plus token-age exit)
+Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +9% / drawdown 5%; tail stop disabled; unarmed slow-bleed confirmation after 60s; trusted single-swap catastrophe at -50%; FDV <$10000 (plus token-age exit)
 Early invalidation: shadow (3-15s, peak<3%, VWAP break<=-3%, sell/buy>=1.5, confirm=2/500ms)
 Add-on shadow: research only; first entry and any real add-on exit independently
 Position research telemetry: enabled (window=10s, flush=250ms)

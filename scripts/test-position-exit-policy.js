@@ -132,7 +132,7 @@ function run() {
   assert.strictEqual(config.strategy.tailStopConfirmTrades, 2);
   assert.strictEqual(config.strategy.catastrophicStopPnlPct, -50);
   assert.strictEqual(config.strategy.catastrophicStopEnabled, true);
-  assert.strictEqual(config.strategy.slowBleedExitEnabled, false);
+  assert.strictEqual(config.strategy.slowBleedExitEnabled, true);
   assert.strictEqual(config.strategy.slowBleedMinHoldMs, 60_000);
   assert.strictEqual(config.strategy.emaExitEnabled, true);
   assert.strictEqual(config.strategy.fdvExitUsd, 10_000);
