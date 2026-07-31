@@ -493,6 +493,7 @@ class TickStream extends EventEmitter {
     this._rebuildTimer = null;
     this._rebuildInProgress = false;
     this._rebuildQueued = false;
+    this._lastSubscriptionChangeAt = 0;
 
     // v3.17.25: Reader-Worker 分离 — reader 回调只入队，worker 异步消费
     //   目的：让 gRPC reader 永不阻塞，避免突破 Helius 450-slot 阈值被切流
@@ -631,6 +632,7 @@ class TickStream extends EventEmitter {
   async start(initialMints = []) {
     this.shouldRun = true;
     initialMints.forEach((m) => this.watchedMints.add(m));
+    if (this.watchedMints.size > 0) this._lastSubscriptionChangeAt = Date.now();
     await Promise.all(this.regions.map((r) => r.start(this.watchedMints)));
     if (this.watchedMints.size === 0) {
       console.log('[TickStream] no tokens to watch yet; streams are ready for the first discovered mint');
@@ -693,7 +695,17 @@ class TickStream extends EventEmitter {
   }
 
   async updateSubscription(mints) {
-    this.watchedMints = new Set(mints);
+    const nextMints = new Set(mints);
+    const unchanged =
+      nextMints.size === this.watchedMints.size
+      && Array.from(nextMints).every((mint) => this.watchedMints.has(mint));
+    if (unchanged) {
+      monitor.beat('TickStream', `subscription:unchanged:${nextMints.size}_mints`);
+      return;
+    }
+
+    this.watchedMints = nextMints;
+    this._lastSubscriptionChangeAt = Date.now();
     if (this._rebuildTimer) clearTimeout(this._rebuildTimer);
     this._rebuildTimer = setTimeout(() => {
       this._rebuildTimer = null;
@@ -714,11 +726,13 @@ class TickStream extends EventEmitter {
       do {
         this._rebuildQueued = false;
         const targetMints = new Set(this.watchedMints);
+        const mintFilteredRegions = this.regions.filter((r) => r.filterMode !== 'jupiter');
         console.log(
-          `[TickStream] subscription change → rebuilding all ${this.regions.length} region(s) ` +
+          `[TickStream] subscription change -> rebuilding ${mintFilteredRegions.length} mint-filtered region(s) ` +
             `(${targetMints.size} mints)`,
         );
-        await Promise.all(this.regions.map((r) => r.rebuild(targetMints)));
+        await Promise.all(mintFilteredRegions.map((r) => r.rebuild(targetMints)));
+        monitor.beat('TickStream', `subscription:ready:${targetMints.size}_mints`);
       } while (this._rebuildQueued);
     } finally {
       this._rebuildInProgress = false;
@@ -862,6 +876,14 @@ class TickStream extends EventEmitter {
     lagReconnectCooldownMs,
     sampleMs,
   }) {
+    const connectedRegions = this.regions.filter((r) => r.shouldRun && r.connected).length;
+    monitor.set('TickStream.watchedMints', this.watchedMints.size, 'TickStream');
+    monitor.set('TickStream.connectedRegions', connectedRegions, 'TickStream');
+    monitor.beat(
+      'TickStream',
+      `health:${this.watchedMints.size}_mints:${connectedRegions}/${this.regions.length}_connected`,
+    );
+
     const currentSlot = this._latestSlotFromSlotUpdate || 0;
     if (currentSlot <= 0) return;
 

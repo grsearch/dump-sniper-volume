@@ -655,12 +655,39 @@ async function main() {
     1,
     parseInt(process.env.MEMORY_RESTART_CONFIRM_SAMPLES || '3', 10),
   );
+  const memorySubscriptionGraceMs = Math.max(
+    0,
+    parseInt(process.env.MEMORY_SUBSCRIPTION_GRACE_MS || '120000', 10),
+  );
   const memoryMonitorStartedAt = Date.now();
   let emptyHighRssSamples = 0;
+  let observedSubscriptionChangeAt = 0;
+  let subscriptionMemoryGraceStartedAt = 0;
   setInterval(() => {
     const u = process.memoryUsage();
     const rssMB = Math.round(u.rss / 1e6);
     const posCount = positionManager?.positions?.size ?? 0;
+    const now = Date.now();
+    const inStartupGrace = now - memoryMonitorStartedAt < memoryRestartGraceMs;
+    const lastSubscriptionChangeAt = tickStream?._lastSubscriptionChangeAt || 0;
+    if (
+      memorySubscriptionGraceMs > 0
+      && lastSubscriptionChangeAt > observedSubscriptionChangeAt
+    ) {
+      observedSubscriptionChangeAt = lastSubscriptionChangeAt;
+      const previousGraceExpired =
+        subscriptionMemoryGraceStartedAt === 0
+        || now - subscriptionMemoryGraceStartedAt >= memorySubscriptionGraceMs;
+      if (previousGraceExpired) {
+        subscriptionMemoryGraceStartedAt = lastSubscriptionChangeAt;
+      }
+    }
+    const inSubscriptionGrace =
+      subscriptionMemoryGraceStartedAt > 0
+      && now - subscriptionMemoryGraceStartedAt < memorySubscriptionGraceMs;
+    const memoryGraceReason = inStartupGrace
+      ? 'startup'
+      : (inSubscriptionGrace ? 'subscription_change' : null);
     const loopLagMs = Math.max(0, Date.now() - _lastLoopTick - 1000);  // 预期 1s 内更新,超出即延迟
     console.log(
       `[MEM] rss=${rssMB}MB heap=${(u.heapUsed/1e6).toFixed(0)}MB ` +
@@ -676,13 +703,16 @@ async function main() {
       `queueDrop=${tickStream?._queueDropped ?? '?'} ` +
       `openLots=${competitorTracker?.openLots?.size ?? '?'} ` +
       `positions=${posCount} ` +
+      `memoryGrace=${memoryGraceReason || 'none'} ` +
       `loopLag=${loopLagMs}ms`
     );
     // v3.17.26→v3.27: RSS 阈值调整 — 7个gRPC连接基线~550MB, 旧阈值600MB等于启动即告警
     // 告警阈值 700MB（基线550 + 150MB余量，超过说明Rust泄漏已开始）
     if (rssMB > 700) {
-      console.error(`[MEM] ⚠️  rss=${rssMB}MB > 700MB — Rust native 内存可能泄漏,监控中`);
-      monitor.fireAlert('main.rss_high', 'warn', `rss=${rssMB}MB > 700MB, Rust native 内存可能泄漏`, { rssMB });
+      if (!memoryGraceReason) {
+        console.error(`[MEM] ⚠️  rss=${rssMB}MB > 700MB — Rust native 内存可能泄漏,监控中`);
+        monitor.fireAlert('main.rss_high', 'warn', `rss=${rssMB}MB > 700MB, Rust native 内存可能泄漏`, { rssMB });
+      }
     } else {
       monitor.clearAlert('main.rss_high');
     }
@@ -693,11 +723,10 @@ async function main() {
       process.exit(0);
     }
     if (rssMB > 800 && posCount === 0) {
-      const inStartupGrace = Date.now() - memoryMonitorStartedAt < memoryRestartGraceMs;
-      if (inStartupGrace) {
+      if (memoryGraceReason) {
         emptyHighRssSamples = 0;
         console.warn(
-          `[MEM] rss=${rssMB}MB during startup grace; delaying restart decision`,
+          `[MEM] rss=${rssMB}MB during ${memoryGraceReason} grace; delaying restart decision`,
         );
       } else {
         emptyHighRssSamples++;

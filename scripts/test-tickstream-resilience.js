@@ -6,6 +6,17 @@ const Module = require('module');
 process.env.HELIUS_LASERSTREAM_ENDPOINTS = 'https://example.invalid';
 process.env.LS_JUPITER_ENABLED = '0';
 
+const heartbeats = [];
+const monitor = {
+  registerModule() {},
+  beat(moduleName, context) {
+    heartbeats.push({ moduleName, context });
+  },
+  set() {},
+  inc() {},
+  recordError() {},
+};
+
 const originalLoad = Module._load;
 Module._load = function loadWithGrpcStub(request, parent, isMain) {
   if (request === '@triton-one/yellowstone-grpc') {
@@ -15,6 +26,9 @@ Module._load = function loadWithGrpcStub(request, parent, isMain) {
       SubscribeRequest: null,
       SubscribeRequestFilterTransactions: null,
     };
+  }
+  if (request === '../monitor/HealthMonitor') {
+    return { getMonitor: () => monitor };
   }
   return originalLoad.call(this, request, parent, isMain);
 };
@@ -51,7 +65,56 @@ async function main() {
   stream._onRegionProgress(12345, 'LS-TEST');
   assert.strictEqual(stream._latestLsSlot, 12345);
 
+  stream._latestSlotFromSlotUpdate = 0;
+  stream._checkRegionLagHealth({
+    now: 100_000,
+    lagThresholdSlots: 100,
+    lagSustainedMs: 10_000,
+    lagReconnectCooldownMs: 30_000,
+    sampleMs: 5_000,
+  });
+  assert.deepStrictEqual(
+    heartbeats.at(-1),
+    { moduleName: 'TickStream', context: 'health:0_mints:0/1_connected' },
+    'the health timer must keep TickStream alive while no mints are watched',
+  );
+
   await stream.stop();
+
+  const subscriptionStream = new TickStream();
+  let pumpRebuilds = 0;
+  let jupiterRebuilds = 0;
+  subscriptionStream.regions = [
+    {
+      filterMode: 'pumpAmm',
+      async rebuild() {
+        pumpRebuilds++;
+      },
+    },
+    {
+      filterMode: 'jupiter',
+      async rebuild() {
+        jupiterRebuilds++;
+      },
+    },
+  ];
+  subscriptionStream.watchedMints = new Set(['mint-a']);
+  await subscriptionStream._performRebuild();
+  assert.strictEqual(pumpRebuilds, 1, 'mint-filtered regions must rebuild');
+  assert.strictEqual(jupiterRebuilds, 0, 'global Jupiter streams must not rebuild');
+
+  subscriptionStream._lastSubscriptionChangeAt = 123;
+  await subscriptionStream.updateSubscription(['mint-a']);
+  assert.strictEqual(
+    subscriptionStream._lastSubscriptionChangeAt,
+    123,
+    'an unchanged subscription must not restart the memory grace window',
+  );
+  assert.strictEqual(
+    subscriptionStream._rebuildTimer,
+    null,
+    'an unchanged subscription must not schedule a stream rebuild',
+  );
 
   const lagStream = new TickStream();
   const reconnects = [];
