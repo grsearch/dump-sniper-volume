@@ -22,6 +22,7 @@ const EarlyFlowEntryTracker = require('./core/EarlyFlowEntryTracker');
 const Ema15sTracker = require('./core/Ema15sTracker');
 const PumpGraduationDiscovery = require('./core/PumpGraduationDiscovery');
 const { isLikelyVaultAddress } = require('./utils/pumpMigrationParser');
+const { warmupRsiFromDb } = require('./utils/rsiWarmup');
 
 const monitor = getMonitor();
 
@@ -213,17 +214,7 @@ async function main() {
         config.rsi.rsi1mWarmupMaxMinutes,
       );
       const warmupStart = Date.now() - warmupMinutes * 60_000;
-      const warmupRows = tradeLogger.db.prepare(`
-        SELECT mint, ts, price
-        FROM swap_events
-        WHERE ts > ? AND price > 0
-        ORDER BY ts ASC, id ASC
-      `).all(warmupStart);
-      let fed = 0;
-      for (const r of warmupRows) {
-        rsiCalculator.feedTick(r.mint, Number(r.price), Number(r.ts));
-        fed++;
-      }
+      const fed = warmupRsiFromDb(tradeLogger.db, rsiCalculator, warmupStart);
       console.log(
         `[main] RSI warmup: fed ${fed} swap events from up to ${warmupMinutes}min ` +
           '(new tokens use available history only)',
@@ -656,6 +647,16 @@ async function main() {
   // v3.17.26: 采样间隔 60s→10s（RSS 飙升极快,60s 可能漏检）
   // v3.17.26: 空仓重启阈值 1500MB→800MB（之前 1500 太晚,Rust 泄漏到 2GB 才 OOM kill）
   // v3.17.26: 加 rss>500MB 告警
+  const memoryRestartGraceMs = Math.max(
+    0,
+    parseInt(process.env.MEMORY_RESTART_STARTUP_GRACE_MS || '120000', 10),
+  );
+  const memoryRestartConfirmSamples = Math.max(
+    1,
+    parseInt(process.env.MEMORY_RESTART_CONFIRM_SAMPLES || '3', 10),
+  );
+  const memoryMonitorStartedAt = Date.now();
+  let emptyHighRssSamples = 0;
   setInterval(() => {
     const u = process.memoryUsage();
     const rssMB = Math.round(u.rss / 1e6);
@@ -692,8 +693,24 @@ async function main() {
       process.exit(0);
     }
     if (rssMB > 800 && posCount === 0) {
-      console.log(`[MEM] 🔄 rss=${rssMB}MB > 800MB 且空仓,优雅重启以释放 Rust 堆外内存`);
-      process.exit(0);  // systemd Restart=always 会自动拉起
+      const inStartupGrace = Date.now() - memoryMonitorStartedAt < memoryRestartGraceMs;
+      if (inStartupGrace) {
+        emptyHighRssSamples = 0;
+        console.warn(
+          `[MEM] rss=${rssMB}MB during startup grace; delaying restart decision`,
+        );
+      } else {
+        emptyHighRssSamples++;
+        if (emptyHighRssSamples >= memoryRestartConfirmSamples) {
+          console.log(
+            `[MEM] 🔄 rss=${rssMB}MB > 800MB for ${emptyHighRssSamples} consecutive samples ` +
+            'and no positions; restarting to release native memory',
+          );
+          process.exit(0);  // systemd Restart=always 会自动拉起
+        }
+      }
+    } else {
+      emptyHighRssSamples = 0;
     }
   }, 10_000);
 

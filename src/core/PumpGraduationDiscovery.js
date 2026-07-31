@@ -76,6 +76,8 @@ class PumpGraduationDiscovery extends EventEmitter {
     this.startupCutoffMs = null;
     this.reconnectAttempt = 0;
     this.rpcId = 1;
+    this.lastWsMessageAt = 0;
+    this.lastWsMigrationAt = 0;
     this.seenSignatures = new Map();
     this.processingSignatures = new Set();
     this.seenMints = new Map();
@@ -128,6 +130,7 @@ class PumpGraduationDiscovery extends EventEmitter {
       try { this.ws.close(); } catch (_) {}
       this.ws = null;
     }
+    this.wsSubscriptionId = null;
   }
 
   async _rpcRequest(method, params) {
@@ -149,6 +152,7 @@ class PumpGraduationDiscovery extends EventEmitter {
     this.ws = ws;
     ws.on('open', () => {
       this.reconnectAttempt = 0;
+      this.lastWsMessageAt = Date.now();
       monitor.beat(MODULE, 'websocket:connected');
       ws.send(JSON.stringify({
         jsonrpc: '2.0',
@@ -176,7 +180,10 @@ class PumpGraduationDiscovery extends EventEmitter {
     ws.on('close', () => {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
-      if (this.ws === ws) this.ws = null;
+      if (this.ws === ws) {
+        this.ws = null;
+        this.wsSubscriptionId = null;
+      }
       this._scheduleReconnect();
     });
   }
@@ -192,6 +199,7 @@ class PumpGraduationDiscovery extends EventEmitter {
   }
 
   _handleWebSocketMessage(raw) {
+    this.lastWsMessageAt = Date.now();
     let message;
     try {
       message = JSON.parse(raw.toString());
@@ -205,6 +213,7 @@ class PumpGraduationDiscovery extends EventEmitter {
     }
     if (message.id === 1 && message.result != null) {
       this.wsSubscriptionId = message.result;
+      this.lastWsMigrationAt = Date.now();
       monitor.beat(MODULE, `websocket:subscribed:${message.result}`);
       return;
     }
@@ -212,6 +221,7 @@ class PumpGraduationDiscovery extends EventEmitter {
     const notification = message?.params?.result;
     const value = notification?.value;
     if (!value?.signature || value.err || !this._hasMigrationHint(value.logs)) return;
+    this.lastWsMigrationAt = Date.now();
     monitor.inc(`${MODULE}.migrationHints`, 1, MODULE);
     this._processSignature(
       value.signature,
@@ -234,13 +244,9 @@ class PumpGraduationDiscovery extends EventEmitter {
     if (!this.running || this.polling) return;
     this.polling = true;
     try {
-      const rows = await this.rpcRequest('getSignaturesForAddress', [
-        this.migrationWallet,
-        { limit: Math.min(1000, Math.max(1, this.settings.pollLimit)) },
-      ]);
-      if (!Array.isArray(rows)) throw new Error('getSignaturesForAddress returned no rows');
-
+      const { rows, pages } = await this._fetchPollRows();
       monitor.beat(MODULE, `poll:${rows.length}`);
+      monitor.set(`${MODULE}.pollPages`, pages, MODULE);
       let detectionSlot = null;
       try {
         detectionSlot = finiteNumber(await this.rpcRequest('getSlot', [
@@ -249,30 +255,97 @@ class PumpGraduationDiscovery extends EventEmitter {
       } catch (err) {
         console.warn(`[PumpDiscovery] getSlot unavailable during poll: ${err.message}`);
       }
+      let pollRecoveredMigrations = 0;
       for (const row of rows.slice().reverse()) {
-        if (!row?.signature || this.seenSignatures.has(row.signature)) continue;
-        const blockTimeMs = toMilliseconds(row.blockTime);
-        if (blockTimeMs && blockTimeMs < this.startupCutoffMs) {
-          this._markSignatureSeen(row.signature);
-          continue;
-        }
-        await this._processSignature(row.signature, 'poll', detectionSlot);
+        const migration = await this._processSignature(row.signature, 'poll', detectionSlot);
+        if (migration) pollRecoveredMigrations++;
       }
+      this._recoverSilentWebSocket(pollRecoveredMigrations);
     } finally {
       this.polling = false;
     }
   }
 
+  async _fetchPollRows() {
+    const limit = Math.min(1000, Math.max(1, this.settings.pollLimit));
+    const maxPages = Math.max(1, this.settings.pollMaxPages || 1);
+    const rows = [];
+    let before = null;
+    let pages = 0;
+
+    while (pages < maxPages) {
+      const options = { limit };
+      if (before) options.before = before;
+      const page = await this.rpcRequest('getSignaturesForAddress', [
+        this.migrationWallet,
+        options,
+      ]);
+      if (!Array.isArray(page)) throw new Error('getSignaturesForAddress returned no rows');
+      pages++;
+
+      let reachedBoundary = false;
+      for (const row of page) {
+        if (!row?.signature) continue;
+        const blockTimeMs = toMilliseconds(row.blockTime);
+        if (
+          this.seenSignatures.has(row.signature) ||
+          (blockTimeMs && blockTimeMs < this.startupCutoffMs)
+        ) {
+          reachedBoundary = true;
+          break;
+        }
+        rows.push(row);
+      }
+
+      if (reachedBoundary || page.length < limit) break;
+      before = page[page.length - 1]?.signature || null;
+      if (!before) break;
+    }
+
+    if (pages > 1) {
+      monitor.inc(`${MODULE}.pollPaginationPages`, pages - 1, MODULE);
+      console.log(`[PumpDiscovery] poll caught up across ${pages} pages (${rows.length} new signatures)`);
+    }
+    return { rows, pages };
+  }
+
+  _recoverSilentWebSocket(pollRecoveredMigrations) {
+    if (pollRecoveredMigrations <= 0) return;
+    monitor.inc(`${MODULE}.pollRecoveredMigrations`, pollRecoveredMigrations, MODULE);
+
+    const silenceMs = Math.max(5_000, this.settings.wsRecoverySilenceMs || 30_000);
+    const silentForMs = Date.now() - (this.lastWsMigrationAt || this.lastWsMessageAt || 0);
+    if (
+      !this.ws ||
+      this.ws.readyState !== WebSocket.OPEN ||
+      this.wsSubscriptionId == null ||
+      silentForMs < silenceMs
+    ) {
+      return;
+    }
+
+    console.warn(
+      `[PumpDiscovery] poll recovered ${pollRecoveredMigrations} migration(s) while WebSocket ` +
+      `was silent for ${Math.round(silentForMs / 1000)}s; reconnecting subscription`,
+    );
+    monitor.inc(`${MODULE}.wsSilentRecoveries`, 1, MODULE);
+    this.wsSubscriptionId = null;
+    this.lastWsMigrationAt = Date.now();
+    try { this.ws.terminate(); } catch (_) {}
+  }
+
   async _processSignature(signature, detectionPath, detectionSlot = null) {
-    if (!signature || this.seenSignatures.has(signature) || this.processingSignatures.has(signature)) return;
+    if (!signature || this.seenSignatures.has(signature) || this.processingSignatures.has(signature)) {
+      return null;
+    }
     this.processingSignatures.add(signature);
     try {
       const transaction = await this._fetchTransaction(signature);
-      if (!transaction) return;
+      if (!transaction) return null;
 
       const migration = parsePumpMigrationTransaction(transaction, { signature, detectionPath });
       this._markSignatureSeen(signature);
-      if (!migration) return;
+      if (!migration) return null;
       const observedDetectionSlot = finiteNumber(detectionSlot);
       migration.detectionSlot = observedDetectionSlot != null
         ? Math.max(
@@ -295,6 +368,7 @@ class PumpGraduationDiscovery extends EventEmitter {
 
       monitor.inc(`${MODULE}.migrationsConfirmed`, 1, MODULE);
       this._enqueueCandidate(migration);
+      return migration;
     } finally {
       this.processingSignatures.delete(signature);
     }

@@ -27,7 +27,6 @@ class AlertChecker {
     this._lastTxCountAt = Date.now();
     this._lastBuyFail = 0;
     this._lastSellFail = 0;
-    this._lastForceReconnectAt = 0; // v3.22: 防止重复重连
   }
 
   start() {
@@ -130,7 +129,6 @@ class AlertChecker {
       this._lastTxCount = lsTxCount;
       this._lastTxCountAt = now;
       this.monitor.clearAlert('tickstream.no_traffic');
-      this._lastForceReconnectAt = 0;
     } else if (now - this._lastTxCountAt > 60_000) {
       this.monitor.fireAlert(
         'tickstream.no_traffic',
@@ -138,27 +136,6 @@ class AlertChecker {
         `LaserStream 监控 ${watching} 个代币，但 60s+ 无 LS tx 收到`,
         { watching, last_tx_seconds_ago: Math.round((now - this._lastTxCountAt) / 1000), lsTxCount },
       );
-
-      const noTrafficMs = now - this._lastTxCountAt;
-      const lastReconnectAge = now - (this._lastForceReconnectAt || 0);
-      if (noTrafficMs > 90_000 && lastReconnectAge > 300_000 && this.tickStream) {
-        console.warn(
-          `[AlertChecker] 🔄 LS no_traffic ${Math.round(noTrafficMs/1000)}s → force rebuild all LS regions`,
-        );
-        this._lastForceReconnectAt = now;
-        const mints = this.tickStream.watchedMints;
-        for (const r of this.tickStream.regions) {
-          if (r.label && (r.label.startsWith('LS-') || r.label.startsWith('JUP-'))) {
-            try {
-              console.log(`[AlertChecker] force rebuild region ${r.label}...`);
-              r.rebuild(mints).catch(e => console.warn(`[AlertChecker] rebuild ${r.label} failed: ${e.message}`));
-            } catch (e) {
-              console.warn(`[AlertChecker] force rebuild region ${r.label} failed: ${e.message}`);
-            }
-          }
-        }
-        monitor.inc('TickStream.forceReconnectNoTraffic', 1, 'TickStream');
-      }
     }
   }
 

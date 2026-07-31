@@ -114,13 +114,23 @@ class SignatureDedup {
  * 内部管理重连、订阅、生命周期。tx 来了上抛给 TickStream 由 dedup 统一过滤。
  */
 class RegionStream {
-  constructor({ endpoint, token, label, onTx, onConnected, onSlot, filterMode = 'pumpAmm' }) {
+  constructor({
+    endpoint,
+    token,
+    label,
+    onTx,
+    onConnected,
+    onSlot,
+    onProgress,
+    filterMode = 'pumpAmm',
+  }) {
     this.endpoint = endpoint;
     this.token = token;
     this.label = label;
     this.onTx = onTx;
     this.onConnected = onConnected;
     this.onSlot = onSlot; // v3.17.29: slot update 回调(从 SubscribeRequest slots filter 来)
+    this.onProgress = onProgress;
     // v3.17.24: filterMode
     //   'pumpAmm'  — accountInclude=mints, accountRequired=PUMP_AMM (default, current behavior)
     //   'jupiter'  — accountInclude=JUP_programs, accountRequired=[] (Jupiter route trades)
@@ -135,6 +145,8 @@ class RegionStream {
     this._currentMints = [];
     // v3.17.26: replay — 记录本 region 最后收到的 slot，重连时 fromSlot 从这里开始
     this._lastReceivedSlot = 0;
+    this._lastMessageAt = 0;
+    this._connectedAt = 0;
   }
 
   async start(mints) {
@@ -223,6 +235,7 @@ class RegionStream {
 
       await this._sendSubscribeRequest();
       this.connected = true;
+      this._connectedAt = Date.now();
       this.reconnectAttempts = 0;
       monitor.inc(`TickStream.${this.label}.connectsTotal`, 1, 'TickStream');
       monitor.beat('TickStream', `${this.label}:connected:${this._currentMints.length}_mints`);
@@ -357,6 +370,7 @@ class RegionStream {
   }
 
   _handleMessage(msg) {
+    this._lastMessageAt = Date.now();
     // v3.17.29: 处理 slot update 消息(SubscribeRequest 里订阅了 slots)
     // slot update 消息结构: { slot: { slot: <num>, parent, status }, filters: ['systemSlot'] }
     // 通过 onSlot 回调上抛给 TickStream 维护 _latestSlot
@@ -379,6 +393,9 @@ class RegionStream {
       const slot = typeof msgSlot === 'string' ? Number(msgSlot) : msgSlot;
       if (Number.isFinite(slot) && slot > this._lastReceivedSlot) {
         this._lastReceivedSlot = slot;
+      }
+      if (Number.isFinite(slot) && this.onProgress) {
+        this.onProgress(slot, this.label);
       }
     }
     // v3.17.26 DEBUG: removed YOTS debug check (no longer needed)
@@ -467,6 +484,8 @@ class TickStream extends EventEmitter {
     this._latestSlotFromTx = 0;
     // v3.17.41: LS-only slot (不被 SS 数据污染), 用于 laggyReconnect 检测
     this._latestLsSlot = 0;
+    this._regionLagMs = new Map();
+    this._lastLagReconnectAt = new Map();
 
     this.regions = [];
     this.dedup = new SignatureDedup();
@@ -512,6 +531,7 @@ class TickStream extends EventEmitter {
           onConnected: (region) => this.emit('regionConnected', region),
           // v3.17.29: LS 同时推 slot update,用于维护真实当下 slot
           onSlot: (slot, region) => this._onLsSlot(slot, region),
+          onProgress: (slot, region) => this._onRegionProgress(slot, region),
         }),
       );
     });
@@ -550,6 +570,7 @@ class TickStream extends EventEmitter {
             filterMode: 'jupiter',
             onTx: (txMessage, region) => this._enqueueJupiter(txMessage, region),
             onConnected: (region) => this.emit('regionConnected', region),
+            onProgress: (slot, region) => this._onRegionProgress(slot, region),
           }),
         );
       });
@@ -610,11 +631,10 @@ class TickStream extends EventEmitter {
   async start(initialMints = []) {
     this.shouldRun = true;
     initialMints.forEach((m) => this.watchedMints.add(m));
-    if (this.watchedMints.size === 0) {
-      console.log('[TickStream] no tokens to watch yet, idle');
-      return;
-    }
     await Promise.all(this.regions.map((r) => r.start(this.watchedMints)));
+    if (this.watchedMints.size === 0) {
+      console.log('[TickStream] no tokens to watch yet; streams are ready for the first discovered mint');
+    }
     // v3.17.29: 启动独立 SlotSubscriber
     this._startSlotSubscriber();
     // v3.17.12: Start ShredStream
@@ -627,40 +647,33 @@ class TickStream extends EventEmitter {
       this._printSsLeadStats();
     }, 60_000);
 
-    // v3.17.41: LS 延迟自动重连
-    // 故障表现: _latestSlotFromTx 整体落后 SlotSub 几百 slots (实测 943)
-    // 正常抖动: 0-50 slots。真故障: >300 slots。用 300 阈值清晰区分
-    this._laggySec = 0;
-    console.log('[TickStream] 🔧 laggyReconnect timer starting (5s interval, threshold=100 slots, 10s sustained)');
+    // A watched mint can legitimately have no trades for minutes. Use the
+    // high-volume Jupiter streams as per-endpoint canaries instead of treating
+    // the last watched-token transaction slot as a stream heartbeat.
+    const lagThresholdSlots = Math.max(
+      25,
+      parseInt(process.env.LS_LAG_RECONNECT_THRESHOLD_SLOTS || '100', 10),
+    );
+    const lagSustainedMs = Math.max(
+      5_000,
+      parseInt(process.env.LS_LAG_RECONNECT_SUSTAINED_MS || '10000', 10),
+    );
+    const lagReconnectCooldownMs = Math.max(
+      10_000,
+      parseInt(process.env.LS_LAG_RECONNECT_COOLDOWN_MS || '30000', 10),
+    );
+    console.log(
+      `[TickStream] stream health timer starting ` +
+      `(threshold=${lagThresholdSlots} slots, sustained=${lagSustainedMs}ms)`,
+    );
     this._laggyReconnectTimer = setInterval(() => {
-      const lsSlot = this._latestLsSlot || 0;
-      const slotSlot = this._latestSlotFromSlotUpdate || 0;
-      // v3.22: 修复 lsSlot=0 时 lag 永远为0的 bug
-      // 当 SlotSub 有数据但 LS 完全没收到 tx 时，lag = slotSlot（表示 LS 严重滞后）
-      const lag = slotSlot > 0 ? (lsSlot > 0 ? slotSlot - lsSlot : slotSlot) : 0;
-      monitor.set('TickStream.txStreamLag', lag, 'TickStream');
-      if (slotSlot > 0 && lag > 100) {
-        this._laggySec = (this._laggySec || 0) + 5;
-        console.log(`[TickStream] LS lag detected: ${lag} slots (SlotUpdate=${slotSlot}, LsSlot=${lsSlot}), sustained=${this._laggySec}s`);
-        if (this._laggySec >= 10) {
-          console.error(`[TickStream] ⚠️ LS lag ${lag} slots for ${this._laggySec}s — reconnecting ALL tx regions`);
-          monitor.inc('TickStream.laggyReconnect', 1, 'TickStream');
-          // 重连所有 tx region (SlotSub 不动, 它是健康的)
-          for (const r of this.regions) {
-            try {
-              if (typeof r._scheduleReconnect === 'function') {
-                r.reconnectAttempts = 0;
-                r._scheduleReconnect();
-              }
-            } catch (e) {
-              console.warn(`[TickStream] reconnect region ${r.label} failed: ${e.message}`);
-            }
-          }
-          this._laggySec = 0;
-        }
-      } else {
-        this._laggySec = 0;
-      }
+      this._checkRegionLagHealth({
+        now: Date.now(),
+        lagThresholdSlots,
+        lagSustainedMs,
+        lagReconnectCooldownMs,
+        sampleMs: 5_000,
+      });
     }, 5000);
   }
 
@@ -834,6 +847,64 @@ class TickStream extends EventEmitter {
       monitor.set('TickStream.latestSlot', this._latestSlot, 'TickStream');
     }
     monitor.set('TickStream.latestSlotFromSlotUpdate', this._latestSlotFromSlotUpdate, 'TickStream');
+  }
+
+  _onRegionProgress(slot, region) {
+    if (!Number.isFinite(slot) || slot <= 0) return;
+    if (slot > this._latestLsSlot) this._latestLsSlot = slot;
+    monitor.set(`TickStream.${region}.latestSlot`, slot, 'TickStream');
+  }
+
+  _checkRegionLagHealth({
+    now,
+    lagThresholdSlots,
+    lagSustainedMs,
+    lagReconnectCooldownMs,
+    sampleMs,
+  }) {
+    const currentSlot = this._latestSlotFromSlotUpdate || 0;
+    if (currentSlot <= 0) return;
+
+    const canaries = this.regions.filter((r) => r.filterMode === 'jupiter' && r.shouldRun);
+    if (canaries.length === 0) {
+      monitor.set('TickStream.txStreamLag', 0, 'TickStream');
+      return;
+    }
+
+    let worstLag = 0;
+    for (const canary of canaries) {
+      const lastSlot = canary._lastReceivedSlot || 0;
+      const lag = lastSlot > 0 ? Math.max(0, currentSlot - lastSlot) : currentSlot;
+      worstLag = Math.max(worstLag, lag);
+      monitor.set(`TickStream.${canary.label}.streamLag`, lag, 'TickStream');
+
+      const connectedLongEnough =
+        canary.connected && canary._connectedAt > 0 && now - canary._connectedAt >= lagSustainedMs;
+      const stale = connectedLongEnough && (lastSlot === 0 || lag > lagThresholdSlots);
+      const previousLagMs = this._regionLagMs.get(canary.label) || 0;
+      const nextLagMs = stale ? previousLagMs + sampleMs : 0;
+      this._regionLagMs.set(canary.label, nextLagMs);
+      if (!stale || nextLagMs < lagSustainedMs) continue;
+
+      const lastReconnectAt = this._lastLagReconnectAt.get(canary.endpoint) || 0;
+      if (now - lastReconnectAt < lagReconnectCooldownMs) continue;
+      this._lastLagReconnectAt.set(canary.endpoint, now);
+      this._regionLagMs.set(canary.label, 0);
+      console.error(
+        `[TickStream] ${canary.label} canary lag=${lag} slots for ${nextLagMs}ms; ` +
+        'reconnecting transaction streams on the same endpoint',
+      );
+      monitor.inc('TickStream.laggyReconnect', 1, 'TickStream');
+      for (const region of this.regions.filter((r) => r.endpoint === canary.endpoint)) {
+        try {
+          region.reconnectAttempts = 0;
+          region._scheduleReconnect();
+        } catch (e) {
+          console.warn(`[TickStream] reconnect region ${region.label} failed: ${e.message}`);
+        }
+      }
+    }
+    monitor.set('TickStream.txStreamLag', worstLag, 'TickStream');
   }
 
   /**

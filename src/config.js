@@ -555,6 +555,11 @@ const config = {
     wsUrl: process.env.PUMP_DISCOVERY_WS_URL || null,
     pollIntervalMs: parseInt(process.env.PUMP_DISCOVERY_POLL_INTERVAL_MS || '5000', 10),
     pollLimit: parseInt(process.env.PUMP_DISCOVERY_POLL_LIMIT || '100', 10),
+    pollMaxPages: parseInt(process.env.PUMP_DISCOVERY_POLL_MAX_PAGES || '20', 10),
+    wsRecoverySilenceMs: parseInt(
+      process.env.PUMP_DISCOVERY_WS_RECOVERY_SILENCE_MS || '30000',
+      10,
+    ),
     startupLookbackSec: parseInt(process.env.PUMP_DISCOVERY_STARTUP_LOOKBACK_SEC || '120', 10),
     marketInitialDelayMs: parseInt(process.env.PUMP_DISCOVERY_MARKET_INITIAL_DELAY_MS || '2000', 10),
     marketRetries: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRIES || '8', 10),
