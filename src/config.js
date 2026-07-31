@@ -141,8 +141,9 @@ const config = {
       process.env.EARLY_WRONG_EXIT_CONFIRM_TRADES || '2',
       10,
     ),
-    tailStopEnabled:
-      (process.env.EARLY_FLOW_TAIL_STOP_ENABLED ?? 'true').toLowerCase() === 'true',
+    // Hard-disabled for live trading. Stale server environment values must not
+    // reactivate the confirmed -30% stop.
+    tailStopEnabled: false,
     tailStopPnlPct: parseFloat(process.env.EARLY_FLOW_TAIL_STOP_PNL_PCT || '-30'),
     tailStopConfirmMs: parseInt(
       process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_MS || '500',
@@ -157,8 +158,9 @@ const config = {
     catastrophicStopPnlPct: parseFloat(
       process.env.EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT || '-50',
     ),
-    slowBleedExitEnabled:
-      (process.env.EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    // Hard-disabled for live trading. Catastrophic protection remains the only
+    // percentage-based loss protection.
+    slowBleedExitEnabled: false,
     slowBleedMinHoldMs: parseInt(
       process.env.EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS || '60000',
       10,
