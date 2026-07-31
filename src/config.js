@@ -152,6 +152,42 @@ const config = {
       process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES || '2',
       10,
     ),
+    catastrophicStopEnabled:
+      (process.env.EARLY_FLOW_CATASTROPHIC_STOP_ENABLED ?? 'true').toLowerCase() === 'true',
+    catastrophicStopPnlPct: parseFloat(
+      process.env.EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT || '-50',
+    ),
+    slowBleedExitEnabled:
+      (process.env.EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    slowBleedMinHoldMs: parseInt(
+      process.env.EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS || '60000',
+      10,
+    ),
+    slowBleedMaxPeakPnlPct: parseFloat(
+      process.env.EARLY_FLOW_SLOW_BLEED_MAX_PEAK_PNL_PCT || '9',
+    ),
+    slowBleedMaxPnlPct: parseFloat(
+      process.env.EARLY_FLOW_SLOW_BLEED_MAX_PNL_PCT || '-5',
+    ),
+    slowBleedFlowWindowMs: parseInt(
+      process.env.EARLY_FLOW_SLOW_BLEED_FLOW_WINDOW_MS || '3000',
+      10,
+    ),
+    slowBleedSellBuyRatio: parseFloat(
+      process.env.EARLY_FLOW_SLOW_BLEED_SELL_BUY_RATIO || '1.5',
+    ),
+    slowBleedMaxUniqueBuyers: parseInt(
+      process.env.EARLY_FLOW_SLOW_BLEED_MAX_UNIQUE_BUYERS || '2',
+      10,
+    ),
+    slowBleedConfirmMs: parseInt(
+      process.env.EARLY_FLOW_SLOW_BLEED_CONFIRM_MS || '500',
+      10,
+    ),
+    slowBleedConfirmTrades: parseInt(
+      process.env.EARLY_FLOW_SLOW_BLEED_CONFIRM_TRADES || '2',
+      10,
+    ),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值
     // 智能规则: trailing已armed时不触发(trailing自行处理回撤), 只救trailing永远不armed的死扛仓位
@@ -301,6 +337,36 @@ const config = {
       process.env.EARLY_FLOW_MAX_EXECUTION_PRICE_DEVIATION_PCT || '15',
     ),
     marketFreshMs: parseInt(process.env.EARLY_FLOW_MARKET_FRESH_MS || '1500', 10),
+    riskEnabled:
+      (process.env.EARLY_FLOW_RISK_FILTER_ENABLED ?? 'true').toLowerCase() === 'true',
+    riskRejectScore: parseInt(
+      process.env.EARLY_FLOW_RISK_REJECT_SCORE || '4',
+      10,
+    ),
+    riskMinUniqueBuyers5s: parseInt(
+      process.env.EARLY_FLOW_RISK_MIN_UNIQUE_BUYERS_5S || '6',
+      10,
+    ),
+    riskMinBuySol5s: parseFloat(
+      process.env.EARLY_FLOW_RISK_MIN_BUY_SOL_5S || '3',
+    ),
+    riskMinPriceChangePct: parseFloat(
+      process.env.EARLY_FLOW_RISK_MIN_PRICE_CHANGE_PCT || '-2',
+    ),
+    riskMaxLargestBuyShare: parseFloat(
+      process.env.EARLY_FLOW_RISK_MAX_LARGEST_BUY_SHARE || '0.45',
+    ),
+    riskMaxExecutionDelayMs: parseInt(
+      process.env.EARLY_FLOW_RISK_MAX_EXECUTION_DELAY_MS || '400',
+      10,
+    ),
+    riskMinFdvUsd: parseFloat(
+      process.env.EARLY_FLOW_RISK_MIN_FDV_USD || '25000',
+    ),
+    riskMaxMigrationAgeMs: parseInt(
+      process.env.EARLY_FLOW_RISK_MAX_MIGRATION_AGE_MS || '20000',
+      10,
+    ),
   },
 
   // Research-only add-on. It records a hypothetical second entry and tracks

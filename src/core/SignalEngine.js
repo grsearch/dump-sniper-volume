@@ -3,6 +3,7 @@
 const EventEmitter = require('events');
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
+const { evaluateEarlyFlowEntryRisk } = require('./EarlyFlowEntryRisk');
 
 const monitor = getMonitor();
 monitor.registerModule('SignalEngine', { staleMs: 3600_000, label: 'Signal Engine' });
@@ -283,6 +284,20 @@ class SignalEngine extends EventEmitter {
       );
       return;
     }
+    const entryRisk = evaluateEarlyFlowEntryRisk(details, config.earlyFlow);
+    details.entryRiskScore = entryRisk.score;
+    details.entryRiskRejectScore = entryRisk.rejectScore;
+    details.entryRiskBlocked = entryRisk.blocked;
+    details.entryRiskReasons = entryRisk.reasons;
+    if (entryRisk.blocked) {
+      monitor.inc('SignalEngine.rejectedEntryRisk', 1, 'SignalEngine');
+      this._logReject(
+        signal,
+        `ENTRY_RISK_SCORE_HIGH: ${entryRisk.score}/${entryRisk.rejectScore} ` +
+          `[${entryRisk.reasons.join(',')}]`,
+      );
+      return;
+    }
 
     const reason =
       `early_flow: age=${(signalAgeMs / 1000).toFixed(1)}s ` +
@@ -290,7 +305,8 @@ class SignalEngine extends EventEmitter {
       `flow1s=${netFlow1sSol.toFixed(3)}SOL buyers5s=${uniqueBuyers5s} ` +
       `tx5s=${tradeCount5s} buy5s=${buySol5s.toFixed(3)}SOL ` +
       `largestBuyShare=${(largestBuyShare5s * 100).toFixed(1)}% ` +
-      `execution=${executionDelayMs}ms/${((executionPrice / signalPrice - 1) * 100).toFixed(2)}%`;
+      `execution=${executionDelayMs}ms/${((executionPrice / signalPrice - 1) * 100).toFixed(2)}% ` +
+      `risk=${entryRisk.score}/${entryRisk.rejectScore}`;
 
     this.inflightBuys.add(mint);
     this.lastTriggerTs.set(mint, now);

@@ -3,6 +3,7 @@
 const EventEmitter = require('events');
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
+const { evaluateEarlyFlowEntryRisk } = require('./EarlyFlowEntryRisk');
 
 const monitor = getMonitor();
 monitor.registerModule('EarlyFlowEntry', { staleMs: 600_000, label: 'Early Flow Entry' });
@@ -40,6 +41,22 @@ class EarlyFlowEntryTracker extends EventEmitter {
     this.maxExecutionPriceDeviationPct = opts.maxExecutionPriceDeviationPct ??
       strategy.maxExecutionPriceDeviationPct ?? 15;
     this.marketFreshMs = opts.marketFreshMs ?? strategy.marketFreshMs ?? 1_500;
+    this.riskConfig = {
+      riskEnabled: opts.riskEnabled ?? strategy.riskEnabled ?? true,
+      riskRejectScore: opts.riskRejectScore ?? strategy.riskRejectScore ?? 4,
+      riskMinUniqueBuyers5s:
+        opts.riskMinUniqueBuyers5s ?? strategy.riskMinUniqueBuyers5s ?? 6,
+      riskMinBuySol5s: opts.riskMinBuySol5s ?? strategy.riskMinBuySol5s ?? 3,
+      riskMinPriceChangePct:
+        opts.riskMinPriceChangePct ?? strategy.riskMinPriceChangePct ?? -2,
+      riskMaxLargestBuyShare:
+        opts.riskMaxLargestBuyShare ?? strategy.riskMaxLargestBuyShare ?? 0.45,
+      riskMaxExecutionDelayMs:
+        opts.riskMaxExecutionDelayMs ?? strategy.riskMaxExecutionDelayMs ?? 400,
+      riskMinFdvUsd: opts.riskMinFdvUsd ?? strategy.riskMinFdvUsd ?? 25_000,
+      riskMaxMigrationAgeMs:
+        opts.riskMaxMigrationAgeMs ?? strategy.riskMaxMigrationAgeMs ?? 20_000,
+    };
     this.debug = opts.debug ?? false;
     this.states = new Map();
   }
@@ -194,6 +211,11 @@ class EarlyFlowEntryTracker extends EventEmitter {
       preEntryVwap5s: executionMetrics.priceVwap5s,
       preEntryUniqueBuyers3s: executionMetrics.uniqueBuyers3s,
     };
+    const entryRisk = evaluateEarlyFlowEntryRisk(details, this.riskConfig);
+    details.entryRiskScore = entryRisk.score;
+    details.entryRiskRejectScore = entryRisk.rejectScore;
+    details.entryRiskBlocked = entryRisk.blocked;
+    details.entryRiskReasons = entryRisk.reasons;
     const signal = {
       mint: swap.mint,
       symbol: state.symbol || swap.symbol,
@@ -216,7 +238,9 @@ class EarlyFlowEntryTracker extends EventEmitter {
     console.log(
       `[EarlyFlowEntry] EXECUTABLE ${signal.symbol || swap.mint.slice(0, 6)} ` +
         `delay=${details.executionDelayMs}ms ` +
-        `priceMove=${((price / pending.signalPrice - 1) * 100).toFixed(2)}%`,
+        `priceMove=${((price / pending.signalPrice - 1) * 100).toFixed(2)}% ` +
+        `risk=${entryRisk.score}/${entryRisk.rejectScore}` +
+        (entryRisk.reasons.length ? ` [${entryRisk.reasons.join(',')}]` : ''),
     );
     this.emit('earlyFlowSignal', signal);
   }

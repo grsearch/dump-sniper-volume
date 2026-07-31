@@ -7,6 +7,17 @@ process.env.EARLY_FLOW_TAIL_STOP_ENABLED = 'true';
 process.env.EARLY_FLOW_TAIL_STOP_PNL_PCT = '-30';
 process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_MS = '500';
 process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES = '2';
+process.env.EARLY_FLOW_CATASTROPHIC_STOP_ENABLED = 'true';
+process.env.EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT = '-50';
+process.env.EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED = 'true';
+process.env.EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS = '60000';
+process.env.EARLY_FLOW_SLOW_BLEED_MAX_PEAK_PNL_PCT = '9';
+process.env.EARLY_FLOW_SLOW_BLEED_MAX_PNL_PCT = '-5';
+process.env.EARLY_FLOW_SLOW_BLEED_FLOW_WINDOW_MS = '3000';
+process.env.EARLY_FLOW_SLOW_BLEED_SELL_BUY_RATIO = '1.5';
+process.env.EARLY_FLOW_SLOW_BLEED_MAX_UNIQUE_BUYERS = '2';
+process.env.EARLY_FLOW_SLOW_BLEED_CONFIRM_MS = '500';
+process.env.EARLY_FLOW_SLOW_BLEED_CONFIRM_TRADES = '2';
 process.env.ADDON_SHADOW_ENABLED = 'true';
 process.env.EARLY_WRONG_EXIT_ENABLED = 'true';
 process.env.EARLY_WRONG_EXIT_MODE = 'live';
@@ -117,6 +128,8 @@ function run() {
   assert.strictEqual(config.strategy.tailStopPnlPct, -30);
   assert.strictEqual(config.strategy.tailStopConfirmMs, 500);
   assert.strictEqual(config.strategy.tailStopConfirmTrades, 2);
+  assert.strictEqual(config.strategy.catastrophicStopPnlPct, -50);
+  assert.strictEqual(config.strategy.slowBleedMinHoldMs, 60_000);
   assert.strictEqual(config.strategy.emaExitEnabled, true);
   assert.strictEqual(config.strategy.fdvExitUsd, 10_000);
   assert.strictEqual(config.strategy.rsi5sExitEnabled, false);
@@ -229,17 +242,53 @@ function run() {
       trailingArmed: true,
     }));
     manager.handleSwapForExit(exitSwap(mint, now, {
-      price: 0.6,
+      price: 0.65,
       signature: 'armed-tail-1',
     }));
     manager.handleSwapForExit(exitSwap(mint, now + 600, {
-      price: 0.5,
+      price: 0.6,
       signature: 'armed-tail-2',
     }));
     assert.strictEqual(
       manager._exitCalls.length,
       0,
       'tail protection must stay disabled after this position arms trailing',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(
+      position('p1', mint, { openedAt: now - 20_000, trailingArmed: true }),
+      position('p2', mint, { openedAt: now - 20_000, entryPrice: 0.9 }),
+    );
+    manager.handleSwapForExit(exitSwap(mint, now, {
+      price: 0.49,
+      slot: 101,
+      signature: 'trusted-catastrophic-swap',
+    }));
+    assert.strictEqual(manager._exitCalls.length, 2);
+    assert(
+      manager._exitCalls.every((call) => call.reason === 'CATASTROPHIC_GAP_STOP'),
+      'one trusted catastrophic swap must exit every position even after trailing arms',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 20_000,
+      buySlot: 100,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now, {
+      price: 0.49,
+      slot: 100,
+      signature: 'same-slot-price',
+    }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'a swap at or before the buy slot must not trigger catastrophe protection',
     );
   }
 
@@ -301,6 +350,48 @@ function run() {
       {},
     );
     assert.strictEqual(manager._exitCalls[0].reason, 'CONFIRMED_TAIL_STOP');
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 61_000,
+      highWaterMark: 1.05,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now, {
+      price: 0.94,
+      signature: 'slow-bleed-1',
+      signer: 'slow-seller-1',
+    }));
+    assert.strictEqual(manager._exitCalls.length, 0);
+    manager.handleSwapForExit(exitSwap(mint, now + 600, {
+      price: 0.93,
+      signature: 'slow-bleed-2',
+      signer: 'slow-seller-2',
+    }));
+    assert.strictEqual(manager._exitCalls[0].reason, 'SLOW_BLEED_EXIT');
+  }
+
+  {
+    const now = Date.now();
+    const manager = managerWith(position('p1', mint, {
+      openedAt: now - 61_000,
+      highWaterMark: 1.05,
+      trailingArmed: true,
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now, {
+      price: 0.94,
+      signature: 'armed-slow-1',
+    }));
+    manager.handleSwapForExit(exitSwap(mint, now + 600, {
+      price: 0.93,
+      signature: 'armed-slow-2',
+    }));
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'slow-bleed protection must not compete with an armed trailing exit',
+    );
   }
 
   {

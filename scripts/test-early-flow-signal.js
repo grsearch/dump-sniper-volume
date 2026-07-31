@@ -35,15 +35,15 @@ function signal(overrides = {}) {
   const details = {
     signalPrice: 1,
     executionPrice: 1.1,
-    executionDelayMs: 500,
-    signalMigrationAgeMs: 20_000,
+    executionDelayMs: 200,
+    signalMigrationAgeMs: 18_000,
     fdvUsd: 50_000,
     priceChangePct: 2,
     netFlow1sSol: 0.1,
-    uniqueBuyers5s: 3,
-    tradeCount5s: 4,
-    buySol5s: 2.1,
-    largestBuyShare5s: 0.5,
+    uniqueBuyers5s: 8,
+    tradeCount5s: 10,
+    buySol5s: 4,
+    largestBuyShare5s: 0.3,
     ...overrides,
   };
   return {
@@ -62,6 +62,8 @@ function signal(overrides = {}) {
   assert.strictEqual(config.earlyFlow.minMigrationAgeMs, 15_000);
   assert.strictEqual(config.earlyFlow.maxMigrationAgeMs, 25_000);
   assert.strictEqual(config.earlyFlow.minBuySol5s, 2);
+  assert.strictEqual(config.earlyFlow.riskEnabled, true);
+  assert.strictEqual(config.earlyFlow.riskRejectScore, 4);
   assert.strictEqual(config.strategy.positionSizeSol, 0.2);
 
   const accepted = engine();
@@ -71,6 +73,7 @@ function signal(overrides = {}) {
   assert.strictEqual(orders.length, 1);
   assert.strictEqual(orders[0].sizeSol, 0.2);
   assert.strictEqual(orders[0].entryFdvSource, 'chain_realtime_signal');
+  assert.strictEqual(orders[0]._earlyFlowDetails.entryRiskScore, 0);
 
   const missingBuyers = engine();
   await missingBuyers.handleEarlyFlowSignal(signal({ uniqueBuyers5s: NaN }));
@@ -91,6 +94,19 @@ function signal(overrides = {}) {
   await expensive.handleEarlyFlowSignal(signal({ executionPrice: 1.150001 }));
   assert.strictEqual(expensive.inflightBuys.size, 0);
   assert(expensive.loggedRejects[0].startsWith('EXECUTION_PRICE_HIGH'));
+
+  const risky = engine();
+  await risky.handleEarlyFlowSignal(signal({
+    executionDelayMs: 600,
+    signalMigrationAgeMs: 22_000,
+    fdvUsd: 20_000,
+    priceChangePct: -3,
+    uniqueBuyers5s: 4,
+    buySol5s: 2.2,
+    largestBuyShare5s: 0.5,
+  }));
+  assert.strictEqual(risky.inflightBuys.size, 0);
+  assert(risky.loggedRejects[0].startsWith('ENTRY_RISK_SCORE_HIGH'));
 
   console.log('Early-flow SignalEngine tests: PASS');
   process.exit(0);

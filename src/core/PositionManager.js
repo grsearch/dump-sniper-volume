@@ -307,6 +307,8 @@ class PositionManager extends EventEmitter {
     const s = config.strategy;
     const earlyWrongEnabled = !!s.earlyWrongExitEnabled;
     const tailStopEnabled = !!s.tailStopEnabled;
+    const catastrophicStopEnabled = !!s.catastrophicStopEnabled;
+    const slowBleedExitEnabled = !!s.slowBleedExitEnabled;
     const addonShadowEnabled = !!config.addonShadow?.enabled;
     const legacyFlowEnabled = !s.dedicatedExitOnly && !!s.flowReversalExitEnabled;
     const researchEnabled = !!config.capture.positionResearchEnabled;
@@ -314,6 +316,8 @@ class PositionManager extends EventEmitter {
       (
         !earlyWrongEnabled &&
         !tailStopEnabled &&
+        !catastrophicStopEnabled &&
+        !slowBleedExitEnabled &&
         !addonShadowEnabled &&
         !legacyFlowEnabled &&
         !researchEnabled
@@ -341,6 +345,7 @@ class PositionManager extends EventEmitter {
       ts: Number.isFinite(swap.ts) ? swap.ts : Date.now(),
       receivedAt: Number.isFinite(swap.receivedAt) ? swap.receivedAt : Date.now(),
       signature: swap.signature || null,
+      slot: Number(swap.slot) || null,
       rawPrice: Number(swap.rawPrice) || null,
       poolAddress: swap.poolAddress || null,
       poolBaseAfter: Number(swap.poolBaseAfter) || null,
@@ -378,7 +383,15 @@ class PositionManager extends EventEmitter {
         this._recordPositionResearchEvent(pos, ev, 'SWAP_METRICS', metrics);
       }
       if (pos.exiting) continue;
+      if (
+        catastrophicStopEnabled &&
+        this._maybeCatastrophicGapStop(pos, ev, metrics)
+      ) break;
       if (tailStopEnabled && this._maybeConfirmedTailStop(pos, ev, metrics)) break;
+      if (
+        slowBleedExitEnabled &&
+        this._maybeSlowBleedExit(pos, ev, metrics)
+      ) break;
       if (addonShadowEnabled) this._maybeAddonShadowSignal(pos, ev, metrics);
       if (earlyWrongEnabled) this._maybeEarlyWrongExit(pos, ev, metrics);
       if (legacyFlowEnabled) this._maybeFlowReversalExit(pos, price, ev.ts);
@@ -401,6 +414,9 @@ class PositionManager extends EventEmitter {
       legacyWindowMs,
       s.earlyWrongExitEnabled
         ? (s.earlyWrongExitFlowWindowMs || 3_000) * 2
+        : 0,
+      s.slowBleedExitEnabled
+        ? (s.slowBleedFlowWindowMs || 3_000) * 2
         : 0,
       config.addonShadow?.enabled ? 7_000 : 0,
       config.capture.positionResearchEnabled
@@ -677,6 +693,233 @@ class PositionManager extends EventEmitter {
       reconciled: !!pos.reconciled,
       metrics: snapshot,
     });
+  }
+
+  _isTrustedLossEvent(pos, event) {
+    const signature = event?.signature ? String(event.signature) : null;
+    const price = Number(event?.price);
+    const entryPrice = Number(pos?.entryPrice);
+    if (
+      !signature ||
+      signature === pos?.buySignature ||
+      !Number.isFinite(price) ||
+      price <= 0 ||
+      !Number.isFinite(entryPrice) ||
+      entryPrice <= 0
+    ) {
+      return false;
+    }
+
+    const priceRatio = price / entryPrice;
+    if (priceRatio < 0.01 || priceRatio > 5) return false;
+
+    const slot = Number(event?.slot);
+    const buySlot = Number(pos?.buySlot);
+    if (slot > 0 && buySlot > 0 && slot <= buySlot) return false;
+
+    const expectedPool = this.tokenRegistry?.getToken?.(pos.mint)?.pool_address || null;
+    if (
+      expectedPool &&
+      String(event?.poolAddress || '') !== String(expectedPool)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  _maybeCatastrophicGapStop(pos, event, researchMetrics = null) {
+    const s = config.strategy;
+    if (
+      !s.catastrophicStopEnabled ||
+      !pos ||
+      pos.exiting ||
+      pos.status === 'stuck' ||
+      (!pos.reconciled && !pos.dryRun) ||
+      !this._isTrustedLossEvent(pos, event)
+    ) {
+      return false;
+    }
+
+    const price = Number(event.price);
+    const marketPnlPct = ((price - Number(pos.entryPrice)) / Number(pos.entryPrice)) * 100;
+    if (marketPnlPct > s.catastrophicStopPnlPct + 1e-9) return false;
+
+    const active = [...(this.byMint.get(pos.mint) || [])]
+      .map((positionId) => this.positions.get(positionId))
+      .filter((item) => item && !item.exiting && item.status !== 'stuck');
+    if (active.length === 0) return false;
+
+    console.warn(
+      `[PositionManager] CATASTROPHIC_GAP_STOP ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `pnl=${marketPnlPct.toFixed(2)}% <= ${s.catastrophicStopPnlPct}% ` +
+        `signature=${String(event.signature).slice(0, 10)} positions=${active.length}`,
+    );
+    monitor.inc('PositionManager.catastrophicGapStop', 1, 'PositionManager');
+
+    for (const item of active) {
+      const itemMetrics = item === pos
+        ? (researchMetrics || this._buildPositionResearchMetrics(item, event))
+        : this._buildPositionResearchMetrics(item, event);
+      this._recordPositionResearchEvent(
+        item,
+        event,
+        'CATASTROPHIC_GAP_STOP_TRIGGER',
+        itemMetrics,
+        {
+          catastrophicStop: {
+            thresholdPnlPct: s.catastrophicStopPnlPct,
+            marketPnlPct:
+              ((price - Number(item.entryPrice)) / Number(item.entryPrice)) * 100,
+            confirmation: 'single_trusted_signature',
+            sellScope: 'all_positions_for_mint',
+          },
+        },
+      );
+      item._exitTriggeredAt = item._exitTriggeredAt || Date.now();
+      item._exitMarketTs = item._exitMarketTs || Number(event.ts) || null;
+      item._exitTriggerSource =
+        item._exitTriggerSource || 'chain_swap_catastrophic_gap_stop';
+      this._exitForCondition(item, price, 'CATASTROPHIC_GAP_STOP');
+    }
+    this._closeAddonShadowsByMint(pos.mint, event, 'CATASTROPHIC_GAP_STOP');
+    return true;
+  }
+
+  _resetSlowBleedCandidate(pos) {
+    if (!pos) return;
+    pos._slowBleedFirstSeenAt = null;
+    pos._slowBleedSignatures = null;
+  }
+
+  _maybeSlowBleedExit(pos, event, researchMetrics = null) {
+    const s = config.strategy;
+    if (
+      !s.slowBleedExitEnabled ||
+      !pos ||
+      pos.exiting ||
+      pos.status === 'stuck' ||
+      (!pos.reconciled && !pos.dryRun) ||
+      pos.trailingArmed
+    ) {
+      this._resetSlowBleedCandidate(pos);
+      return false;
+    }
+
+    const now = Number(event?.receivedAt) || Date.now();
+    const holdStart = Number(pos.openedAt) || Number(pos.reconciledAt) || now;
+    const holdMs = now - holdStart;
+    if (holdMs < s.slowBleedMinHoldMs || !this._isTrustedLossEvent(pos, event)) {
+      this._resetSlowBleedCandidate(pos);
+      return false;
+    }
+
+    const metrics = researchMetrics || this._buildPositionResearchMetrics(pos, event);
+    const marketPnlPct = Number(metrics?.marketPnlPct);
+    const peakPnlPct = Number(metrics?.peakPnlPct);
+    const current = metrics?.windows?.['3s'] || {};
+    const sellBuyRatio = Number(current.sellBuyRatio);
+    const uniqueBuyers = Number(current.uniqueBuyers);
+    const netFlowSol = Number(current.netFlowSol);
+    const candidate =
+      Number.isFinite(marketPnlPct) &&
+      marketPnlPct <= s.slowBleedMaxPnlPct + 1e-9 &&
+      Number.isFinite(peakPnlPct) &&
+      peakPnlPct < s.slowBleedMaxPeakPnlPct &&
+      Number.isFinite(sellBuyRatio) &&
+      sellBuyRatio >= s.slowBleedSellBuyRatio &&
+      Number.isFinite(uniqueBuyers) &&
+      uniqueBuyers <= s.slowBleedMaxUniqueBuyers &&
+      Number.isFinite(netFlowSol) &&
+      netFlowSol < 0;
+
+    if (!candidate) {
+      this._resetSlowBleedCandidate(pos);
+      return false;
+    }
+
+    const signature = String(event.signature);
+    if (!pos._slowBleedFirstSeenAt) {
+      pos._slowBleedFirstSeenAt = now;
+      pos._slowBleedSignatures = new Set([signature]);
+      monitor.inc('PositionManager.slowBleedCandidate', 1, 'PositionManager');
+      this._recordPositionResearchEvent(
+        pos,
+        event,
+        'SLOW_BLEED_CANDIDATE',
+        metrics,
+        {
+          slowBleed: {
+            stage: 'candidate',
+            marketPnlPct,
+            peakPnlPct,
+            sellBuyRatio,
+            uniqueBuyers,
+            netFlowSol,
+            confirmMs: s.slowBleedConfirmMs,
+            requiredSignatures: s.slowBleedConfirmTrades,
+          },
+        },
+      );
+      return false;
+    }
+
+    if (!(pos._slowBleedSignatures instanceof Set)) {
+      pos._slowBleedSignatures = new Set();
+    }
+    pos._slowBleedSignatures.add(signature);
+    const confirmElapsedMs = now - pos._slowBleedFirstSeenAt;
+    const signatureCount = pos._slowBleedSignatures.size;
+    if (
+      confirmElapsedMs < s.slowBleedConfirmMs ||
+      signatureCount < s.slowBleedConfirmTrades
+    ) {
+      return false;
+    }
+
+    const price = Number(event.price);
+    const active = [...(this.byMint.get(pos.mint) || [])]
+      .map((positionId) => this.positions.get(positionId))
+      .filter((item) => item && !item.exiting && item.status !== 'stuck');
+    if (active.length === 0) return false;
+
+    console.warn(
+      `[PositionManager] SLOW_BLEED_EXIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `hold=${holdMs}ms pnl=${marketPnlPct.toFixed(2)}% ` +
+        `peak=${peakPnlPct.toFixed(2)}% sell/buy=${sellBuyRatio.toFixed(2)} ` +
+        `buyers3s=${uniqueBuyers} confirm=${signatureCount}/${confirmElapsedMs}ms`,
+    );
+    monitor.inc('PositionManager.slowBleedExit', 1, 'PositionManager');
+
+    for (const item of active) {
+      const itemMetrics = item === pos
+        ? metrics
+        : this._buildPositionResearchMetrics(item, event);
+      this._recordPositionResearchEvent(
+        item,
+        event,
+        'SLOW_BLEED_EXIT_TRIGGER',
+        itemMetrics,
+        {
+          slowBleed: {
+            stage: 'confirmed',
+            marketPnlPct: Number(itemMetrics?.marketPnlPct),
+            peakPnlPct: Number(itemMetrics?.peakPnlPct),
+            sellBuyRatio,
+            uniqueBuyers,
+            netFlowSol,
+            signatureCount,
+            confirmElapsedMs,
+            sellScope: 'all_positions_for_mint',
+          },
+        },
+      );
+      item._exitTriggeredAt = item._exitTriggeredAt || Date.now();
+      item._exitMarketTs = item._exitMarketTs || Number(event.ts) || null;
+      item._exitTriggerSource = item._exitTriggerSource || 'chain_swap_slow_bleed_exit';
+      this._exitForCondition(item, price, 'SLOW_BLEED_EXIT');
+    }
+    this._closeAddonShadowsByMint(pos.mint, event, 'SLOW_BLEED_EXIT');
+    return true;
   }
 
   _resetTailStopCandidate(pos) {
@@ -1846,6 +2089,11 @@ class PositionManager extends EventEmitter {
         _earlyWrongConfirmCount: 0,
         _earlyWrongLastSignature: null,
         _earlyWrongShadowActive: false,
+        _tailStopFirstSeenAt: null,
+        _tailStopLastSignature: null,
+        _tailStopSignatures: null,
+        _slowBleedFirstSeenAt: null,
+        _slowBleedSignatures: null,
         // EMA 策略：从 DB 持久化字段恢复（不再靠环境变量推断）
         isEmaStrategy: false,  // EMA removed
         isAddOn: !!row.is_addon,
@@ -1925,6 +2173,8 @@ class PositionManager extends EventEmitter {
       _tailStopFirstSeenAt: null,
       _tailStopLastSignature: null,
       _tailStopSignatures: null,
+      _slowBleedFirstSeenAt: null,
+      _slowBleedSignatures: null,
       _addonShadowLowPrice: entryPrice,
       _addonShadowSignaled: false,
       // v3.17.6: stabilization 期

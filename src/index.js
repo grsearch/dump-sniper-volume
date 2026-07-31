@@ -46,6 +46,15 @@ async function main() {
       `largestBuyShare<=${config.earlyFlow.maxLargestBuyShare * 100}%)`,
   );
   console.log(
+    `Entry risk: ${config.earlyFlow.riskEnabled ? 'LIVE' : 'disabled'} ` +
+      `(reject>=${config.earlyFlow.riskRejectScore}; buyers5s<${config.earlyFlow.riskMinUniqueBuyers5s}, ` +
+      `buy5s<${config.earlyFlow.riskMinBuySol5s}SOL, change10s<${config.earlyFlow.riskMinPriceChangePct}%, ` +
+      `largestBuy>${config.earlyFlow.riskMaxLargestBuyShare * 100}%, ` +
+      `execution>${config.earlyFlow.riskMaxExecutionDelayMs}ms, ` +
+      `FDV<$${config.earlyFlow.riskMinFdvUsd}, ` +
+      `AGE>${config.earlyFlow.riskMaxMigrationAgeMs / 1000}s each add 1)`,
+  );
+  console.log(
     'Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; ' +
       `EMA${config.strategy.emaFastPeriod}/EMA${config.strategy.emaSlowPeriod} down-cross; ` +
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
@@ -53,7 +62,17 @@ async function main() {
       `${config.strategy.tailStopEnabled
         ? `unarmed tail ${config.strategy.tailStopPnlPct}% for ` +
           `${config.strategy.tailStopConfirmMs}ms/${config.strategy.tailStopConfirmTrades} signatures`
-        : 'tail stop disabled'} ` +
+        : 'tail stop disabled'}; ` +
+      `${config.strategy.slowBleedExitEnabled
+        ? `unarmed slow bleed after ${config.strategy.slowBleedMinHoldMs / 1000}s ` +
+          `(peak<${config.strategy.slowBleedMaxPeakPnlPct}%, pnl<=${config.strategy.slowBleedMaxPnlPct}%, ` +
+          `sell/buy>=${config.strategy.slowBleedSellBuyRatio}, ` +
+          `buyers<=${config.strategy.slowBleedMaxUniqueBuyers}, ` +
+          `${config.strategy.slowBleedConfirmMs}ms/${config.strategy.slowBleedConfirmTrades} signatures)`
+        : 'slow bleed disabled'}; ` +
+      `${config.strategy.catastrophicStopEnabled
+        ? `trusted single-swap catastrophe ${config.strategy.catastrophicStopPnlPct}%`
+        : 'catastrophic stop disabled'} ` +
       `(plus token-age exit)`,
   );
   console.log(

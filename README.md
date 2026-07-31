@@ -129,6 +129,16 @@ EARLY_FLOW_EXECUTION_WINDOW_MS=3000
 EARLY_FLOW_MAX_EXECUTION_PRICE_DEVIATION_PCT=15
 EARLY_FLOW_MARKET_FRESH_MS=1500
 
+EARLY_FLOW_RISK_FILTER_ENABLED=true
+EARLY_FLOW_RISK_REJECT_SCORE=4
+EARLY_FLOW_RISK_MIN_UNIQUE_BUYERS_5S=6
+EARLY_FLOW_RISK_MIN_BUY_SOL_5S=3
+EARLY_FLOW_RISK_MIN_PRICE_CHANGE_PCT=-2
+EARLY_FLOW_RISK_MAX_LARGEST_BUY_SHARE=0.45
+EARLY_FLOW_RISK_MAX_EXECUTION_DELAY_MS=400
+EARLY_FLOW_RISK_MIN_FDV_USD=25000
+EARLY_FLOW_RISK_MAX_MIGRATION_AGE_MS=20000
+
 EARLY_FLOW_EMA_EXIT_ENABLED=true
 EARLY_FLOW_EMA_FAST_PERIOD=9
 EARLY_FLOW_EMA_SLOW_PERIOD=20
@@ -142,6 +152,17 @@ EARLY_FLOW_TAIL_STOP_ENABLED=true
 EARLY_FLOW_TAIL_STOP_PNL_PCT=-30
 EARLY_FLOW_TAIL_STOP_CONFIRM_MS=500
 EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES=2
+EARLY_FLOW_CATASTROPHIC_STOP_ENABLED=true
+EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT=-50
+EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED=true
+EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS=60000
+EARLY_FLOW_SLOW_BLEED_MAX_PEAK_PNL_PCT=9
+EARLY_FLOW_SLOW_BLEED_MAX_PNL_PCT=-5
+EARLY_FLOW_SLOW_BLEED_FLOW_WINDOW_MS=3000
+EARLY_FLOW_SLOW_BLEED_SELL_BUY_RATIO=1.5
+EARLY_FLOW_SLOW_BLEED_MAX_UNIQUE_BUYERS=2
+EARLY_FLOW_SLOW_BLEED_CONFIRM_MS=500
+EARLY_FLOW_SLOW_BLEED_CONFIRM_TRADES=2
 
 EARLY_WRONG_EXIT_ENABLED=true
 EARLY_WRONG_EXIT_MODE=shadow
@@ -198,8 +219,8 @@ POSITION_RESEARCH_FLUSH_MAX=1000
 启动日志应显示：
 
 ~~~text
-Entry: EARLY_FLOW (AGE 15-25s, FDV $15000-$100000, change10s -10%..+8%, flow1s>0, buyers5s>=3, tx5s>=4, buy5s>=2SOL, largestBuyShare<=70%)
-Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +9% / drawdown 5%; unarmed tail -30% confirmed by 2 signatures over 500ms; FDV <$10000 (plus token-age exit)
+Entry: EARLY_FLOW (...) with LIVE composite risk rejection at score >=4
+Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +9% / drawdown 5%; unarmed tail -30% confirmed by 2 signatures over 500ms; unarmed slow-bleed confirmation after 60s; trusted single-swap catastrophe at -50%; FDV <$10000 (plus token-age exit)
 Early invalidation: shadow (3-15s, peak<3%, VWAP break<=-3%, sell/buy>=1.5, confirm=2/500ms)
 Add-on shadow: research only; first entry and any real add-on exit independently, while confirmed tail protection exits every position for the mint
 Position research telemetry: enabled (window=10s, flush=250ms)
