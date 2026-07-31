@@ -3,6 +3,7 @@
 process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT = '9';
 process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT = '5';
 process.env.EARLY_FLOW_FDV_EXIT_USD = '10000';
+process.env.EARLY_FLOW_FIXED_STOP_LOSS_PCT = '0';
 process.env.EARLY_FLOW_TAIL_STOP_ENABLED = 'true';
 process.env.EARLY_FLOW_TAIL_STOP_PNL_PCT = '-30';
 process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_MS = '500';
@@ -125,10 +126,13 @@ function run() {
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
   assert.strictEqual(config.strategy.trailingActivatePct, 9);
   assert.strictEqual(config.strategy.trailingDrawdownPct, 5);
+  assert.strictEqual(config.strategy.tailStopEnabled, false);
   assert.strictEqual(config.strategy.tailStopPnlPct, -30);
   assert.strictEqual(config.strategy.tailStopConfirmMs, 500);
   assert.strictEqual(config.strategy.tailStopConfirmTrades, 2);
   assert.strictEqual(config.strategy.catastrophicStopPnlPct, -50);
+  assert.strictEqual(config.strategy.catastrophicStopEnabled, true);
+  assert.strictEqual(config.strategy.slowBleedExitEnabled, false);
   assert.strictEqual(config.strategy.slowBleedMinHoldMs, 60_000);
   assert.strictEqual(config.strategy.emaExitEnabled, true);
   assert.strictEqual(config.strategy.fdvExitUsd, 10_000);
@@ -209,6 +213,8 @@ function run() {
   }
 
   {
+    const previousTailStopEnabled = config.strategy.tailStopEnabled;
+    config.strategy.tailStopEnabled = true;
     const now = Date.now();
     const manager = managerWith(
       position('p1', mint, { openedAt: now - 5_000 }),
@@ -233,9 +239,12 @@ function run() {
       manager._exitCalls.every((call) => call.reason === 'CONFIRMED_TAIL_STOP'),
       'confirmed tail protection must sell every position for the mint',
     );
+    config.strategy.tailStopEnabled = previousTailStopEnabled;
   }
 
   {
+    const previousTailStopEnabled = config.strategy.tailStopEnabled;
+    config.strategy.tailStopEnabled = true;
     const now = Date.now();
     const manager = managerWith(position('p1', mint, {
       openedAt: now - 5_000,
@@ -254,6 +263,7 @@ function run() {
       0,
       'tail protection must stay disabled after this position arms trailing',
     );
+    config.strategy.tailStopEnabled = previousTailStopEnabled;
   }
 
   {
@@ -293,6 +303,8 @@ function run() {
   }
 
   {
+    const previousTailStopEnabled = config.strategy.tailStopEnabled;
+    config.strategy.tailStopEnabled = true;
     const now = Date.now();
     const manager = managerWith(position('p1', mint, { openedAt: now - 5_000 }));
     manager.handleSwapForExit(exitSwap(mint, now, {
@@ -313,9 +325,12 @@ function run() {
       signature: 'different-tail-signature',
     }));
     assert.strictEqual(manager._exitCalls[0].reason, 'CONFIRMED_TAIL_STOP');
+    config.strategy.tailStopEnabled = previousTailStopEnabled;
   }
 
   {
+    const previousTailStopEnabled = config.strategy.tailStopEnabled;
+    config.strategy.tailStopEnabled = true;
     const now = Date.now();
     const pos = position('p1', mint, { openedAt: now - 5_000 });
     const manager = managerWith(pos);
@@ -350,9 +365,12 @@ function run() {
       {},
     );
     assert.strictEqual(manager._exitCalls[0].reason, 'CONFIRMED_TAIL_STOP');
+    config.strategy.tailStopEnabled = previousTailStopEnabled;
   }
 
   {
+    const previousSlowBleedExitEnabled = config.strategy.slowBleedExitEnabled;
+    config.strategy.slowBleedExitEnabled = true;
     const now = Date.now();
     const manager = managerWith(position('p1', mint, {
       openedAt: now - 61_000,
@@ -370,9 +388,12 @@ function run() {
       signer: 'slow-seller-2',
     }));
     assert.strictEqual(manager._exitCalls[0].reason, 'SLOW_BLEED_EXIT');
+    config.strategy.slowBleedExitEnabled = previousSlowBleedExitEnabled;
   }
 
   {
+    const previousSlowBleedExitEnabled = config.strategy.slowBleedExitEnabled;
+    config.strategy.slowBleedExitEnabled = true;
     const now = Date.now();
     const manager = managerWith(position('p1', mint, {
       openedAt: now - 61_000,
@@ -392,6 +413,7 @@ function run() {
       0,
       'slow-bleed protection must not compete with an armed trailing exit',
     );
+    config.strategy.slowBleedExitEnabled = previousSlowBleedExitEnabled;
   }
 
   {
