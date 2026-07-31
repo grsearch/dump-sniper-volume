@@ -73,6 +73,8 @@ class DumpDetector extends EventEmitter {
     this.tokenRegistry = tokenRegistry;
     this.poolStateCache = null;
     this._poolStateRefreshAt = new Map();
+    this._lastInputAt = 0;
+    this._lastParseCompletedAt = 0;
 
     // v3.17.13: 短窗口累计砸盘追踪
     //   记录每个 mint 最近 N 秒内的所有卖出,用于检测 rug
@@ -84,22 +86,33 @@ class DumpDetector extends EventEmitter {
     this._processedSigs = new Map(); // signature -> expireAt
     this._sigDedupMs = parseInt(process.env.DUMP_DETECTOR_SIG_DEDUP_MS || '60000', 10);
 
-    // 定期清理过期记录
-    this._recentSellCleanup = setInterval(() => {
-      const now = Date.now();
-      const cutoff = now - this._recentSellWindowMs;
-      for (const [mint, sells] of this._recentSells) {
-        while (sells.length > 0 && sells[0].ts < cutoff) sells.shift();
-        if (sells.length === 0) this._recentSells.delete(mint);
-      }
-      for (const [sig, expireAt] of this._processedSigs) {
-        if (expireAt <= now) this._processedSigs.delete(sig);
-      }
-      for (const [poolAddress, requestedAt] of this._poolStateRefreshAt) {
-        if (now - requestedAt >= 60_000) this._poolStateRefreshAt.delete(poolAddress);
-      }
-    }, 5_000);
+    // 定期清理过期记录，并独立证明模块仍在运行。
+    monitor.beat('DumpDetector', 'idle:no_input');
+    this._recentSellCleanup = setInterval(() => this._runMaintenance(), 5_000);
     if (this._recentSellCleanup.unref) this._recentSellCleanup.unref();
+  }
+
+  _runMaintenance(now = Date.now()) {
+    const cutoff = now - this._recentSellWindowMs;
+    for (const [mint, sells] of this._recentSells) {
+      while (sells.length > 0 && sells[0].ts < cutoff) sells.shift();
+      if (sells.length === 0) this._recentSells.delete(mint);
+    }
+    for (const [sig, expireAt] of this._processedSigs) {
+      if (expireAt <= now) this._processedSigs.delete(sig);
+    }
+    for (const [poolAddress, requestedAt] of this._poolStateRefreshAt) {
+      if (now - requestedAt >= 60_000) this._poolStateRefreshAt.delete(poolAddress);
+    }
+
+    const secondsSinceInput = this._lastInputAt > 0
+      ? Math.max(0, Math.floor((now - this._lastInputAt) / 1000))
+      : -1;
+    monitor.set('DumpDetector.secondsSinceInput', secondsSinceInput, 'DumpDetector');
+    monitor.beat(
+      'DumpDetector',
+      secondsSinceInput < 0 ? 'idle:no_input' : `idle:${secondsSinceInput}s_since_input`,
+    );
   }
 
   shutdown() {
@@ -179,18 +192,22 @@ class DumpDetector extends EventEmitter {
   }
 
   handleTransaction(txMessage) {
+    this._lastInputAt = Date.now();
+    monitor.beat('DumpDetector', 'tx:received');
+
     // v3.18: signature 去重 — 多 LS region 重推同一笔交易时跳过
     const _sig = txMessage?.transaction?.signature || txMessage?.signature;
     if (_sig) {
       const _sigStr = typeof _sig === 'string' ? _sig : bs58.encode(Uint8Array.from(_sig));
       if (this._processedSigs.has(_sigStr)) {
         monitor.inc('DumpDetector.dedupSkip', 1, 'DumpDetector');
+        monitor.beat('DumpDetector', 'tx:duplicate');
         return;
       }
       this._processedSigs.set(_sigStr, Date.now() + this._sigDedupMs);
     }
     monitor.inc('DumpDetector.txParsed', 1, 'DumpDetector');
-    monitor.beat('DumpDetector', 'parse');
+    monitor.beat('DumpDetector', 'parse:start');
     try {
       const parsed = this._parseTx(txMessage);
       if (!parsed) {
@@ -399,11 +416,12 @@ class DumpDetector extends EventEmitter {
       monitor.recordError('DumpDetector', err, {
         signature: this._extractSignature(txMessage?.transaction),
       });
-      {
       const fs = require('fs');
       fs.appendFileSync('/tmp/dd_errors.log', new Date().toISOString() + ' ' + err.message + '\n' + (err.stack || '').split('\n').slice(0,8).join('\n') + '\n---\n');
       console.error('[DumpDetector] parse error: ' + err.message);
-    }
+    } finally {
+      this._lastParseCompletedAt = Date.now();
+      monitor.beat('DumpDetector', 'parse:done');
     }
   }
 

@@ -21,6 +21,7 @@
     "test:buy-exact": "node scripts/test-exact-quote-buy.js",
     "test:price-order": "node scripts/test-price-slot-order.js",
     "test:stop-fast": "node scripts/test-stop-loss-fast-path.js",
+    "test:detector-heartbeat": "node scripts/test-dump-detector-heartbeat.js",
     "test:pricing": "node scripts/test-pump-swap-pricing.js",
     "test:pool-cache": "node scripts/test-pool-state-cache-watched.js",
     "test:pump-discovery": "node scripts/test-pump-migration-parser.js && node scripts/test-pump-migration-safety.js && node scripts/test-pump-discovery-reliability.js",
