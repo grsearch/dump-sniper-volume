@@ -55,6 +55,14 @@ function run() {
     },
   });
 
+  logger.updateRunnerState('research-position-1', true, openedAt + 2_000);
+  const restoredPosition = logger.getOpenPositions().find(
+    (row) => row.position_id === 'research-position-1',
+  );
+  assert(restoredPosition, 'open position should be restorable');
+  assert.strictEqual(restoredPosition.runner_armed, 1);
+  assert.strictEqual(restoredPosition.runner_armed_at, openedAt + 2_000);
+
   logger.logSwapEvent({
     ts: openedAt + 1_000,
     receivedAt: openedAt + 1_080,
@@ -157,6 +165,8 @@ function run() {
     'price_tick_count',
     'pre_vol_5m_pct',
     'range_support',
+    'runner_armed',
+    'runner_armed_at',
   ]) {
     assert(positionColumns.has(column), `fresh schema is missing ${column}`);
   }

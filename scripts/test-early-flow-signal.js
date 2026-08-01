@@ -3,6 +3,8 @@
 const assert = require('assert');
 const Module = require('module');
 
+process.env.EARLY_FLOW_RISK_FILTER_ENABLED = 'true';
+
 const originalLoad = Module._load;
 Module._load = function loadWithDotenvStub(request, parent, isMain) {
   if (request === 'dotenv') return { config() {} };
@@ -62,7 +64,7 @@ function signal(overrides = {}) {
   assert.strictEqual(config.earlyFlow.minMigrationAgeMs, 15_000);
   assert.strictEqual(config.earlyFlow.maxMigrationAgeMs, 25_000);
   assert.strictEqual(config.earlyFlow.minBuySol5s, 2);
-  assert.strictEqual(config.earlyFlow.riskEnabled, true);
+  assert.strictEqual(config.earlyFlow.riskEnabled, false);
   assert.strictEqual(config.earlyFlow.riskRejectScore, 4);
   assert.strictEqual(config.strategy.positionSizeSol, 0.2);
 
@@ -95,8 +97,10 @@ function signal(overrides = {}) {
   assert.strictEqual(expensive.inflightBuys.size, 0);
   assert(expensive.loggedRejects[0].startsWith('EXECUTION_PRICE_HIGH'));
 
-  const risky = engine();
-  await risky.handleEarlyFlowSignal(signal({
+  const riskFilterDisabled = engine();
+  const riskFilterDisabledOrders = [];
+  riskFilterDisabled.on('buyOrder', (order) => riskFilterDisabledOrders.push(order));
+  await riskFilterDisabled.handleEarlyFlowSignal(signal({
     executionDelayMs: 600,
     signalMigrationAgeMs: 22_000,
     fdvUsd: 20_000,
@@ -105,8 +109,12 @@ function signal(overrides = {}) {
     buySol5s: 2.2,
     largestBuyShare5s: 0.5,
   }));
-  assert.strictEqual(risky.inflightBuys.size, 0);
-  assert(risky.loggedRejects[0].startsWith('ENTRY_RISK_SCORE_HIGH'));
+  assert.strictEqual(riskFilterDisabledOrders.length, 1);
+  assert.strictEqual(
+    riskFilterDisabledOrders[0]._earlyFlowDetails.entryRiskBlocked,
+    false,
+  );
+  assert.strictEqual(riskFilterDisabledOrders[0]._earlyFlowDetails.entryRiskScore, 0);
 
   console.log('Early-flow SignalEngine tests: PASS');
   process.exit(0);

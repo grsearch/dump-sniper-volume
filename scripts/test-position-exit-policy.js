@@ -2,6 +2,15 @@
 
 process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT = '9';
 process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT = '5';
+process.env.EARLY_FLOW_RUNNER_ENABLED = 'true';
+process.env.EARLY_FLOW_RUNNER_ACTIVATE_PCT = '15';
+process.env.EARLY_FLOW_RUNNER_MAX_ACTIVATION_HOLD_MS = '60000';
+process.env.EARLY_FLOW_RUNNER_FLOW_WINDOW_MS = '3000';
+process.env.EARLY_FLOW_RUNNER_MIN_NET_FLOW_SOL = '0';
+process.env.EARLY_FLOW_RUNNER_MIN_BUY_SELL_RATIO = '1.2';
+process.env.EARLY_FLOW_RUNNER_MIN_UNIQUE_BUYERS = '3';
+process.env.EARLY_FLOW_RUNNER_CONFIRM_MS = '500';
+process.env.EARLY_FLOW_RUNNER_CONFIRM_TRADES = '2';
 process.env.EARLY_FLOW_FDV_EXIT_USD = '10000';
 process.env.EARLY_FLOW_FIXED_STOP_LOSS_PCT = '0';
 process.env.EARLY_FLOW_TAIL_STOP_ENABLED = 'true';
@@ -59,6 +68,8 @@ function position(id, mint, overrides = {}) {
     dryRun: false,
     stabilizing: false,
     trailingArmed: false,
+    runnerArmed: false,
+    runnerArmedAt: null,
     exiting: false,
     status: 'open',
     entrySignalPrice: 1,
@@ -126,13 +137,20 @@ function run() {
   assert.strictEqual(config.strategy.flowReversalExitEnabled, false);
   assert.strictEqual(config.strategy.trailingActivatePct, 9);
   assert.strictEqual(config.strategy.trailingDrawdownPct, 5);
+  assert.strictEqual(config.strategy.runnerEnabled, true);
+  assert.strictEqual(config.strategy.runnerActivatePct, 15);
+  assert.strictEqual(config.strategy.runnerMaxActivationHoldMs, 60_000);
+  assert.strictEqual(config.strategy.runnerMinBuySellRatio, 1.2);
+  assert.strictEqual(config.strategy.runnerMinUniqueBuyers, 3);
+  assert.strictEqual(config.strategy.runnerConfirmMs, 500);
+  assert.strictEqual(config.strategy.runnerConfirmTrades, 2);
   assert.strictEqual(config.strategy.tailStopEnabled, false);
   assert.strictEqual(config.strategy.tailStopPnlPct, -30);
   assert.strictEqual(config.strategy.tailStopConfirmMs, 500);
   assert.strictEqual(config.strategy.tailStopConfirmTrades, 2);
   assert.strictEqual(config.strategy.catastrophicStopPnlPct, -50);
   assert.strictEqual(config.strategy.catastrophicStopEnabled, true);
-  assert.strictEqual(config.strategy.slowBleedExitEnabled, true);
+  assert.strictEqual(config.strategy.slowBleedExitEnabled, false);
   assert.strictEqual(config.strategy.slowBleedMinHoldMs, 60_000);
   assert.strictEqual(config.strategy.emaExitEnabled, true);
   assert.strictEqual(config.strategy.fdvExitUsd, 10_000);
@@ -165,6 +183,116 @@ function run() {
     assert.strictEqual(manager._exitCalls.length, 0);
     manager._checkExit('p1', 1.03);
     assert.strictEqual(manager._exitCalls[0].reason, 'TRAILING_STOP');
+  }
+
+  {
+    const now = Date.now();
+    const pos = position('runner-1', mint, {
+      openedAt: now - 20_000,
+      reconciledAt: now - 20_000,
+      trailingArmed: true,
+      highWaterMark: 1.16,
+      _armedHwm: 1.16,
+    });
+    const manager = managerWith(pos);
+    manager._runnerPersisted = null;
+    manager.tradeLogger = {
+      updateRunnerState(positionId, armed, armedAt) {
+        manager._runnerPersisted = { positionId, armed, armedAt };
+      },
+      logPositionResearchEvent() {},
+    };
+    const metrics = {
+      holdMs: 20_000,
+      marketPnlPct: 16,
+      peakPnlPct: 16,
+      windows: {
+        '3s': {
+          netFlowSol: 1.2,
+          buySellRatio: 1.5,
+          uniqueBuyers: 3,
+          vwap: 1.12,
+        },
+      },
+    };
+    assert.strictEqual(manager._maybeArmRunner(
+      pos,
+      exitSwap(mint, now, {
+        side: 'BUY',
+        price: 1.16,
+        signer: 'runner-buyer-1',
+        signature: 'runner-confirm-1',
+      }),
+      metrics,
+    ), false);
+    assert.strictEqual(manager._maybeArmRunner(
+      pos,
+      exitSwap(mint, now + 600, {
+        side: 'BUY',
+        price: 1.17,
+        signer: 'runner-buyer-2',
+        signature: 'runner-confirm-2',
+      }),
+      metrics,
+    ), true);
+    assert.strictEqual(pos.runnerArmed, true, 'confirmed demand must arm live runner mode');
+    assert.deepStrictEqual(
+      manager._runnerPersisted,
+      { positionId: pos.positionId, armed: true, armedAt: now + 600 },
+      'runner activation must survive a service restart',
+    );
+    manager._checkExit(pos.positionId, 1.08);
+    assert.strictEqual(
+      manager._exitCalls[0].reason,
+      'RUNNER_TRAILING_STOP',
+      '15-25% runner tier must protect the +8% profit floor',
+    );
+  }
+
+  {
+    const pos = position('runner-2', mint, {
+      trailingArmed: true,
+      runnerArmed: true,
+      highWaterMark: 1.30,
+      _armedHwm: 1.30,
+    });
+    const manager = managerWith(pos);
+    manager._checkExit(pos.positionId, 1.18);
+    assert.strictEqual(manager._exitCalls.length, 0);
+    manager._checkExit(pos.positionId, 1.17);
+    assert.strictEqual(manager._exitCalls[0].reason, 'RUNNER_TRAILING_STOP');
+  }
+
+  {
+    const now = Date.now();
+    const pos = position('runner-flow', mint, {
+      openedAt: now - 20_000,
+      reconciledAt: now - 20_000,
+      trailingArmed: true,
+      highWaterMark: 1.16,
+      _armedHwm: 1.16,
+    });
+    const manager = managerWith(pos);
+    const buys = [
+      [-800, 1.13, 'flow-buyer-1', 'flow-buy-1'],
+      [-600, 1.14, 'flow-buyer-2', 'flow-buy-2'],
+      [0, 1.16, 'flow-buyer-3', 'flow-buy-3'],
+      [600, 1.17, 'flow-buyer-4', 'flow-buy-4'],
+    ];
+    for (const [offset, price, signer, signature] of buys) {
+      manager.handleSwapForExit(exitSwap(mint, now + offset, {
+        side: 'BUY',
+        price,
+        solVolume: 0.5,
+        signer,
+        signature,
+      }));
+    }
+    assert.strictEqual(
+      pos.runnerArmed,
+      true,
+      'live swap aggregation must arm runner after sustained distributed buying',
+    );
   }
 
   {

@@ -6,6 +6,18 @@ function finite(value, fallback = 0) {
 }
 
 function evaluateEarlyFlowEntryRisk(details = {}, strategy = {}) {
+  const enabled = strategy.riskEnabled !== false;
+  const rejectScore = Math.max(1, finite(strategy.riskRejectScore, 4));
+  if (!enabled) {
+    return {
+      enabled: false,
+      score: 0,
+      rejectScore,
+      blocked: false,
+      reasons: [],
+    };
+  }
+
   const reasons = [];
   const add = (condition, reason) => {
     if (condition) reasons.push(reason);
@@ -44,8 +56,6 @@ function evaluateEarlyFlowEntryRisk(details = {}, strategy = {}) {
   );
 
   const score = reasons.length;
-  const rejectScore = Math.max(1, finite(strategy.riskRejectScore, 4));
-  const enabled = strategy.riskEnabled !== false;
   return {
     enabled,
     score,

@@ -49,6 +49,64 @@ const config = {
     trailingDrawdownPct: parseFloat(process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT || '5'),
     trailingMinHwmAgeMs: 0,
 
+    // Live runner upgrade. A position first arms the normal 9%/5% trailing
+    // stop, then permanently switches to tiered trailing after sustained
+    // post-entry demand confirms that the move can keep running.
+    runnerEnabled: (process.env.EARLY_FLOW_RUNNER_ENABLED ?? 'true').toLowerCase() === 'true',
+    runnerActivatePct: parseFloat(process.env.EARLY_FLOW_RUNNER_ACTIVATE_PCT || '15'),
+    runnerMaxActivationHoldMs: parseInt(
+      process.env.EARLY_FLOW_RUNNER_MAX_ACTIVATION_HOLD_MS || '60000',
+      10,
+    ),
+    runnerFlowWindowMs: parseInt(
+      process.env.EARLY_FLOW_RUNNER_FLOW_WINDOW_MS || '3000',
+      10,
+    ),
+    runnerMinNetFlowSol: parseFloat(
+      process.env.EARLY_FLOW_RUNNER_MIN_NET_FLOW_SOL || '0',
+    ),
+    runnerMinBuySellRatio: parseFloat(
+      process.env.EARLY_FLOW_RUNNER_MIN_BUY_SELL_RATIO || '1.2',
+    ),
+    runnerMinUniqueBuyers: parseInt(
+      process.env.EARLY_FLOW_RUNNER_MIN_UNIQUE_BUYERS || '3',
+      10,
+    ),
+    runnerConfirmMs: parseInt(
+      process.env.EARLY_FLOW_RUNNER_CONFIRM_MS || '500',
+      10,
+    ),
+    runnerConfirmTrades: parseInt(
+      process.env.EARLY_FLOW_RUNNER_CONFIRM_TRADES || '2',
+      10,
+    ),
+    runnerTiers: [
+      {
+        minPeakPct: 15,
+        maxPeakPct: 25,
+        drawdownPct: parseFloat(
+          process.env.EARLY_FLOW_RUNNER_TIER_1_DRAWDOWN_PCT || '8',
+        ),
+        floorPct: parseFloat(process.env.EARLY_FLOW_RUNNER_TIER_1_FLOOR_PCT || '8'),
+      },
+      {
+        minPeakPct: 25,
+        maxPeakPct: 50,
+        drawdownPct: parseFloat(
+          process.env.EARLY_FLOW_RUNNER_TIER_2_DRAWDOWN_PCT || '10',
+        ),
+        floorPct: parseFloat(process.env.EARLY_FLOW_RUNNER_TIER_2_FLOOR_PCT || '15'),
+      },
+      {
+        minPeakPct: 50,
+        maxPeakPct: Infinity,
+        drawdownPct: parseFloat(
+          process.env.EARLY_FLOW_RUNNER_TIER_3_DRAWDOWN_PCT || '15',
+        ),
+        floorPct: parseFloat(process.env.EARLY_FLOW_RUNNER_TIER_3_FLOOR_PCT || '30'),
+      },
+    ],
+
     // RSI is entry analytics only. Both 1-minute and 5-second RSI exits are disabled.
     rsi1mExitEnabled: false,
     rsi1mExitThreshold: parseFloat(process.env.RSI_1M_EXIT_THRESHOLD || '80'),
@@ -158,9 +216,9 @@ const config = {
     catastrophicStopPnlPct: parseFloat(
       process.env.EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT || '-50',
     ),
-    // Enabled for live trading. This only runs before trailing arms and needs
-    // sustained weak price/action confirmation before exiting.
-    slowBleedExitEnabled: true,
+    // Hard-disabled for live trading. Stale server environment values must not
+    // reactivate the slow-bleed exit.
+    slowBleedExitEnabled: false,
     slowBleedMinHoldMs: parseInt(
       process.env.EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS || '60000',
       10,
@@ -339,8 +397,8 @@ const config = {
       process.env.EARLY_FLOW_MAX_EXECUTION_PRICE_DEVIATION_PCT || '15',
     ),
     marketFreshMs: parseInt(process.env.EARLY_FLOW_MARKET_FRESH_MS || '1500', 10),
-    riskEnabled:
-      (process.env.EARLY_FLOW_RISK_FILTER_ENABLED ?? 'true').toLowerCase() === 'true',
+    // Hard-disabled so stale server environment values cannot reject entries.
+    riskEnabled: false,
     riskRejectScore: parseInt(
       process.env.EARLY_FLOW_RISK_REJECT_SCORE || '4',
       10,
@@ -565,8 +623,8 @@ const config = {
     marketRetries: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRIES || '8', 10),
     marketRetryMs: parseInt(process.env.PUMP_DISCOVERY_MARKET_RETRY_MS || '3000', 10),
     maxConcurrentChecks: parseInt(process.env.PUMP_DISCOVERY_MAX_CONCURRENT_CHECKS || '3', 10),
-    auditEnabled:
-      (process.env.PUMP_DISCOVERY_AUDIT_ENABLED ?? 'true').toLowerCase() === 'true',
+    // Hard-disabled so discovery admission depends only on the market filters.
+    auditEnabled: false,
     auditPreSlots: parseInt(process.env.PUMP_DISCOVERY_AUDIT_PRE_SLOTS || '10', 10),
     auditLargeTransferTokens: parseFloat(
       process.env.PUMP_DISCOVERY_AUDIT_LARGE_TRANSFER_TOKENS || '100000000',

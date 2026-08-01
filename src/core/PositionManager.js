@@ -309,6 +309,7 @@ class PositionManager extends EventEmitter {
     const tailStopEnabled = !!s.tailStopEnabled;
     const catastrophicStopEnabled = !!s.catastrophicStopEnabled;
     const slowBleedExitEnabled = !!s.slowBleedExitEnabled;
+    const runnerEnabled = !!s.runnerEnabled;
     const addonShadowEnabled = !!config.addonShadow?.enabled;
     const legacyFlowEnabled = !s.dedicatedExitOnly && !!s.flowReversalExitEnabled;
     const researchEnabled = !!config.capture.positionResearchEnabled;
@@ -318,6 +319,7 @@ class PositionManager extends EventEmitter {
         !tailStopEnabled &&
         !catastrophicStopEnabled &&
         !slowBleedExitEnabled &&
+        !runnerEnabled &&
         !addonShadowEnabled &&
         !legacyFlowEnabled &&
         !researchEnabled
@@ -387,6 +389,7 @@ class PositionManager extends EventEmitter {
         catastrophicStopEnabled &&
         this._maybeCatastrophicGapStop(pos, ev, metrics)
       ) break;
+      if (runnerEnabled) this._maybeArmRunner(pos, ev, metrics);
       if (tailStopEnabled && this._maybeConfirmedTailStop(pos, ev, metrics)) break;
       if (
         slowBleedExitEnabled &&
@@ -417,6 +420,9 @@ class PositionManager extends EventEmitter {
         : 0,
       s.slowBleedExitEnabled
         ? (s.slowBleedFlowWindowMs || 3_000) * 2
+        : 0,
+      s.runnerEnabled
+        ? (s.runnerFlowWindowMs || 3_000) * 2
         : 0,
       config.addonShadow?.enabled ? 7_000 : 0,
       config.capture.positionResearchEnabled
@@ -597,6 +603,8 @@ class PositionManager extends EventEmitter {
       signalChangePct,
       preEntryVwapChangePct,
       trailingArmed,
+      runnerArmed: !!pos.runnerArmed,
+      runnerArmedAt: Number(pos.runnerArmedAt) || null,
       trailingActivatePct: Number(config.strategy.trailingActivatePct) || 0,
       trailingDrawdownPct: Number(config.strategy.trailingDrawdownPct) || 0,
       windows,
@@ -644,6 +652,190 @@ class PositionManager extends EventEmitter {
         marketFetchedAt: Number(event?.marketFetchedAt) || null,
       },
     };
+  }
+
+  _resetRunnerCandidate(pos) {
+    if (!pos) return;
+    pos._runnerFirstSeenAt = null;
+    pos._runnerSignatures = null;
+  }
+
+  _runnerTierForPeak(peakPnlPct) {
+    const tiers = Array.isArray(config.strategy.runnerTiers)
+      ? config.strategy.runnerTiers
+      : [];
+    if (tiers.length === 0 || !Number.isFinite(Number(peakPnlPct))) return null;
+    if (peakPnlPct < Number(tiers[0].minPeakPct)) return tiers[0];
+    return tiers.find((tier) => (
+      peakPnlPct + 1e-9 >= Number(tier.minPeakPct) &&
+      peakPnlPct < Number(tier.maxPeakPct)
+    )) || tiers[tiers.length - 1] || null;
+  }
+
+  _runnerTrailingProfile(pos, peakPnlPct) {
+    if (!config.strategy.runnerEnabled || !pos?.runnerArmed) {
+      return {
+        runner: false,
+        tier: null,
+        drawdownPct: Number(config.strategy.trailingDrawdownPct) || 0,
+        floorPct: null,
+      };
+    }
+    const tier = this._runnerTierForPeak(peakPnlPct);
+    return {
+      runner: true,
+      tier,
+      drawdownPct: Number(tier?.drawdownPct) || Number(config.strategy.trailingDrawdownPct) || 0,
+      floorPct: Number.isFinite(Number(tier?.floorPct)) ? Number(tier.floorPct) : null,
+    };
+  }
+
+  _maybeArmRunner(pos, event, researchMetrics = null) {
+    const s = config.strategy;
+    if (
+      !s.runnerEnabled ||
+      !pos ||
+      pos.runnerArmed ||
+      pos.exiting ||
+      pos.status === 'stuck' ||
+      (!pos.reconciled && !pos.dryRun) ||
+      !pos.trailingArmed ||
+      !this._isTrustedLossEvent(pos, event)
+    ) {
+      if (!pos?.runnerArmed) this._resetRunnerCandidate(pos);
+      return false;
+    }
+
+    const now = Number(event?.receivedAt) || Date.now();
+    const holdStart = Number(pos.openedAt) || Number(pos.reconciledAt) || now;
+    const holdMs = now - holdStart;
+    if (holdMs < 0 || holdMs > s.runnerMaxActivationHoldMs) {
+      this._resetRunnerCandidate(pos);
+      return false;
+    }
+
+    const metrics = researchMetrics || this._buildPositionResearchMetrics(pos, event);
+    const peakPnlPct = Number(metrics?.peakPnlPct);
+    const price = Number(event?.price);
+    const windowKey = `${(s.runnerFlowWindowMs || 3_000) / 1000}s`;
+    let flow = metrics?.windows?.[windowKey];
+    if (!flow) {
+      const events = (this._flowExitEvents.get(pos.mint) || []).filter((item) => !(
+        item.signature && pos.buySignature && item.signature === pos.buySignature
+      ));
+      flow = this._researchWindowStats(
+        events,
+        now - (s.runnerFlowWindowMs || 3_000),
+        now,
+        s.runnerFlowWindowMs || 3_000,
+      );
+    }
+
+    const netFlowSol = Number(flow?.netFlowSol);
+    const buySellRatio = Number(flow?.buySellRatio);
+    const uniqueBuyers = Number(flow?.uniqueBuyers);
+    const vwap = Number(flow?.vwap);
+    const candidate =
+      Number.isFinite(peakPnlPct) &&
+      peakPnlPct + 1e-9 >= s.runnerActivatePct &&
+      Number.isFinite(netFlowSol) &&
+      netFlowSol > s.runnerMinNetFlowSol &&
+      Number.isFinite(buySellRatio) &&
+      buySellRatio >= s.runnerMinBuySellRatio &&
+      Number.isFinite(uniqueBuyers) &&
+      uniqueBuyers >= s.runnerMinUniqueBuyers &&
+      Number.isFinite(vwap) &&
+      vwap > 0 &&
+      Number.isFinite(price) &&
+      price > vwap;
+
+    if (!candidate) {
+      this._resetRunnerCandidate(pos);
+      return false;
+    }
+
+    const signature = String(event.signature);
+    if (!pos._runnerFirstSeenAt) {
+      pos._runnerFirstSeenAt = now;
+      pos._runnerSignatures = new Set([signature]);
+      monitor.inc('PositionManager.runnerCandidate', 1, 'PositionManager');
+      this._recordPositionResearchEvent(pos, event, 'RUNNER_CANDIDATE', metrics, {
+        runner: {
+          stage: 'candidate',
+          peakPnlPct,
+          holdMs,
+          netFlowSol,
+          buySellRatio,
+          uniqueBuyers,
+          price,
+          vwap,
+          confirmMs: s.runnerConfirmMs,
+          requiredSignatures: s.runnerConfirmTrades,
+        },
+      });
+      return false;
+    }
+
+    if (!(pos._runnerSignatures instanceof Set)) {
+      pos._runnerSignatures = new Set();
+    }
+    pos._runnerSignatures.add(signature);
+    const confirmElapsedMs = now - pos._runnerFirstSeenAt;
+    const signatureCount = pos._runnerSignatures.size;
+    if (
+      confirmElapsedMs < s.runnerConfirmMs ||
+      signatureCount < s.runnerConfirmTrades
+    ) {
+      return false;
+    }
+
+    pos.runnerArmed = true;
+    pos.runnerArmedAt = now;
+    try {
+      this.tradeLogger?.stmts?.updatePeak?.run({
+        positionId: pos.positionId,
+        peakPrice: pos.highWaterMark,
+        peakTs: pos.highWaterMarkTs || now,
+        peakPnlPct,
+      });
+      this.tradeLogger?.updateRunnerState?.(pos.positionId, true, now);
+    } catch (err) {
+      console.warn(
+        `[PositionManager] RUNNER_STATE_PERSIST_FAILED ${pos.symbol || pos.mint.slice(0, 6)}: ` +
+          err.message,
+      );
+      monitor.recordError('PositionManager', err, {
+        phase: 'runner_state_persist',
+        positionId: pos.positionId,
+      });
+    }
+    const tier = this._runnerTierForPeak(peakPnlPct);
+    this._resetRunnerCandidate(pos);
+    console.log(
+      `[PositionManager] RUNNER_ARMED ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `hold=${holdMs}ms peak=+${peakPnlPct.toFixed(2)}% ` +
+        `buy/sell=${buySellRatio.toFixed(2)} buyers3s=${uniqueBuyers} ` +
+        `net3s=${netFlowSol.toFixed(3)}SOL confirm=${signatureCount}/${confirmElapsedMs}ms ` +
+        `tier=${Number(tier?.drawdownPct) || 0}%/${Number(tier?.floorPct) || 0}%`,
+    );
+    monitor.inc('PositionManager.runnerArmed', 1, 'PositionManager');
+    this._recordPositionResearchEvent(pos, event, 'RUNNER_ARMED', metrics, {
+      runner: {
+        stage: 'confirmed',
+        peakPnlPct,
+        holdMs,
+        netFlowSol,
+        buySellRatio,
+        uniqueBuyers,
+        price,
+        vwap,
+        confirmElapsedMs,
+        signatureCount,
+        irreversible: true,
+        tier,
+      },
+    });
+    return true;
   }
 
   _recordPositionResearchEvent(pos, event, eventType, metrics, extra = {}) {
@@ -2052,6 +2244,10 @@ class PositionManager extends EventEmitter {
           const peakPnlPct = ((row.peak_price - row.entry_price) / row.entry_price) * 100;
           return peakPnlPct >= activatePct;
         })(),
+        runnerArmed: Number(row.runner_armed) === 1,
+        runnerArmedAt: Number(row.runner_armed_at) || null,
+        _runnerFirstSeenAt: null,
+        _runnerSignatures: null,
         // v3.17.28: 恢复 armedHwm，确保重启后 trailing drawdown 计算正确
         _armedHwm: (() => {
           if (!row.peak_price || row.peak_price <= 0) return undefined;
@@ -2161,6 +2357,8 @@ class PositionManager extends EventEmitter {
       highWaterMark: entryPrice,
       highWaterMarkTs: Date.now(),
       trailingArmed: false,
+      runnerArmed: false,
+      runnerArmedAt: null,
       entrySignalPrice: Number(entrySignalPrice) || entryPrice,
       preEntryVwap5s: Number(preEntryVwap5s) || Number(entrySignalPrice) || entryPrice,
       preEntryUniqueBuyers3s: Number(preEntryUniqueBuyers3s) || 0,
@@ -2173,6 +2371,8 @@ class PositionManager extends EventEmitter {
       _tailStopFirstSeenAt: null,
       _tailStopLastSignature: null,
       _tailStopSignatures: null,
+      _runnerFirstSeenAt: null,
+      _runnerSignatures: null,
       _slowBleedFirstSeenAt: null,
       _slowBleedSignatures: null,
       _addonShadowLowPrice: entryPrice,
@@ -2674,6 +2874,9 @@ class PositionManager extends EventEmitter {
     pos.highWaterMark = pos.entryPrice;
     pos.highWaterMarkTs = Date.now();
     pos.trailingArmed = false;
+    pos.runnerArmed = false;
+    pos.runnerArmedAt = null;
+    this._resetRunnerCandidate(pos);
     pos._addonShadowLowPrice = pos.entryPrice;
     pos._addonShadowSignaled = false;
     this._resetTailStopCandidate(pos);
@@ -3495,16 +3698,54 @@ class PositionManager extends EventEmitter {
       if (pos.trailingArmed) {
         pos._armedHwm = Math.max(pos._armedHwm || 0, pos.highWaterMark);
         const drawdownPct = ((pos._armedHwm - price) / pos._armedHwm) * 100;
-        if (drawdownPct + 1e-9 >= config.strategy.trailingDrawdownPct) {
+        const profile = this._runnerTrailingProfile(pos, peakPnlPct);
+        const drawdownStopPrice = pos._armedHwm * (1 - profile.drawdownPct / 100);
+        const floorStopPrice = profile.floorPct == null
+          ? 0
+          : pos.entryPrice * (1 + profile.floorPct / 100);
+        const effectiveStopPrice = Math.max(drawdownStopPrice, floorStopPrice);
+        if (profile.drawdownPct > 0 && price <= effectiveStopPrice + Number.EPSILON) {
           pos._exitTriggeredAt = pos._exitTriggeredAt || now;
           pos._exitMarketTs = pos._exitMarketTs || context?.marketTs || null;
           pos._exitTriggerSource = pos._exitTriggerSource || context?.source || 'price_check';
+          const reason = profile.runner ? 'RUNNER_TRAILING_STOP' : 'TRAILING_STOP';
           console.log(
-            `[PositionManager] TRAILING_STOP ${pos.symbol || pos.mint.slice(0, 6)} ` +
+            `[PositionManager] ${reason} ${pos.symbol || pos.mint.slice(0, 6)} ` +
               `peak=+${peakPnlPct.toFixed(2)}% drawdown=${drawdownPct.toFixed(2)}% ` +
-              `threshold=${config.strategy.trailingDrawdownPct}%`,
+              `threshold=${profile.drawdownPct}% ` +
+              `${profile.runner ? `floor=+${profile.floorPct}% stop=${effectiveStopPrice.toExponential(4)}` : ''}`,
           );
-          this._exitForCondition(pos, price, 'TRAILING_STOP');
+          this._recordPositionResearchEvent(
+            pos,
+            {
+              ts: context?.marketTs || now,
+              receivedAt: context?.receivedAt || now,
+              price,
+              slot: context?.slot || null,
+              signature: context?.signature || null,
+            },
+            profile.runner ? 'RUNNER_TRAILING_STOP_TRIGGER' : 'TRAILING_STOP_TRIGGER',
+            {
+              ...(pos._lastResearchMetrics || {}),
+              holdMs: now - (Number(pos.openedAt) || now),
+              marketPnlPct: pnlPct,
+              peakPnlPct,
+              drawdownPct,
+              runnerArmed: !!pos.runnerArmed,
+            },
+            {
+              trailing: {
+                runner: profile.runner,
+                drawdownPct: profile.drawdownPct,
+                floorPct: profile.floorPct,
+                drawdownStopPrice,
+                floorStopPrice: profile.floorPct == null ? null : floorStopPrice,
+                effectiveStopPrice,
+                tier: profile.tier,
+              },
+            },
+          );
+          this._exitForCondition(pos, price, reason);
         }
       }
       return;

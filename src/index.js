@@ -59,6 +59,14 @@ async function main() {
     'Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; ' +
       `EMA${config.strategy.emaFastPeriod}/EMA${config.strategy.emaSlowPeriod} down-cross; ` +
       `trailing +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% ` +
+      `${config.strategy.runnerEnabled
+        ? `with LIVE runner +${config.strategy.runnerActivatePct}% <=` +
+          `${config.strategy.runnerMaxActivationHoldMs / 1000}s, ` +
+          `${config.strategy.runnerConfirmMs}ms/${config.strategy.runnerConfirmTrades} signatures, ` +
+          `tiers 15-25:${config.strategy.runnerTiers[0].drawdownPct}/${config.strategy.runnerTiers[0].floorPct}, ` +
+          `25-50:${config.strategy.runnerTiers[1].drawdownPct}/${config.strategy.runnerTiers[1].floorPct}, ` +
+          `50+:${config.strategy.runnerTiers[2].drawdownPct}/${config.strategy.runnerTiers[2].floorPct}; `
+        : 'runner disabled; '}` +
       `and FDV <$${config.strategy.fdvExitUsd}; ` +
       `${config.strategy.tailStopEnabled
         ? `unarmed tail ${config.strategy.tailStopPnlPct}% for ` +

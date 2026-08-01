@@ -24,7 +24,8 @@ Solana / Pump.fun 实时交易机器人。当前唯一自动策略是
 - 超时后本次迁移不再买入。
 
 旧的1分钟成交额、RSI、最低成交量、1分钟买家数、大单占比、爆量、TPS、大砸单和
-多窗口反转均不参与买入。每笔仓位默认 **0.2 SOL**，同币已有仓位时不加仓。
+多窗口反转均不参与买入。风险评分已关闭，基础条件通过后不会再因评分被拒绝。
+每笔仓位默认 **0.2 SOL**，同币已有仓位时不加仓。
 
 买入判断完全复用实时 swap 和内存池状态，不增加 DEX Screener、Birdeye 或 RPC 请求。
 构造 BUY 前仍会强制刷新池状态，并使用 PumpSwap SDK 的 `buy_exact_quote_in`；刷新后的
@@ -40,13 +41,10 @@ Solana / Pump.fun 实时交易机器人。当前唯一自动策略是
    - 下穿后等待收盘时刻至少500ms，并在下一笔可信成交上执行。
 2. **移动止盈：上涨9%激活，从最高点回撤5%卖出**。
 3. **实时 FDV < $10,000** 时应急退出。
-4. **慢性弱势退出**：仅在移动止盈尚未激活时运行；持仓至少60秒、最高盈利
-   低于9%、当前市场PnL不高于-5%，且最近3秒卖买比不低于1.5、独立买家
-   不超过2、净资金流为负。状态持续至少500ms并由2个不同签名确认后卖出。
-5. 迁移 AGE **>30分钟**仍未退出时，以 `TOKEN_AGE_EXPIRED` 平仓并移出监控。
+4. 迁移 AGE **>30分钟**仍未退出时，以 `TOKEN_AGE_EXPIRED` 平仓并移出监控。
 
 固定止损、确认尾部止损、固定止盈、RSI卖出、流动反转、趋势/区间止损、
-防御模式和其他旧自动卖出策略均关闭。亏损保护保留慢性弱势退出，以及可信
+慢性弱势退出、防御模式和其他旧自动卖出策略均关闭。亏损保护仅保留可信
 单笔成交达到 -50% 时触发的灾难保护。该策略允许单笔出现较大浮亏，应继续
 使用小仓位验证。
 
@@ -74,16 +72,8 @@ Solana / Pump.fun 实时交易机器人。当前唯一自动策略是
 - Helius WebSocket实时检测Pump.fun migrate / migrateV2。
 - 迁移钱包轮询每5秒补漏。
 - 从确认交易保存mint、pool、vault、blockTime、slot和signature。
-- 符合监控列表FDV与LP条件后，逐块审计迁移前10个slot到程序实际发现迁移时的slot；
-  同一个slot内的其他交易也全部检查，不依赖地址签名分页。
-- 同时解析目标mint的SPL指令和`preTokenBalances/postTokenBalances`真实余额变化，
-  因此Pump内部swap即使没有标准`TransferChecked`也能识别，原始数量统一按decimals换算。
-- 审计发现目标mint的`MintTo`、单笔转移超过1亿枚或总供应量5%、同一交易内外部账户
-  买入并同时Migrate时拒绝加入；同交易买入不设金额下限。
-- Migrate交易中，迁移调用者余币，以及bonding curve、pool authority和
-  `pool_base_vault`之间的正常建池动作不作为买入或大额转移；外部钱包收币不豁免。
-- 审计失败默认拒绝加入，拒绝日志保留slot、完整签名、转账数量、供应量占比和账户证据。
-- 审计通过后才加入监控列表，不使用mint创建年龄过滤。
+- 迁移安全审计已关闭，不检查`MintTo`、大额转移或同交易买入。
+- 发现后的准入只使用监控列表FDV与LP条件，不使用mint创建年龄过滤。
 
 ## 数据留存
 
@@ -134,7 +124,7 @@ EARLY_FLOW_EXECUTION_WINDOW_MS=3000
 EARLY_FLOW_MAX_EXECUTION_PRICE_DEVIATION_PCT=15
 EARLY_FLOW_MARKET_FRESH_MS=1500
 
-EARLY_FLOW_RISK_FILTER_ENABLED=true
+EARLY_FLOW_RISK_FILTER_ENABLED=false
 EARLY_FLOW_RISK_REJECT_SCORE=4
 EARLY_FLOW_RISK_MIN_UNIQUE_BUYERS_5S=6
 EARLY_FLOW_RISK_MIN_BUY_SOL_5S=3
@@ -152,6 +142,21 @@ EARLY_FLOW_EMA_RESET_GAP_MS=300000
 EARLY_FLOW_EMA_EXECUTION_DELAY_MS=500
 EARLY_FLOW_TRAILING_ACTIVATE_PCT=9
 EARLY_FLOW_TRAILING_DRAWDOWN_PCT=5
+EARLY_FLOW_RUNNER_ENABLED=true
+EARLY_FLOW_RUNNER_ACTIVATE_PCT=15
+EARLY_FLOW_RUNNER_MAX_ACTIVATION_HOLD_MS=60000
+EARLY_FLOW_RUNNER_FLOW_WINDOW_MS=3000
+EARLY_FLOW_RUNNER_MIN_NET_FLOW_SOL=0
+EARLY_FLOW_RUNNER_MIN_BUY_SELL_RATIO=1.2
+EARLY_FLOW_RUNNER_MIN_UNIQUE_BUYERS=3
+EARLY_FLOW_RUNNER_CONFIRM_MS=500
+EARLY_FLOW_RUNNER_CONFIRM_TRADES=2
+EARLY_FLOW_RUNNER_TIER_1_DRAWDOWN_PCT=8
+EARLY_FLOW_RUNNER_TIER_1_FLOOR_PCT=8
+EARLY_FLOW_RUNNER_TIER_2_DRAWDOWN_PCT=10
+EARLY_FLOW_RUNNER_TIER_2_FLOOR_PCT=15
+EARLY_FLOW_RUNNER_TIER_3_DRAWDOWN_PCT=15
+EARLY_FLOW_RUNNER_TIER_3_FLOOR_PCT=30
 EARLY_FLOW_FDV_EXIT_USD=10000
 EARLY_FLOW_FIXED_STOP_LOSS_PCT=0
 EARLY_FLOW_TAIL_STOP_ENABLED=false
@@ -160,7 +165,7 @@ EARLY_FLOW_TAIL_STOP_CONFIRM_MS=500
 EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES=2
 EARLY_FLOW_CATASTROPHIC_STOP_ENABLED=true
 EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT=-50
-EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED=true
+EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED=false
 EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS=60000
 EARLY_FLOW_SLOW_BLEED_MAX_PEAK_PNL_PCT=9
 EARLY_FLOW_SLOW_BLEED_MAX_PNL_PCT=-5
@@ -224,9 +229,24 @@ POSITION_RESEARCH_FLUSH_MAX=1000
 
 启动日志应显示：
 
+### Live Runner trailing
+
+Runner is a live exit mode, not a shadow signal. Normal positions use the
+`+9% / 5%` trailing stop. A position that reaches `+15%` within 60 seconds is
+upgraded permanently when 3-second order flow stays positive for 500ms across
+two distinct transactions, buy/sell is at least 1.2, there are at least three
+buyers, and price remains above the 3-second VWAP.
+
+- Peak 15-25%: 8% drawdown with a +8% profit floor.
+- Peak 25-50%: 10% drawdown with a +15% profit floor.
+- Peak 50% or more: 15% drawdown with a +30% profit floor.
+
+The effective exit price is the tighter of the peak drawdown stop and the
+profit floor. FDV, EMA, catastrophic, and token-age exits remain independent.
+
 ~~~text
-Entry: EARLY_FLOW (...) with LIVE composite risk rejection at score >=4
-Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +9% / drawdown 5%; tail stop disabled; unarmed slow-bleed confirmation after 60s; trusted single-swap catastrophe at -50%; FDV <$10000 (plus token-age exit)
+Entry: EARLY_FLOW (...) with risk score disabled
+Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +9% / drawdown 5%; LIVE runner tiers; tail stop disabled; slow bleed disabled; trusted single-swap catastrophe at -50%; FDV <$10000 (plus token-age exit)
 Early invalidation: shadow (3-15s, peak<3%, VWAP break<=-3%, sell/buy>=1.5, confirm=2/500ms)
 Add-on shadow: research only; first entry and any real add-on exit independently
 Position research telemetry: enabled (window=10s, flush=250ms)

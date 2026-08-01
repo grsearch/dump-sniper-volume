@@ -112,7 +112,9 @@ class TradeLogger {
         last_retry_at INTEGER,
         last_error TEXT,
         pending_sell_signature TEXT,
-        stuck_reason TEXT
+        stuck_reason TEXT,
+        runner_armed INTEGER DEFAULT 0,
+        runner_armed_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_positions_opened ON positions(opened_at);
       CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
@@ -269,6 +271,8 @@ class TradeLogger {
       'pre_entry_vwap_5s REAL',
       'pre_entry_unique_buyers_3s INTEGER',
       'entry_metrics_json TEXT',
+      'runner_armed INTEGER DEFAULT 0',
+      'runner_armed_at INTEGER',
     ];
     for (const definition of positionResearchColumns) {
       try {
@@ -454,6 +458,13 @@ class TradeLogger {
           peak_price = @peakPrice,
           peak_ts = @peakTs,
           peak_pnl_pct = @peakPnlPct
+        WHERE position_id = @positionId
+      `),
+
+      updateRunnerState: this.db.prepare(`
+        UPDATE positions SET
+          runner_armed = @runnerArmed,
+          runner_armed_at = @runnerArmedAt
         WHERE position_id = @positionId
       `),
 
@@ -785,6 +796,14 @@ class TradeLogger {
         buyFeeLamports: buyFeeLamports ?? 0,
       });
     }
+  }
+
+  updateRunnerState(positionId, runnerArmed, runnerArmedAt = null) {
+    this.stmts.updateRunnerState.run({
+      positionId,
+      runnerArmed: runnerArmed ? 1 : 0,
+      runnerArmedAt: runnerArmedAt || null,
+    });
   }
 
   closePosition(positionId, { closedAt, exitPrice, exitSol, pnlSol, pnlPct, exitReason, sellSignature, peakPnlPct, peakPrice, peakTs, timeToPeakMs, priceTickCount }) {
