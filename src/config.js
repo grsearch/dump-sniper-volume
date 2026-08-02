@@ -582,23 +582,6 @@ const config = {
     autoUnwrapMinLamports: Math.floor(
       parseFloat(process.env.WSOL_AUTO_UNWRAP_MIN_SOL || '0.01') * 1e9,
     ),
-    jupiterEscrowAlertMinSol: parseFloat(
-      process.env.JUPITER_ESCROW_ALERT_MIN_SOL || '0.01',
-    ),
-    // Phase 1 is intentionally monitor-only for accounts not owned by our wallet.
-    jupiterEscrowAutoSettle: false,
-    jupiterEscrowAccounts: String(
-      process.env.JUPITER_ESCROW_WSOL_ACCOUNTS ||
-        'DmrQLy5nVJNnRrP8RimSuW8GJxvcjByizcYVzcyFEJFZ:FtgZ6iPt4PjyHVyWRRhsooGVwA2U2vfDrTwtiStdqrXS',
-    )
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter(Boolean)
-      .map((entry) => {
-        const [address, owner] = entry.split(':').map((value) => value?.trim());
-        return { address, owner: owner || null };
-      })
-      .filter((entry) => entry.address),
   },
 
   // ============ Programs ============

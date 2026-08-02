@@ -1,9 +1,9 @@
 'use strict';
 
-const { PublicKey } = require('@solana/web3.js');
-const { getAccount, NATIVE_MINT, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+const { NATIVE_MINT } = require('@solana/spl-token');
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
+const { summarizeOwnedWsolAccounts } = require('../utils/quoteAssetAccounting');
 const { nextScheduledAt, shouldAutoUnwrap } = require('../utils/quoteAssetSchedule');
 
 const monitor = getMonitor();
@@ -31,18 +31,19 @@ class QuoteAssetReconciler {
       status: this.settings.enabled ? 'waiting' : 'disabled',
       nativeSol: null,
       walletWsolSol: null,
-      jupiterPendingWsolSol: null,
+      totalWalletQuoteSol: null,
+      // Backward-compatible API alias. It has the same wallet-only value.
       totalEquitySol: null,
       updatedAt: null,
       nextRunAt: null,
       walletWsolAccounts: 0,
-      jupiterAccounts: [],
       lastAction: null,
       lastError: null,
     };
   }
 
   async start() {
+    this._clearLegacyExternalAlerts();
     if (!this.settings.enabled) {
       monitor.beat('QuoteAssetReconciler', 'disabled');
       return;
@@ -62,16 +63,7 @@ class QuoteAssetReconciler {
   }
 
   getSnapshot() {
-    return {
-      ...this.snapshot,
-      jupiterAccounts: (this.snapshot.jupiterAccounts || []).map((x) => ({ ...x })),
-    };
-  }
-
-  getConfirmedJupiterAccountAddresses() {
-    return (this.snapshot.jupiterAccounts || [])
-      .filter((account) => account.confirmed)
-      .map((account) => account.address);
+    return { ...this.snapshot };
   }
 
   _scheduleNext() {
@@ -175,7 +167,6 @@ class QuoteAssetReconciler {
         nativeSol: current.nativeSol,
         walletWsolSol: current.walletWsolSol,
         walletWsolRentSol: current.walletWsolRentSol,
-        jupiterPendingWsolSol: current.jupiterPendingWsolSol,
         totalEquitySol: current.totalEquitySol,
         walletWsolAccountCount: current.walletWsolAccounts.length,
         action,
@@ -183,18 +174,13 @@ class QuoteAssetReconciler {
           unwrapSignatures,
           beforeWalletWsolSol: before.walletWsolSol,
           beforeWalletWsolRentSol: before.walletWsolRentSol,
-          jupiterAccounts: current.jupiterAccounts.map((account) => ({
-            ...account,
-            amountLamports: account.amountLamports.toString(),
-          })),
         },
       });
       monitor.beat('QuoteAssetReconciler', action);
       monitor.set('QuoteAssetReconciler.nativeSol', current.nativeSol, 'QuoteAssetReconciler');
       monitor.set('QuoteAssetReconciler.walletWsolSol', current.walletWsolSol, 'QuoteAssetReconciler');
-      monitor.set('QuoteAssetReconciler.jupiterPendingWsolSol', current.jupiterPendingWsolSol, 'QuoteAssetReconciler');
       this._updateWalletWsolAlert(current);
-      this._updateJupiterAlert(current);
+      this._clearLegacyExternalAlerts();
       return this.getSnapshot();
     } catch (err) {
       this._recordError(err, reason);
@@ -223,101 +209,26 @@ class QuoteAssetReconciler {
       ),
     ]);
 
-    const walletWsolAccounts = [];
-    let walletWsolLamports = 0n;
-    let walletWsolAccountLamports = 0n;
-    for (const row of walletWsolResponse.value || []) {
-      const info = row.account?.data?.parsed?.info;
-      if (!info || info.mint !== NATIVE_MINT.toBase58() || info.owner !== wallet.toBase58()) {
-        continue;
-      }
-      const amount = BigInt(info.tokenAmount?.amount || '0');
-      walletWsolLamports += amount;
-      const accountLamports = BigInt(row.account?.lamports || 0);
-      walletWsolAccountLamports += accountLamports;
-      const closeAuthority = info.closeAuthority || null;
-      walletWsolAccounts.push({
-        address: row.pubkey.toBase58(),
-        amountLamports: amount,
-        amountSol: lamportsToSol(amount),
-        accountLamports,
-        reclaimableRentLamports: accountLamports > amount
-          ? accountLamports - amount
-          : 0n,
-        closeAuthority,
-        closeable: !closeAuthority || closeAuthority === wallet.toBase58(),
-      });
-    }
-
-    const jupiterAccounts = [];
-    let jupiterPendingLamports = 0n;
-    for (const configured of this.settings.jupiterEscrowAccounts) {
-      const result = await this._readJupiterAccount(configured);
-      jupiterAccounts.push(result);
-      if (result.confirmed) jupiterPendingLamports += result.amountLamports;
-    }
+    const walletAddress = wallet.toBase58();
+    const ownedWsol = summarizeOwnedWsolAccounts(
+      walletWsolResponse.value,
+      walletAddress,
+      NATIVE_MINT.toBase58(),
+    );
 
     const native = BigInt(nativeLamports || 0);
+    const totalWalletQuoteLamports = native + ownedWsol.amountLamports;
     return {
       nativeLamports: native,
-      walletWsolLamports,
-      walletWsolAccountLamports,
-      jupiterPendingLamports,
+      walletWsolLamports: ownedWsol.amountLamports,
+      walletWsolAccountLamports: ownedWsol.accountLamports,
       nativeSol: lamportsToSol(native),
-      walletWsolSol: lamportsToSol(walletWsolLamports),
-      walletWsolRentSol: lamportsToSol(
-        walletWsolAccountLamports > walletWsolLamports
-          ? walletWsolAccountLamports - walletWsolLamports
-          : 0n,
-      ),
-      jupiterPendingWsolSol: lamportsToSol(jupiterPendingLamports),
-      totalEquitySol: lamportsToSol(
-        native + walletWsolAccountLamports + jupiterPendingLamports,
-      ),
-      walletWsolAccounts,
-      jupiterAccounts,
+      walletWsolSol: lamportsToSol(ownedWsol.amountLamports),
+      walletWsolRentSol: lamportsToSol(ownedWsol.rentLamports),
+      totalWalletQuoteSol: lamportsToSol(totalWalletQuoteLamports),
+      totalEquitySol: lamportsToSol(totalWalletQuoteLamports),
+      walletWsolAccounts: ownedWsol.accounts,
     };
-  }
-
-  async _readJupiterAccount(configured) {
-    const base = {
-      address: configured.address,
-      expectedOwner: configured.owner || null,
-      amountLamports: 0n,
-      amountSol: 0,
-      confirmed: false,
-      status: 'unavailable',
-    };
-    try {
-      const tokenAccount = await getAccount(
-        this.executor.rpc,
-        new PublicKey(configured.address),
-        'confirmed',
-        TOKEN_PROGRAM_ID,
-      );
-      const actualOwner = tokenAccount.owner.toBase58();
-      const actualMint = tokenAccount.mint.toBase58();
-      const ownerMatches = !!configured.owner && actualOwner === configured.owner;
-      const mintMatches = actualMint === NATIVE_MINT.toBase58();
-      const amountLamports = BigInt(tokenAccount.amount.toString());
-      return {
-        ...base,
-        actualOwner,
-        actualMint,
-        amountLamports,
-        amountSol: lamportsToSol(amountLamports),
-        confirmed: ownerMatches && mintMatches,
-        status: !mintMatches
-          ? 'mint_mismatch'
-          : !configured.owner
-            ? 'owner_not_configured'
-            : !ownerMatches
-              ? 'owner_mismatch'
-              : 'confirmed',
-      };
-    } catch (err) {
-      return { ...base, status: 'rpc_error', error: err.message };
-    }
   }
 
   _updateSnapshot(current, action) {
@@ -328,42 +239,18 @@ class QuoteAssetReconciler {
       nativeSol: current.nativeSol,
       walletWsolSol: current.walletWsolSol,
       walletWsolRentSol: current.walletWsolRentSol,
-      jupiterPendingWsolSol: current.jupiterPendingWsolSol,
+      totalWalletQuoteSol: current.totalWalletQuoteSol,
       totalEquitySol: current.totalEquitySol,
       walletWsolAccounts: current.walletWsolAccounts.length,
-      jupiterAccounts: current.jupiterAccounts.map((account) => ({
-        ...account,
-        amountLamports: account.amountLamports.toString(),
-      })),
       updatedAt: Date.now(),
       lastAction: action,
       lastError: null,
     };
   }
 
-  _updateJupiterAlert(current) {
-    const invalid = current.jupiterAccounts.filter((account) => account.status !== 'confirmed');
-    if (invalid.length > 0) {
-      monitor.fireAlert(
-        'quote_asset.jupiter_account_unverified',
-        'warn',
-        `${invalid.length} configured Jupiter WSOL account(s) could not be verified`,
-        { accounts: invalid.map((x) => ({ address: x.address, status: x.status })) },
-      );
-    } else {
-      monitor.clearAlert('quote_asset.jupiter_account_unverified');
-    }
-
-    if (current.jupiterPendingWsolSol >= this.settings.jupiterEscrowAlertMinSol) {
-      monitor.fireAlert(
-        'quote_asset.jupiter_pending_wsol',
-        'warn',
-        `Jupiter pending WSOL ${current.jupiterPendingWsolSol.toFixed(6)} SOL requires settlement`,
-        { amountSol: current.jupiterPendingWsolSol, autoSettle: false },
-      );
-    } else {
-      monitor.clearAlert('quote_asset.jupiter_pending_wsol');
-    }
+  _clearLegacyExternalAlerts() {
+    monitor.clearAlert('quote_asset.jupiter_account_unverified');
+    monitor.clearAlert('quote_asset.jupiter_pending_wsol');
   }
 
   _updateWalletWsolAlert(current) {

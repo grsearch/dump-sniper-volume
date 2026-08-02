@@ -44,6 +44,11 @@ function sumOwnedWsolAccountLamports(
   return total;
 }
 
+function findWalletIndex(tx, wallet) {
+  const keys = transactionAccountKeys(tx);
+  return keys.findIndex((key) => accountKeyString(key) === wallet);
+}
+
 function accountKeyString(key) {
   if (!key) return '';
   if (typeof key === 'string') return key;
@@ -51,11 +56,6 @@ function accountKeyString(key) {
   if (typeof key.toBase58 === 'function') return key.toBase58();
   if (typeof key.toString === 'function') return key.toString();
   return '';
-}
-
-function findWalletIndex(tx, wallet) {
-  const keys = transactionAccountKeys(tx);
-  return keys.findIndex((key) => accountKeyString(key) === wallet);
 }
 
 function transactionAccountKeys(tx) {
@@ -80,38 +80,68 @@ function transactionAccountKeys(tx) {
   ];
 }
 
-function sumTrackedWsol(
-  tokenBalances,
-  accountKeys,
-  trackedAccounts,
-  wallet,
-  wsolMint = DEFAULT_WSOL_MINT,
-) {
-  const tracked = new Set(trackedAccounts || []);
-  if (tracked.size === 0) return 0n;
-  let total = 0n;
-  for (const balance of tokenBalances || []) {
-    if (balance?.mint !== wsolMint || balance?.owner === wallet) continue;
-    const address = accountKeyString(accountKeys[balance.accountIndex]);
-    if (!tracked.has(address)) continue;
-    total += rawTokenAmount(balance);
-  }
-  return total;
-}
-
 function lamportsToSol(lamports) {
   return Number(lamports) / Number(LAMPORTS_PER_SOL);
 }
 
+function summarizeOwnedWsolAccounts(rows, wallet, wsolMint = DEFAULT_WSOL_MINT) {
+  const accounts = [];
+  let amountLamports = 0n;
+  let accountLamports = 0n;
+  for (const row of rows || []) {
+    const info = row?.account?.data?.parsed?.info;
+    if (!info || info.mint !== wsolMint || info.owner !== wallet) continue;
+    const amount = toLamports(info.tokenAmount?.amount);
+    const nativeLamports = toLamports(row.account?.lamports);
+    const closeAuthority = info.closeAuthority || null;
+    amountLamports += amount;
+    accountLamports += nativeLamports;
+    accounts.push({
+      address: accountKeyString(row.pubkey),
+      amountLamports: amount,
+      amountSol: lamportsToSol(amount),
+      accountLamports: nativeLamports,
+      reclaimableRentLamports: nativeLamports > amount
+        ? nativeLamports - amount
+        : 0n,
+      closeAuthority,
+      closeable: !closeAuthority || closeAuthority === wallet,
+    });
+  }
+  return {
+    accounts,
+    amountLamports,
+    accountLamports,
+    rentLamports: accountLamports > amountLamports
+      ? accountLamports - amountLamports
+      : 0n,
+  };
+}
+
+function assessWalletWsolClose(account, wallet, wsolMint = DEFAULT_WSOL_MINT) {
+  const mint = accountKeyString(account?.mint);
+  const owner = accountKeyString(account?.owner);
+  const closeAuthority = account?.closeAuthority
+    ? accountKeyString(account.closeAuthority)
+    : null;
+  if (mint !== wsolMint) return { closeable: false, reason: 'mint_mismatch' };
+  if (owner !== wallet) return { closeable: false, reason: 'owner_mismatch' };
+  if (closeAuthority && closeAuthority !== wallet) {
+    return { closeable: false, reason: 'close_authority_mismatch' };
+  }
+  return { closeable: true, reason: null };
+}
+
 /**
- * Compute quote-asset movement without treating SOL<->WSOL settlement as PnL.
- * Wallet-owned and verified transit WSOL use lamports as their raw token units.
+ * Compute wallet quote-asset movement without treating SOL<->WSOL wrapping as
+ * PnL. Only native SOL and WSOL token accounts controlled by `wallet` count.
+ * Token-account rent stays in the accounting basis solely so creating or
+ * closing an account is an internal conversion instead of fake profit/loss.
  */
 function computeWalletQuoteAssetMovement(
   tx,
   wallet,
   wsolMint = DEFAULT_WSOL_MINT,
-  trackedWsolAccounts = [],
 ) {
   const meta = tx?.meta;
   if (!meta || !wallet) return null;
@@ -145,31 +175,14 @@ function computeWalletQuoteAssetMovement(
     wallet,
     wsolMint,
   );
-  const accountKeys = transactionAccountKeys(tx);
-  const preTrackedWsolLamports = sumTrackedWsol(
-    meta.preTokenBalances,
-    accountKeys,
-    trackedWsolAccounts,
-    wallet,
-    wsolMint,
-  );
-  const postTrackedWsolLamports = sumTrackedWsol(
-    meta.postTokenBalances,
-    accountKeys,
-    trackedWsolAccounts,
-    wallet,
-    wsolMint,
-  );
-
-  const preQuoteLamports = preNativeLamports + preWalletWsolAccountLamports + preTrackedWsolLamports;
-  const postQuoteLamports = postNativeLamports + postWalletWsolAccountLamports + postTrackedWsolLamports;
+  const preQuoteLamports = preNativeLamports + preWalletWsolAccountLamports;
+  const postQuoteLamports = postNativeLamports + postWalletWsolAccountLamports;
   const nativeDeltaLamports = postNativeLamports - preNativeLamports;
   const walletWsolDeltaLamports = postWalletWsolLamports - preWalletWsolLamports;
   const walletWsolAccountDeltaLamports =
     postWalletWsolAccountLamports - preWalletWsolAccountLamports;
   const walletWsolReserveDeltaLamports =
     walletWsolAccountDeltaLamports - walletWsolDeltaLamports;
-  const trackedWsolDeltaLamports = postTrackedWsolLamports - preTrackedWsolLamports;
   const quoteDeltaLamports = postQuoteLamports - preQuoteLamports;
 
   return {
@@ -180,15 +193,12 @@ function computeWalletQuoteAssetMovement(
     postWalletWsolLamports,
     preWalletWsolAccountLamports,
     postWalletWsolAccountLamports,
-    preTrackedWsolLamports,
-    postTrackedWsolLamports,
     preQuoteLamports,
     postQuoteLamports,
     nativeDeltaLamports,
     walletWsolDeltaLamports,
     walletWsolAccountDeltaLamports,
     walletWsolReserveDeltaLamports,
-    trackedWsolDeltaLamports,
     quoteDeltaLamports,
     preNativeSol: lamportsToSol(preNativeLamports),
     postNativeSol: lamportsToSol(postNativeLamports),
@@ -196,13 +206,10 @@ function computeWalletQuoteAssetMovement(
     postWalletWsolSol: lamportsToSol(postWalletWsolLamports),
     preWalletWsolAccountSol: lamportsToSol(preWalletWsolAccountLamports),
     postWalletWsolAccountSol: lamportsToSol(postWalletWsolAccountLamports),
-    preTrackedWsolSol: lamportsToSol(preTrackedWsolLamports),
-    postTrackedWsolSol: lamportsToSol(postTrackedWsolLamports),
     nativeDeltaSol: lamportsToSol(nativeDeltaLamports),
     walletWsolDeltaSol: lamportsToSol(walletWsolDeltaLamports),
     walletWsolAccountDeltaSol: lamportsToSol(walletWsolAccountDeltaLamports),
     walletWsolReserveDeltaSol: lamportsToSol(walletWsolReserveDeltaLamports),
-    trackedWsolDeltaSol: lamportsToSol(trackedWsolDeltaLamports),
     quoteDeltaSol: lamportsToSol(quoteDeltaLamports),
   };
 }
@@ -210,11 +217,12 @@ function computeWalletQuoteAssetMovement(
 module.exports = {
   DEFAULT_WSOL_MINT,
   LAMPORTS_PER_SOL,
+  assessWalletWsolClose,
   computeWalletQuoteAssetMovement,
   lamportsToSol,
   rawTokenAmount,
+  summarizeOwnedWsolAccounts,
   sumOwnedWsol,
   sumOwnedWsolAccountLamports,
-  sumTrackedWsol,
   transactionAccountKeys,
 };

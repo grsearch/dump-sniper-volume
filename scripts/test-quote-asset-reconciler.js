@@ -63,17 +63,14 @@ logger.logQuoteAssetMovement({
   side: 'SELL',
   success: true,
   nativeSolDelta: -0.000005,
-  walletWsolDelta: 0,
-  jupiterEscrowWsolDelta: 0.2,
+  walletWsolDelta: 0.2,
   quoteAssetDelta: 0.199995,
-  preJupiterEscrowWsolSol: 0,
-  postJupiterEscrowWsolSol: 0.2,
   feeLamports: 5000,
 });
 const movement = db.prepare(
   'SELECT * FROM quote_asset_movements WHERE signature = ?',
 ).get('quote-movement-test');
-assert.strictEqual(movement.jupiter_escrow_wsol_delta, 0.2);
+assert.strictEqual(movement.jupiter_escrow_wsol_delta, null);
 assert.strictEqual(movement.quote_asset_delta, 0.199995);
 
 logger.logQuoteAssetReconciliation({
@@ -83,15 +80,36 @@ logger.logQuoteAssetReconciliation({
   nativeSol: 1,
   walletWsolSol: 0.1,
   walletWsolRentSol: 0.00203928,
-  jupiterPendingWsolSol: 0.2,
-  totalEquitySol: 1.3,
+  totalEquitySol: 1.1,
   walletWsolAccountCount: 1,
   action: 'inspect_only',
 });
 const reconciliation = logger.getLatestQuoteAssetReconciliation();
-assert.strictEqual(reconciliation.total_equity_sol, 1.3);
+assert.strictEqual(reconciliation.jupiter_pending_wsol_sol, null);
+assert.strictEqual(reconciliation.total_equity_sol, 1.1);
 assert.strictEqual(reconciliation.wallet_wsol_rent_sol, 0.00203928);
 logger.shutdown();
+
+db.exec(`
+  UPDATE quote_asset_movements
+  SET jupiter_escrow_wsol_delta = 0.2,
+      pre_jupiter_escrow_wsol_sol = 0,
+      post_jupiter_escrow_wsol_sol = 0.2,
+      quote_asset_delta = 0.399995;
+  UPDATE quote_asset_reconciliations
+  SET jupiter_pending_wsol_sol = 0.2,
+      total_equity_sol = 1.30203928;
+`);
+const migratedLogger = new TradeLogger(db);
+const migratedMovement = db.prepare(
+  'SELECT * FROM quote_asset_movements WHERE signature = ?',
+).get('quote-movement-test');
+assert.strictEqual(migratedMovement.jupiter_escrow_wsol_delta, null);
+assert.strictEqual(migratedMovement.quote_asset_delta, 0.199995);
+const migratedReconciliation = migratedLogger.getLatestQuoteAssetReconciliation();
+assert.strictEqual(migratedReconciliation.jupiter_pending_wsol_sol, null);
+assert.strictEqual(migratedReconciliation.total_equity_sol, 1.1);
+migratedLogger.shutdown();
 db.close();
 
 console.log('quote asset reconciler schedule tests passed');

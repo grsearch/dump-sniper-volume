@@ -35,8 +35,10 @@ const BN = require('bn.js');
 // v3.25: ATA 指令 — BUY 前确保 ATA 存在
 const {
   getAssociatedTokenAddressSync,
+  getAccount,
   createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction,
+  NATIVE_MINT,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
 } = require('@solana/spl-token');
@@ -47,7 +49,10 @@ const {
   evaluateBuyExecutionGuard,
   calculateMinBaseAmountOut,
 } = require('../utils/buyExecutionGuard');
-const { computeWalletQuoteAssetMovement } = require('../utils/quoteAssetAccounting');
+const {
+  assessWalletWsolClose,
+  computeWalletQuoteAssetMovement,
+} = require('../utils/quoteAssetAccounting');
 
 // AllenHark Slipstream SDK (lazy load)
 let SlipstreamClient = null;
@@ -857,7 +862,7 @@ class Executor {
    *   fee:            tx 的 base fee（lamports）
    */
   // realSolDelta is retained for PositionManager compatibility. It now means
-  // native SOL + wallet-owned/verified-transit WSOL delta, so settlement is not PnL.
+  // native SOL + wallet-controlled WSOL delta, so wrapping is not PnL.
   async fetchTxSwapResult(signature, mint) {
     if (!signature || signature.startsWith('DRYRUN')) return null;
     if (!this.keypair) return null;
@@ -883,14 +888,7 @@ class Executor {
         const post = tx.meta.postBalances[ownerIdx] || 0;
         realSolDelta = (post - pre) / 1e9; // SOL
       }
-      const trackedJupiterAccounts = this.quoteAssetReconciler
-        ?.getConfirmedJupiterAccountAddresses?.() || [];
-      const quoteMovement = computeWalletQuoteAssetMovement(
-        tx,
-        owner,
-        undefined,
-        trackedJupiterAccounts,
-      );
+      const quoteMovement = computeWalletQuoteAssetMovement(tx, owner);
       realSolDelta = quoteMovement?.quoteDeltaSol ?? realSolDelta;
 
       // Token 净变化（对应 mint）
@@ -920,13 +918,10 @@ class Executor {
         nativeSolDelta: quoteMovement?.nativeDeltaSol || 0,
         walletWsolDelta: quoteMovement?.walletWsolDeltaSol || 0,
         walletWsolReserveDelta: quoteMovement?.walletWsolReserveDeltaSol || 0,
-        jupiterEscrowWsolDelta: quoteMovement?.trackedWsolDeltaSol || 0,
         preNativeSol: quoteMovement?.preNativeSol || 0,
         postNativeSol: quoteMovement?.postNativeSol || 0,
         preWalletWsolSol: quoteMovement?.preWalletWsolSol || 0,
         postWalletWsolSol: quoteMovement?.postWalletWsolSol || 0,
-        preJupiterEscrowWsolSol: quoteMovement?.preTrackedWsolSol || 0,
-        postJupiterEscrowWsolSol: quoteMovement?.postTrackedWsolSol || 0,
         realTokenDelta,
         fee: tx.meta.fee || 0,
         computeUnitsConsumed: tx.meta.computeUnitsConsumed || 0,
@@ -943,14 +938,11 @@ class Executor {
           nativeSolDelta: result.nativeSolDelta,
           walletWsolDelta: result.walletWsolDelta,
           walletWsolReserveDelta: result.walletWsolReserveDelta,
-          jupiterEscrowWsolDelta: result.jupiterEscrowWsolDelta,
           quoteAssetDelta: result.quoteAssetDelta,
           preNativeSol: result.preNativeSol,
           postNativeSol: result.postNativeSol,
           preWalletWsolSol: result.preWalletWsolSol,
           postWalletWsolSol: result.postWalletWsolSol,
-          preJupiterEscrowWsolSol: result.preJupiterEscrowWsolSol,
-          postJupiterEscrowWsolSol: result.postJupiterEscrowWsolSol,
           feeLamports: result.fee,
         });
       } catch (auditErr) {
@@ -1692,12 +1684,35 @@ class Executor {
     if (unique.length === 0) return { success: true, signatures: [] };
 
     return this._withExecution('WSOL_UNWRAP', async () => {
+      const wallet = this.keypair.publicKey.toBase58();
+      const verified = [];
+      for (const address of unique) {
+        const pubkey = new PublicKey(address);
+        const account = await getAccount(
+          this.rpc,
+          pubkey,
+          'confirmed',
+          TOKEN_PROGRAM_ID,
+        );
+        const assessment = assessWalletWsolClose(
+          account,
+          wallet,
+          NATIVE_MINT.toBase58(),
+        );
+        if (!assessment.closeable) {
+          throw new Error(
+            `Refusing to close unverified WSOL account ${address}: ${assessment.reason}`,
+          );
+        }
+        verified.push(pubkey);
+      }
+
       const signatures = [];
       const chunkSize = 8;
-      for (let i = 0; i < unique.length; i += chunkSize) {
-        const instructions = unique.slice(i, i + chunkSize).map((address) =>
+      for (let i = 0; i < verified.length; i += chunkSize) {
+        const instructions = verified.slice(i, i + chunkSize).map((account) =>
           createCloseAccountInstruction(
-            new PublicKey(address),
+            account,
             this.keypair.publicKey,
             this.keypair.publicKey,
             [],

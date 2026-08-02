@@ -106,11 +106,12 @@ npm run export:research -- --since=2026-07-29T00:00:00+08:00 --until=2026-07-30T
 
 程序启动和每次卖出确认后会做只读余额刷新，并在北京时间每天 `00:00`、`06:00`、`12:00`、`18:00` 执行定时对账：
 
-- 钱包自有 WSOL 达到 `WSOL_AUTO_UNWRAP_MIN_SOL` 时，会在定时对账中自动关闭对应 Token Account，转回原生 SOL。
+- 钱包控制的全部 WSOL Token Account（包括钱包界面可能隐藏的辅助账户）都会被统计；余额达到 `WSOL_AUTO_UNWRAP_MIN_SOL` 时，会在定时对账中自动关闭可安全关闭的账户，转回原生 SOL。
 - 买入、卖出或解包正在执行时不操作，等待 60 秒后重试。
-- 配置的 Jupiter 中转 WSOL 账户只读监控，并校验 WSOL mint 和预期 owner；程序不会关闭或自动结算外部账户。
-- 仪表盘分别显示可用 SOL、钱包 WSOL、Jupiter 待结算 WSOL 和 SOL 总权益。
-- 成交盈亏按“原生 SOL + 钱包 WSOL + 已验证 Jupiter 中转 WSOL”的净变化核算；包装、解包和中转结算属于内部转换，不重复计为利润。
+- 外部 router、vault 或 Jupiter 中转账户不归属于本钱包，不参与资产、盈亏和健康告警统计，也不会被程序关闭。
+- 自动解包前会重新核验 WSOL mint、账户 owner 和 close authority，只有钱包有权限关闭的账户才会执行。
+- 仪表盘显示钱包 SOL、钱包 WSOL 和 SOL+WSOL 合计；Token Account 租金不计入合计。
+- 成交盈亏只按“钱包原生 SOL + 钱包控制的 WSOL”的净变化核算；包装和解包属于内部转换，不重复计为利润。
 
 逐笔报价资产变化写入 `quote_asset_movements`，定时对账写入 `quote_asset_reconciliations`，便于后续导出审计。
 
@@ -119,9 +120,6 @@ WSOL_RECONCILE_ENABLED=true
 WSOL_RECONCILE_SCHEDULE_HOURS_CST=0,6,12,18
 WSOL_RECONCILE_BUSY_RETRY_MS=60000
 WSOL_AUTO_UNWRAP_MIN_SOL=0.01
-JUPITER_ESCROW_ALERT_MIN_SOL=0.01
-JUPITER_ESCROW_AUTO_SETTLE=0
-JUPITER_ESCROW_WSOL_ACCOUNTS=DmrQLy5nVJNnRrP8RimSuW8GJxvcjByizcYVzcyFEJFZ:FtgZ6iPt4PjyHVyWRRhsooGVwA2U2vfDrTwtiStdqrXS
 ```
 
 ~~~env

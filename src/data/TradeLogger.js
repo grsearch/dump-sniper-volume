@@ -267,6 +267,32 @@ class TradeLogger {
       try { this.db.exec(sql); } catch (_) { /* column already exists */ }
     }
 
+    // External router/vault accounts were previously attributed to this wallet.
+    // Rebuild those audit rows from wallet-controlled components only, then
+    // clear the legacy columns so future exports cannot repeat that mistake.
+    this.db.exec(`
+      UPDATE quote_asset_movements
+      SET quote_asset_delta =
+            COALESCE(native_sol_delta, 0) +
+            COALESCE(wallet_wsol_delta, 0) +
+            COALESCE(wallet_wsol_reserve_delta, 0),
+          jupiter_escrow_wsol_delta = NULL,
+          pre_jupiter_escrow_wsol_sol = NULL,
+          post_jupiter_escrow_wsol_sol = NULL
+      WHERE jupiter_escrow_wsol_delta IS NOT NULL
+         OR pre_jupiter_escrow_wsol_sol IS NOT NULL
+         OR post_jupiter_escrow_wsol_sol IS NOT NULL;
+
+      UPDATE quote_asset_reconciliations
+      SET total_equity_sol = COALESCE(native_sol, 0) + COALESCE(wallet_wsol_sol, 0),
+          jupiter_pending_wsol_sol = NULL
+      WHERE jupiter_pending_wsol_sol IS NOT NULL
+         OR ABS(
+              COALESCE(total_equity_sol, 0) -
+              (COALESCE(native_sol, 0) + COALESCE(wallet_wsol_sol, 0))
+            ) > 0.000000001;
+    `);
+
     // v3.17.19: migrate dump_slot column for upgrading from earlier schemas
     //   SQLite 不支持 ADD COLUMN IF NOT EXISTS,直接尝试,失败就忽略
     try {
@@ -701,14 +727,15 @@ class TradeLogger {
       nativeSolDelta: movement.nativeSolDelta ?? null,
       walletWsolDelta: movement.walletWsolDelta ?? null,
       walletWsolReserveDelta: movement.walletWsolReserveDelta ?? null,
-      jupiterEscrowWsolDelta: movement.jupiterEscrowWsolDelta ?? null,
+      // Legacy schema fields are intentionally always NULL.
+      jupiterEscrowWsolDelta: null,
       quoteAssetDelta: movement.quoteAssetDelta ?? null,
       preNativeSol: movement.preNativeSol ?? null,
       postNativeSol: movement.postNativeSol ?? null,
       preWalletWsolSol: movement.preWalletWsolSol ?? null,
       postWalletWsolSol: movement.postWalletWsolSol ?? null,
-      preJupiterEscrowWsolSol: movement.preJupiterEscrowWsolSol ?? null,
-      postJupiterEscrowWsolSol: movement.postJupiterEscrowWsolSol ?? null,
+      preJupiterEscrowWsolSol: null,
+      postJupiterEscrowWsolSol: null,
       feeLamports: movement.feeLamports ?? null,
       createdAt: Date.now(),
     });
@@ -726,7 +753,8 @@ class TradeLogger {
       nativeSol: row.nativeSol ?? null,
       walletWsolSol: row.walletWsolSol ?? null,
       walletWsolRentSol: row.walletWsolRentSol ?? null,
-      jupiterPendingWsolSol: row.jupiterPendingWsolSol ?? null,
+      // Legacy schema field is intentionally always NULL.
+      jupiterPendingWsolSol: null,
       totalEquitySol: row.totalEquitySol ?? null,
       walletWsolAccountCount: row.walletWsolAccountCount ?? null,
       action: row.action || null,
