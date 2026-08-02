@@ -36,6 +36,7 @@ const BN = require('bn.js');
 const {
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountIdempotentInstruction,
+  createCloseAccountInstruction,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
 } = require('@solana/spl-token');
@@ -46,6 +47,7 @@ const {
   evaluateBuyExecutionGuard,
   calculateMinBaseAmountOut,
 } = require('../utils/buyExecutionGuard');
+const { computeWalletQuoteAssetMovement } = require('../utils/quoteAssetAccounting');
 
 // AllenHark Slipstream SDK (lazy load)
 let SlipstreamClient = null;
@@ -69,6 +71,10 @@ monitor.registerModule('Executor', { staleMs: 24 * 60 * 60_000, label: 'Trade Ex
 class Executor {
   constructor() {
     this.dryRun = config.DRY_RUN;
+    this._activeExecutionCount = 0;
+    this._activeExecutionLabels = new Map();
+    this.tradeLogger = null;
+    this.quoteAssetReconciler = null;
     this._latestBuySlot = 0;  // BUY 提交时的链上 slot
     // v3.15 通道分流（Openclaw 发现：staked RPC 限流严格，70 token 刷新会打爆）
     //   - this.rpc：普通公共 RPC（用于 PoolStateCache 后台刷新 + getTransaction / getSignatureStatuses 等查询）
@@ -242,6 +248,36 @@ class Executor {
       setTimeout(() => this._initSlipstream(), 5000);
     } else if (!this.dryRun && config.allenhark.slipstreamEnabled) {
       console.warn('[Executor] Slipstream enabled but no API key (ALLENHARK_SLIPSTREAM_API_KEY) — disabled');
+    }
+  }
+
+  setTradeLogger(tradeLogger) {
+    this.tradeLogger = tradeLogger || null;
+  }
+
+  setQuoteAssetReconciler(reconciler) {
+    this.quoteAssetReconciler = reconciler || null;
+  }
+
+  isExecutionBusy() {
+    return this._activeExecutionCount > 0;
+  }
+
+  async _withExecution(label, fn) {
+    this._activeExecutionCount += 1;
+    this._activeExecutionLabels.set(
+      label,
+      (this._activeExecutionLabels.get(label) || 0) + 1,
+    );
+    monitor.set('Executor.activeExecutions', this._activeExecutionCount, 'Executor');
+    try {
+      return await fn();
+    } finally {
+      this._activeExecutionCount = Math.max(0, this._activeExecutionCount - 1);
+      const remaining = Math.max(0, (this._activeExecutionLabels.get(label) || 1) - 1);
+      if (remaining === 0) this._activeExecutionLabels.delete(label);
+      else this._activeExecutionLabels.set(label, remaining);
+      monitor.set('Executor.activeExecutions', this._activeExecutionCount, 'Executor');
     }
   }
 
@@ -820,6 +856,8 @@ class Executor {
    *   realTokenDelta: 钱包对应 mint 净变化（正数 = 收到多少 token UI amount）
    *   fee:            tx 的 base fee（lamports）
    */
+  // realSolDelta is retained for PositionManager compatibility. It now means
+  // native SOL + wallet-owned/verified-transit WSOL delta, so settlement is not PnL.
   async fetchTxSwapResult(signature, mint) {
     if (!signature || signature.startsWith('DRYRUN')) return null;
     if (!this.keypair) return null;
@@ -845,6 +883,15 @@ class Executor {
         const post = tx.meta.postBalances[ownerIdx] || 0;
         realSolDelta = (post - pre) / 1e9; // SOL
       }
+      const trackedJupiterAccounts = this.quoteAssetReconciler
+        ?.getConfirmedJupiterAccountAddresses?.() || [];
+      const quoteMovement = computeWalletQuoteAssetMovement(
+        tx,
+        owner,
+        undefined,
+        trackedJupiterAccounts,
+      );
+      realSolDelta = quoteMovement?.quoteDeltaSol ?? realSolDelta;
 
       // Token 净变化（对应 mint）
       let realTokenDelta = 0;
@@ -867,13 +914,60 @@ class Executor {
         }
       }
 
-      return {
+      const result = {
         realSolDelta,
+        quoteAssetDelta: realSolDelta,
+        nativeSolDelta: quoteMovement?.nativeDeltaSol || 0,
+        walletWsolDelta: quoteMovement?.walletWsolDeltaSol || 0,
+        walletWsolReserveDelta: quoteMovement?.walletWsolReserveDeltaSol || 0,
+        jupiterEscrowWsolDelta: quoteMovement?.trackedWsolDeltaSol || 0,
+        preNativeSol: quoteMovement?.preNativeSol || 0,
+        postNativeSol: quoteMovement?.postNativeSol || 0,
+        preWalletWsolSol: quoteMovement?.preWalletWsolSol || 0,
+        postWalletWsolSol: quoteMovement?.postWalletWsolSol || 0,
+        preJupiterEscrowWsolSol: quoteMovement?.preTrackedWsolSol || 0,
+        postJupiterEscrowWsolSol: quoteMovement?.postTrackedWsolSol || 0,
         realTokenDelta,
         fee: tx.meta.fee || 0,
         computeUnitsConsumed: tx.meta.computeUnitsConsumed || 0,
         success: !tx.meta.err,
       };
+      const movementSide = realTokenDelta > 0 ? 'BUY' : realTokenDelta < 0 ? 'SELL' : 'UNKNOWN';
+      try {
+        this.tradeLogger?.logQuoteAssetMovement({
+          ts: tx.blockTime ? tx.blockTime * 1000 : Date.now(),
+          signature,
+          mint,
+          side: movementSide,
+          success: result.success,
+          nativeSolDelta: result.nativeSolDelta,
+          walletWsolDelta: result.walletWsolDelta,
+          walletWsolReserveDelta: result.walletWsolReserveDelta,
+          jupiterEscrowWsolDelta: result.jupiterEscrowWsolDelta,
+          quoteAssetDelta: result.quoteAssetDelta,
+          preNativeSol: result.preNativeSol,
+          postNativeSol: result.postNativeSol,
+          preWalletWsolSol: result.preWalletWsolSol,
+          postWalletWsolSol: result.postWalletWsolSol,
+          preJupiterEscrowWsolSol: result.preJupiterEscrowWsolSol,
+          postJupiterEscrowWsolSol: result.postJupiterEscrowWsolSol,
+          feeLamports: result.fee,
+        });
+      } catch (auditErr) {
+        monitor.recordError('Executor', auditErr, {
+          phase: 'quote_asset_movement_audit',
+          signature,
+        });
+      }
+      if (movementSide === 'SELL') {
+        this.quoteAssetReconciler
+          ?.inspect({ reason: 'sell_confirmed', allowUnwrap: false })
+          .catch((err) => monitor.recordError('Executor', err, {
+            phase: 'post_sell_quote_reconciliation',
+            signature,
+          }));
+      }
+      return result;
     } catch (err) {
       monitor.recordError('Executor', err, { phase: 'fetchTxSwapResult', signature });
       return null;
@@ -913,26 +1007,28 @@ class Executor {
       monitor.inc('Executor.jitoTipsSent', 1, 'Executor');
     }
 
-    // v3.25: BUY 前确保 ATA 存在 — 用 idempotent 指令，已存在则 nop
-    //   修复: 同时创建 base ATA 和 WSOL ATA
+    // v3.25: 交易前确保 ATA 存在 — 用 idempotent 指令，已存在则 nop
+    //   BUY 创建 base ATA 和 WSOL ATA；SELL 至少确保 WSOL ATA 存在。
     //   根因: Pump AMM Buy 要求 user_quote_token_account (WSOL ATA) 已初始化
     //   之前只创建了 base ATA，WSOL ATA 不存在时 Buy 指令报 3012 AccountNotInitialized
-    if (side === 'BUY' && mint) {
+    if ((side === 'BUY' || side === 'SELL') && mint) {
       try {
         const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
-        const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
-        // v3.32: Token-2022 币的 ATA 需要用正确的 token program 派生和创建
-        const baseTokProg = baseTokenProgram || TOKEN_PROGRAM_ID;
-        // base token ATA (收token)
-        const baseAta = getAssociatedTokenAddressSync(new PublicKey(mint), this.keypair.publicKey, false, baseTokProg, ASSOCIATED_TOKEN_PROGRAM_ID);
-        ixs.push(createAssociatedTokenAccountIdempotentInstruction(
-          this.keypair.publicKey, // payer
-          baseAta,                // ata
-          this.keypair.publicKey, // owner
-          new PublicKey(mint),    // mint
-          baseTokProg,            // v3.32: token program (TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID)
-        ));
-        // WSOL ATA (付SOL) — WSOL 始终在 TOKEN_PROGRAM_ID 下
+        if (side === 'BUY') {
+          const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+          // v3.32: Token-2022 币的 ATA 需要用正确的 token program 派生和创建
+          const baseTokProg = baseTokenProgram || TOKEN_PROGRAM_ID;
+          // base token ATA (收token)
+          const baseAta = getAssociatedTokenAddressSync(new PublicKey(mint), this.keypair.publicKey, false, baseTokProg, ASSOCIATED_TOKEN_PROGRAM_ID);
+          ixs.push(createAssociatedTokenAccountIdempotentInstruction(
+            this.keypair.publicKey, // payer
+            baseAta,                // ata
+            this.keypair.publicKey, // owner
+            new PublicKey(mint),    // mint
+            baseTokProg,            // v3.32: token program (TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID)
+          ));
+        }
+        // 定时解包可能关闭 WSOL ATA，BUY/SELL 都要幂等重建。
         const wsolAta = getAssociatedTokenAddressSync(WSOL, this.keypair.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
         ixs.push(createAssociatedTokenAccountIdempotentInstruction(
           this.keypair.publicKey, // payer
@@ -960,6 +1056,10 @@ class Executor {
    * 买入：SOL → token，固定 SOL 输入。
    */
   async buy(order) {
+    return this._withExecution('BUY', () => this._buy(order));
+  }
+
+  async _buy(order) {
     const t0 = Date.now();
     monitor.inc('Executor.buyAttempts', 1, 'Executor');
     monitor.beat('Executor', `buy:${(order.mint || '').slice(0, 6)}`);
@@ -1418,6 +1518,10 @@ class Executor {
    * 卖出：token → SOL，固定 token 输入。
    */
   async sell(order) {
+    return this._withExecution('SELL', () => this._sell(order));
+  }
+
+  async _sell(order) {
     const t0 = Date.now();
     monitor.inc('Executor.sellAttempts', 1, 'Executor');
     monitor.beat('Executor', `sell:${(order.mint || '').slice(0, 6)}`);
@@ -1576,6 +1680,49 @@ class Executor {
       console.error(`[Executor:LIVE] SELL failed: ${err.message}`);
       return { success: false, error: err.message, latencyMs: Date.now() - t0 };
     }
+  }
+
+  async closeWalletWsolAccounts(accountAddresses) {
+    if (this.dryRun || !this.keypair) {
+      return { success: false, error: 'wallet WSOL unwrap unavailable' };
+    }
+    if (this.isExecutionBusy()) return { success: false, busy: true };
+
+    const unique = [...new Set(accountAddresses || [])].filter(Boolean);
+    if (unique.length === 0) return { success: true, signatures: [] };
+
+    return this._withExecution('WSOL_UNWRAP', async () => {
+      const signatures = [];
+      const chunkSize = 8;
+      for (let i = 0; i < unique.length; i += chunkSize) {
+        const instructions = unique.slice(i, i + chunkSize).map((address) =>
+          createCloseAccountInstruction(
+            new PublicKey(address),
+            this.keypair.publicKey,
+            this.keypair.publicKey,
+            [],
+            TOKEN_PROGRAM_ID,
+          ));
+        const { serialized } = await this._buildAndSignTx(
+          instructions,
+          'SELL',
+          null,
+        );
+        const signature = await this._submitTx(serialized, 'SELL');
+        const confirmation = await this.confirmTx(signature, {
+          timeoutMs: 20_000,
+          pollIntervalMs: 800,
+        });
+        if (!confirmation.confirmed) {
+          throw new Error(
+            `WSOL unwrap transaction failed: ${confirmation.error || 'not_landed'}`,
+          );
+        }
+        signatures.push(signature);
+      }
+      monitor.inc('Executor.walletWsolUnwraps', signatures.length, 'Executor');
+      return { success: true, signatures };
+    });
   }
 
   async _getRealOnchainTokenAmount(mint, decimals) {

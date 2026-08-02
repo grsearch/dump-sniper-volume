@@ -17,6 +17,7 @@ class Server {
     signalEngine,
     dailyReport,
     competitorTracker,
+    quoteAssetReconciler,
     onTokenListChanged,
     onTokenAdded,
   }) {
@@ -26,6 +27,7 @@ class Server {
     this.signalEngine = signalEngine;
     this.dailyReport = dailyReport;
     this.competitorTracker = competitorTracker || null;
+    this.quoteAssetReconciler = quoteAssetReconciler || null;
     this.onTokenListChanged = onTokenListChanged;
     this.onTokenAdded = onTokenAdded;
 
@@ -355,6 +357,7 @@ class Server {
         dryRun: config.DRY_RUN,
         watchedTokens: this.tokenRegistry.listActive().length,
         openPositions: this.positionManager.openPositionCount(),
+        quoteAsset: this.quoteAssetReconciler?.getSnapshot() || null,
         config: {
           entryMinFdvUsd: config.earlyFlow.minFdvUsd,
           entryMaxFdvUsd: config.earlyFlow.maxFdvUsd,

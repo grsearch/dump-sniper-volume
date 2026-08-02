@@ -31,6 +31,7 @@
     "test:token-market": "node scripts/test-token-watchdog-market.js",
     "test:research": "node scripts/test-position-research-telemetry.js",
     "test:research-export": "node scripts/test-export-position-research.js",
+    "test:quote-assets": "node scripts/test-quote-asset-accounting.js && node scripts/test-quote-asset-reconciler.js",
     "fill-pools": "node scripts/fill-pools.js",
     "verify-pools": "node scripts/verify-pools.js",
     "verify-pools:fix": "node scripts/verify-pools.js --fix",

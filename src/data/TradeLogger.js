@@ -212,7 +212,60 @@ class TradeLogger {
         ON position_research_events(mint, received_at);
       CREATE INDEX IF NOT EXISTS idx_position_research_type_ts
         ON position_research_events(event_type, received_at);
+
+      CREATE TABLE IF NOT EXISTS quote_asset_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        signature TEXT NOT NULL,
+        mint TEXT NOT NULL DEFAULT '',
+        side TEXT,
+        success INTEGER NOT NULL DEFAULT 0,
+        native_sol_delta REAL,
+        wallet_wsol_delta REAL,
+        wallet_wsol_reserve_delta REAL,
+        jupiter_escrow_wsol_delta REAL,
+        quote_asset_delta REAL,
+        pre_native_sol REAL,
+        post_native_sol REAL,
+        pre_wallet_wsol_sol REAL,
+        post_wallet_wsol_sol REAL,
+        pre_jupiter_escrow_wsol_sol REAL,
+        post_jupiter_escrow_wsol_sol REAL,
+        fee_lamports INTEGER,
+        created_at INTEGER NOT NULL,
+        UNIQUE(signature, mint, side)
+      );
+      CREATE INDEX IF NOT EXISTS idx_quote_asset_movements_ts
+        ON quote_asset_movements(ts);
+
+      CREATE TABLE IF NOT EXISTS quote_asset_reconciliations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        reason TEXT,
+        status TEXT NOT NULL,
+        native_sol REAL,
+        wallet_wsol_sol REAL,
+        wallet_wsol_rent_sol REAL,
+        jupiter_pending_wsol_sol REAL,
+        total_equity_sol REAL,
+        wallet_wsol_account_count INTEGER,
+        action TEXT,
+        details_json TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_quote_asset_reconciliations_ts
+        ON quote_asset_reconciliations(ts);
     `);
+
+    for (const sql of [
+      'ALTER TABLE quote_asset_movements ADD COLUMN jupiter_escrow_wsol_delta REAL',
+      'ALTER TABLE quote_asset_movements ADD COLUMN wallet_wsol_reserve_delta REAL',
+      'ALTER TABLE quote_asset_movements ADD COLUMN pre_jupiter_escrow_wsol_sol REAL',
+      'ALTER TABLE quote_asset_movements ADD COLUMN post_jupiter_escrow_wsol_sol REAL',
+      'ALTER TABLE quote_asset_reconciliations ADD COLUMN wallet_wsol_rent_sol REAL',
+    ]) {
+      try { this.db.exec(sql); } catch (_) { /* column already exists */ }
+    }
 
     // v3.17.19: migrate dump_slot column for upgrading from earlier schemas
     //   SQLite 不支持 ADD COLUMN IF NOT EXISTS,直接尝试,失败就忽略
@@ -340,6 +393,40 @@ class TradeLogger {
 
       recentTrades: this.db.prepare(`
         SELECT * FROM trades ORDER BY ts DESC LIMIT ?
+      `),
+
+      insertQuoteAssetMovement: this.db.prepare(`
+        INSERT OR IGNORE INTO quote_asset_movements (
+          ts, signature, mint, side, success, native_sol_delta,
+          wallet_wsol_delta, wallet_wsol_reserve_delta,
+          jupiter_escrow_wsol_delta, quote_asset_delta, pre_native_sol,
+          post_native_sol, pre_wallet_wsol_sol, post_wallet_wsol_sol,
+          pre_jupiter_escrow_wsol_sol, post_jupiter_escrow_wsol_sol,
+          fee_lamports, created_at
+        ) VALUES (
+          @ts, @signature, @mint, @side, @success, @nativeSolDelta,
+          @walletWsolDelta, @walletWsolReserveDelta,
+          @jupiterEscrowWsolDelta, @quoteAssetDelta, @preNativeSol,
+          @postNativeSol, @preWalletWsolSol, @postWalletWsolSol,
+          @preJupiterEscrowWsolSol, @postJupiterEscrowWsolSol,
+          @feeLamports, @createdAt
+        )
+      `),
+
+      insertQuoteAssetReconciliation: this.db.prepare(`
+        INSERT INTO quote_asset_reconciliations (
+          ts, reason, status, native_sol, wallet_wsol_sol, wallet_wsol_rent_sol,
+          jupiter_pending_wsol_sol, total_equity_sol,
+          wallet_wsol_account_count, action, details_json, created_at
+        ) VALUES (
+          @ts, @reason, @status, @nativeSol, @walletWsolSol, @walletWsolRentSol,
+          @jupiterPendingWsolSol, @totalEquitySol,
+          @walletWsolAccountCount, @action, @detailsJson, @createdAt
+        )
+      `),
+
+      latestQuoteAssetReconciliation: this.db.prepare(`
+        SELECT * FROM quote_asset_reconciliations ORDER BY ts DESC LIMIT 1
       `),
 
       // ============ swap_events ============
@@ -601,6 +688,55 @@ class TradeLogger {
       latencyMs: latencyMs ?? null,
       error: error || null,
     });
+  }
+
+  logQuoteAssetMovement(movement) {
+    if (!movement?.signature) return;
+    this.stmts.insertQuoteAssetMovement.run({
+      ts: movement.ts || Date.now(),
+      signature: movement.signature,
+      mint: movement.mint || '',
+      side: movement.side || 'UNKNOWN',
+      success: movement.success ? 1 : 0,
+      nativeSolDelta: movement.nativeSolDelta ?? null,
+      walletWsolDelta: movement.walletWsolDelta ?? null,
+      walletWsolReserveDelta: movement.walletWsolReserveDelta ?? null,
+      jupiterEscrowWsolDelta: movement.jupiterEscrowWsolDelta ?? null,
+      quoteAssetDelta: movement.quoteAssetDelta ?? null,
+      preNativeSol: movement.preNativeSol ?? null,
+      postNativeSol: movement.postNativeSol ?? null,
+      preWalletWsolSol: movement.preWalletWsolSol ?? null,
+      postWalletWsolSol: movement.postWalletWsolSol ?? null,
+      preJupiterEscrowWsolSol: movement.preJupiterEscrowWsolSol ?? null,
+      postJupiterEscrowWsolSol: movement.postJupiterEscrowWsolSol ?? null,
+      feeLamports: movement.feeLamports ?? null,
+      createdAt: Date.now(),
+    });
+  }
+
+  logQuoteAssetReconciliation(row) {
+    const detailsJson = row.details == null
+      ? null
+      : JSON.stringify(row.details, (_, value) =>
+        typeof value === 'bigint' ? value.toString() : value);
+    this.stmts.insertQuoteAssetReconciliation.run({
+      ts: row.ts || Date.now(),
+      reason: row.reason || null,
+      status: row.status || 'unknown',
+      nativeSol: row.nativeSol ?? null,
+      walletWsolSol: row.walletWsolSol ?? null,
+      walletWsolRentSol: row.walletWsolRentSol ?? null,
+      jupiterPendingWsolSol: row.jupiterPendingWsolSol ?? null,
+      totalEquitySol: row.totalEquitySol ?? null,
+      walletWsolAccountCount: row.walletWsolAccountCount ?? null,
+      action: row.action || null,
+      detailsJson,
+      createdAt: Date.now(),
+    });
+  }
+
+  getLatestQuoteAssetReconciliation() {
+    return this.stmts.latestQuoteAssetReconciliation.get() || null;
   }
 
   logSwapEvent(swap) {

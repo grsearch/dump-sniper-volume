@@ -272,6 +272,10 @@
     <div class="panel-head"><h2>📊 状态</h2><span class="meta" id="statusMeta">-</span></div>
     <div class="panel-body">
       <div class="status-grid">
+        <div class="status-item"><div class="label">可用 SOL</div><div class="value" id="stat-native-sol">-</div></div>
+        <div class="status-item"><div class="label">钱包 WSOL</div><div class="value" id="stat-wallet-wsol">-</div></div>
+        <div class="status-item"><div class="label">Jupiter 待结算</div><div class="value" id="stat-jupiter-wsol">-</div></div>
+        <div class="status-item"><div class="label">SOL 总权益</div><div class="value" id="stat-total-equity">-</div></div>
         <div class="status-item"><div class="label">监控代币</div><div class="value" id="stat-watched">-</div></div>
         <div class="status-item"><div class="label">当前持仓</div><div class="value" id="stat-open">-</div></div>
         <div class="status-item"><div class="label">买入 AGE</div><div class="value" id="stat-minSell">-</div></div>
@@ -472,6 +476,14 @@ async function refreshStatus() {
   $('modeBadge').className = 'badge ' + (r.dryRun ? 'dry' : 'live');
   $('stat-watched').textContent = r.watchedTokens;
   $('stat-open').textContent = r.openPositions;
+  const quoteAsset = r.quoteAsset || {};
+  const fmtSol = (value) => value != null && Number.isFinite(Number(value))
+    ? Number(value).toFixed(4) + ' SOL'
+    : '-';
+  $('stat-native-sol').textContent = fmtSol(quoteAsset.nativeSol);
+  $('stat-wallet-wsol').textContent = fmtSol(quoteAsset.walletWsolSol);
+  $('stat-jupiter-wsol').textContent = fmtSol(quoteAsset.jupiterPendingWsolSol);
+  $('stat-total-equity').textContent = fmtSol(quoteAsset.totalEquitySol);
   $('stat-minSell').textContent = (r.config.entryMinMigrationAgeMs / 1000) + '-' + (r.config.entryMaxMigrationAgeMs / 1000) + 's';
   $('stat-impact').textContent = '$' + Number(r.config.entryMinFdvUsd).toLocaleString() + '-$' + Number(r.config.entryMaxFdvUsd).toLocaleString();
   $('stat-size').textContent = r.config.positionSizeSol + ' SOL';

@@ -9,6 +9,7 @@ const DumpDetector = require('./core/DumpDetector');
 const PriceTracker = require('./core/PriceTracker');
 const SignalEngine = require('./core/SignalEngine');
 const Executor = require('./core/Executor');
+const { QuoteAssetReconciler } = require('./core/QuoteAssetReconciler');
 const PositionManager = require('./core/PositionManager');
 const PostExitTracker = require('./core/PostExitTracker');
 const DailyReport = require('./reports/DailyReport');
@@ -143,6 +144,12 @@ async function main() {
   const priceTracker = new PriceTracker();
   const dumpDetector = new DumpDetector(tokenRegistry);
   const executor = new Executor();
+  executor.setTradeLogger(tradeLogger);
+  const quoteAssetReconciler = new QuoteAssetReconciler({
+    executor,
+    tradeLogger,
+  });
+  executor.setQuoteAssetReconciler(quoteAssetReconciler);
 
   // v3.5: PoolStateCache - 后台预热所有监控代币的 Pump pool state
   // BUY 路径不再阻塞 swapSolanaState（80-150ms RPC），从内存读 0ms
@@ -343,6 +350,7 @@ async function main() {
     signalEngine,
     dailyReport,
     competitorTracker,
+    quoteAssetReconciler,
     onTokenListChanged: () => {
       const mints = tokenRegistry.listActive().map((t) => t.mint);
       tickStream.updateSubscription(mints);
@@ -1031,6 +1039,7 @@ async function main() {
 
   // ============ 启动服务器 ============
   server.start();
+  await quoteAssetReconciler.start();
 
   // ============ 启动前补充 pool 信息（异步后台） ============
   if (config.autoFillPoolsOnStart) {
@@ -1050,6 +1059,7 @@ async function main() {
     console.log(`\n[main] ${signal} received, shutting down gracefully...`);
     try {
       pumpDiscovery.stop();
+      quoteAssetReconciler.stop();
       await tickStream.stop();
       postExitTracker.shutdown();
       positionManager.stop();
