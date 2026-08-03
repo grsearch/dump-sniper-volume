@@ -3,7 +3,7 @@
 process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT = '9';
 process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT = '5';
 process.env.EARLY_FLOW_RUNNER_ENABLED = 'true';
-process.env.EARLY_FLOW_RUNNER_ACTIVATE_PCT = '15';
+process.env.EARLY_FLOW_RUNNER_ACTIVATE_PCT = '12';
 process.env.EARLY_FLOW_RUNNER_MAX_ACTIVATION_HOLD_MS = '60000';
 process.env.EARLY_FLOW_RUNNER_FLOW_WINDOW_MS = '3000';
 process.env.EARLY_FLOW_RUNNER_MIN_NET_FLOW_SOL = '0';
@@ -15,10 +15,13 @@ process.env.EARLY_FLOW_FDV_EXIT_USD = '10000';
 process.env.EARLY_FLOW_FIXED_STOP_LOSS_PCT = '0';
 process.env.EARLY_FLOW_TAIL_STOP_ENABLED = 'true';
 process.env.EARLY_FLOW_TAIL_STOP_PNL_PCT = '-30';
+process.env.EARLY_FLOW_TAIL_STOP_FLOW_WINDOW_MS = '3000';
+process.env.EARLY_FLOW_TAIL_STOP_SELL_BUY_RATIO = '1.5';
+process.env.EARLY_FLOW_TAIL_STOP_MAX_UNIQUE_BUYERS = '2';
 process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_MS = '500';
 process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES = '2';
 process.env.EARLY_FLOW_CATASTROPHIC_STOP_ENABLED = 'true';
-process.env.EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT = '-50';
+process.env.EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT = '-45';
 process.env.EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED = 'true';
 process.env.EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS = '60000';
 process.env.EARLY_FLOW_SLOW_BLEED_MAX_PEAK_PNL_PCT = '9';
@@ -128,6 +131,18 @@ function rsi(value) {
   return { rsi5s: value, bucketCount5s: 8 };
 }
 
+function weakTailMetrics() {
+  return {
+    windows: {
+      '3s': {
+        netFlowSol: -1,
+        sellBuyRatio: 2,
+        uniqueBuyers: 1,
+      },
+    },
+  };
+}
+
 function run() {
   const mint = 'TestMint111111111111111111111111111111111';
   assert.strictEqual(config.strategy.dedicatedExitOnly, true);
@@ -138,17 +153,20 @@ function run() {
   assert.strictEqual(config.strategy.trailingActivatePct, 9);
   assert.strictEqual(config.strategy.trailingDrawdownPct, 5);
   assert.strictEqual(config.strategy.runnerEnabled, true);
-  assert.strictEqual(config.strategy.runnerActivatePct, 15);
+  assert.strictEqual(config.strategy.runnerActivatePct, 12);
   assert.strictEqual(config.strategy.runnerMaxActivationHoldMs, 60_000);
   assert.strictEqual(config.strategy.runnerMinBuySellRatio, 1.2);
   assert.strictEqual(config.strategy.runnerMinUniqueBuyers, 3);
   assert.strictEqual(config.strategy.runnerConfirmMs, 500);
   assert.strictEqual(config.strategy.runnerConfirmTrades, 2);
-  assert.strictEqual(config.strategy.tailStopEnabled, false);
+  assert.strictEqual(config.strategy.tailStopEnabled, true);
   assert.strictEqual(config.strategy.tailStopPnlPct, -30);
+  assert.strictEqual(config.strategy.tailStopFlowWindowMs, 3_000);
+  assert.strictEqual(config.strategy.tailStopSellBuyRatio, 1.5);
+  assert.strictEqual(config.strategy.tailStopMaxUniqueBuyers, 2);
   assert.strictEqual(config.strategy.tailStopConfirmMs, 500);
   assert.strictEqual(config.strategy.tailStopConfirmTrades, 2);
-  assert.strictEqual(config.strategy.catastrophicStopPnlPct, -50);
+  assert.strictEqual(config.strategy.catastrophicStopPnlPct, -45);
   assert.strictEqual(config.strategy.catastrophicStopEnabled, true);
   assert.strictEqual(config.strategy.slowBleedExitEnabled, false);
   assert.strictEqual(config.strategy.slowBleedMinHoldMs, 60_000);
@@ -241,11 +259,11 @@ function run() {
       { positionId: pos.positionId, armed: true, armedAt: now + 600 },
       'runner activation must survive a service restart',
     );
-    manager._checkExit(pos.positionId, 1.08);
+    manager._checkExit(pos.positionId, 1.05);
     assert.strictEqual(
       manager._exitCalls[0].reason,
       'RUNNER_TRAILING_STOP',
-      '15-25% runner tier must protect the +8% profit floor',
+      '12-25% runner tier must protect the +5% profit floor',
     );
   }
 
@@ -259,7 +277,7 @@ function run() {
     const manager = managerWith(pos);
     manager._checkExit(pos.positionId, 1.18);
     assert.strictEqual(manager._exitCalls.length, 0);
-    manager._checkExit(pos.positionId, 1.17);
+    manager._checkExit(pos.positionId, 1.14);
     assert.strictEqual(manager._exitCalls[0].reason, 'RUNNER_TRAILING_STOP');
   }
 
@@ -365,9 +383,61 @@ function run() {
     assert.strictEqual(manager._exitCalls.length, 2);
     assert(
       manager._exitCalls.every((call) => call.reason === 'CONFIRMED_TAIL_STOP'),
-      'confirmed tail protection must sell every position for the mint',
+      'persistent sell flow must confirm tail protection for every position',
     );
     config.strategy.tailStopEnabled = previousTailStopEnabled;
+  }
+
+  {
+    const now = Date.now();
+    const pos = position('tail-buy-support', mint, { openedAt: now - 5_000 });
+    const manager = managerWith(pos);
+    const supportedMetrics = {
+      windows: {
+        '3s': {
+          netFlowSol: 0.5,
+          sellBuyRatio: 0.5,
+          uniqueBuyers: 4,
+        },
+      },
+    };
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now, { price: 0.69, signature: 'supported-tail-1' }),
+      supportedMetrics,
+    );
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now + 600, { price: 0.68, signature: 'supported-tail-2' }),
+      supportedMetrics,
+    );
+    assert.strictEqual(
+      manager._exitCalls.length,
+      0,
+      'tail protection must not sell while distributed buyers still support the position',
+    );
+  }
+
+  {
+    const now = Date.now();
+    const pos = position('tail-signature-safety', mint, { openedAt: now - 5_000 });
+    const manager = managerWith(pos);
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now, { price: 0.69, signature: pos.buySignature }),
+      weakTailMetrics(),
+    );
+    manager._maybeConfirmedTailStop(
+      pos,
+      exitSwap(mint, now + 600, { price: 0.68, signature: null }),
+      weakTailMetrics(),
+    );
+    assert.strictEqual(manager._exitCalls.length, 0);
+    assert.strictEqual(
+      pos._tailStopFirstSeenAt,
+      null,
+      'buy and unsigned events must not start tail-stop confirmation',
+    );
   }
 
   {
@@ -465,22 +535,22 @@ function run() {
     manager._maybeConfirmedTailStop(
       pos,
       exitSwap(mint, now, { price: 0.69, signature: 'reset-tail-1' }),
-      {},
+      weakTailMetrics(),
     );
     manager._maybeConfirmedTailStop(
       pos,
       exitSwap(mint, now + 300, { price: 0.71, signature: 'reset-recovery' }),
-      {},
+      weakTailMetrics(),
     );
     manager._maybeConfirmedTailStop(
       pos,
       exitSwap(mint, now + 600, { price: 0.69, signature: 'reset-tail-2' }),
-      {},
+      weakTailMetrics(),
     );
     manager._maybeConfirmedTailStop(
       pos,
       exitSwap(mint, now + 1_000, { price: 0.68, signature: 'reset-tail-3' }),
-      {},
+      weakTailMetrics(),
     );
     assert.strictEqual(
       manager._exitCalls.length,
@@ -490,7 +560,7 @@ function run() {
     manager._maybeConfirmedTailStop(
       pos,
       exitSwap(mint, now + 1_200, { price: 0.67, signature: 'reset-tail-4' }),
-      {},
+      weakTailMetrics(),
     );
     assert.strictEqual(manager._exitCalls[0].reason, 'CONFIRMED_TAIL_STOP');
     config.strategy.tailStopEnabled = previousTailStopEnabled;

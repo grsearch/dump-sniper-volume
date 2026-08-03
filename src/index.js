@@ -64,14 +64,19 @@ async function main() {
         ? `with LIVE runner +${config.strategy.runnerActivatePct}% <=` +
           `${config.strategy.runnerMaxActivationHoldMs / 1000}s, ` +
           `${config.strategy.runnerConfirmMs}ms/${config.strategy.runnerConfirmTrades} signatures, ` +
-          `tiers 15-25:${config.strategy.runnerTiers[0].drawdownPct}/${config.strategy.runnerTiers[0].floorPct}, ` +
-          `25-50:${config.strategy.runnerTiers[1].drawdownPct}/${config.strategy.runnerTiers[1].floorPct}, ` +
-          `50+:${config.strategy.runnerTiers[2].drawdownPct}/${config.strategy.runnerTiers[2].floorPct}; `
+          `tiers ${config.strategy.runnerTiers[0].minPeakPct}-${config.strategy.runnerTiers[0].maxPeakPct}:` +
+          `${config.strategy.runnerTiers[0].drawdownPct}/${config.strategy.runnerTiers[0].floorPct}, ` +
+          `${config.strategy.runnerTiers[1].minPeakPct}-${config.strategy.runnerTiers[1].maxPeakPct}:` +
+          `${config.strategy.runnerTiers[1].drawdownPct}/${config.strategy.runnerTiers[1].floorPct}, ` +
+          `${config.strategy.runnerTiers[2].minPeakPct}+:` +
+          `${config.strategy.runnerTiers[2].drawdownPct}/${config.strategy.runnerTiers[2].floorPct}; `
         : 'runner disabled; '}` +
       `and FDV <$${config.strategy.fdvExitUsd}; ` +
       `${config.strategy.tailStopEnabled
         ? `unarmed tail ${config.strategy.tailStopPnlPct}% for ` +
-          `${config.strategy.tailStopConfirmMs}ms/${config.strategy.tailStopConfirmTrades} signatures`
+          `${config.strategy.tailStopConfirmMs}ms/${config.strategy.tailStopConfirmTrades} signatures ` +
+          `(net<0, sell/buy>=${config.strategy.tailStopSellBuyRatio}, ` +
+          `buyers<=${config.strategy.tailStopMaxUniqueBuyers})`
         : 'tail stop disabled'}; ` +
       `${config.strategy.slowBleedExitEnabled
         ? `unarmed slow bleed after ${config.strategy.slowBleedMinHoldMs / 1000}s ` +

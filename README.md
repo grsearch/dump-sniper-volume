@@ -163,7 +163,7 @@ EARLY_FLOW_EMA_EXECUTION_DELAY_MS=500
 EARLY_FLOW_TRAILING_ACTIVATE_PCT=9
 EARLY_FLOW_TRAILING_DRAWDOWN_PCT=5
 EARLY_FLOW_RUNNER_ENABLED=true
-EARLY_FLOW_RUNNER_ACTIVATE_PCT=15
+EARLY_FLOW_RUNNER_ACTIVATE_PCT=12
 EARLY_FLOW_RUNNER_MAX_ACTIVATION_HOLD_MS=60000
 EARLY_FLOW_RUNNER_FLOW_WINDOW_MS=3000
 EARLY_FLOW_RUNNER_MIN_NET_FLOW_SOL=0
@@ -172,19 +172,22 @@ EARLY_FLOW_RUNNER_MIN_UNIQUE_BUYERS=3
 EARLY_FLOW_RUNNER_CONFIRM_MS=500
 EARLY_FLOW_RUNNER_CONFIRM_TRADES=2
 EARLY_FLOW_RUNNER_TIER_1_DRAWDOWN_PCT=8
-EARLY_FLOW_RUNNER_TIER_1_FLOOR_PCT=8
-EARLY_FLOW_RUNNER_TIER_2_DRAWDOWN_PCT=10
-EARLY_FLOW_RUNNER_TIER_2_FLOOR_PCT=15
-EARLY_FLOW_RUNNER_TIER_3_DRAWDOWN_PCT=15
-EARLY_FLOW_RUNNER_TIER_3_FLOOR_PCT=30
+EARLY_FLOW_RUNNER_TIER_1_FLOOR_PCT=5
+EARLY_FLOW_RUNNER_TIER_2_DRAWDOWN_PCT=12
+EARLY_FLOW_RUNNER_TIER_2_FLOOR_PCT=12
+EARLY_FLOW_RUNNER_TIER_3_DRAWDOWN_PCT=18
+EARLY_FLOW_RUNNER_TIER_3_FLOOR_PCT=25
 EARLY_FLOW_FDV_EXIT_USD=10000
 EARLY_FLOW_FIXED_STOP_LOSS_PCT=0
-EARLY_FLOW_TAIL_STOP_ENABLED=false
+EARLY_FLOW_TAIL_STOP_ENABLED=true
 EARLY_FLOW_TAIL_STOP_PNL_PCT=-30
+EARLY_FLOW_TAIL_STOP_FLOW_WINDOW_MS=3000
+EARLY_FLOW_TAIL_STOP_SELL_BUY_RATIO=1.5
+EARLY_FLOW_TAIL_STOP_MAX_UNIQUE_BUYERS=2
 EARLY_FLOW_TAIL_STOP_CONFIRM_MS=500
 EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES=2
 EARLY_FLOW_CATASTROPHIC_STOP_ENABLED=true
-EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT=-50
+EARLY_FLOW_CATASTROPHIC_STOP_PNL_PCT=-45
 EARLY_FLOW_SLOW_BLEED_EXIT_ENABLED=false
 EARLY_FLOW_SLOW_BLEED_MIN_HOLD_MS=60000
 EARLY_FLOW_SLOW_BLEED_MAX_PEAK_PNL_PCT=9
@@ -252,21 +255,21 @@ POSITION_RESEARCH_FLUSH_MAX=1000
 ### Live Runner trailing
 
 Runner is a live exit mode, not a shadow signal. Normal positions use the
-`+9% / 5%` trailing stop. A position that reaches `+15%` within 60 seconds is
+`+9% / 5%` trailing stop. A position that reaches `+12%` within 60 seconds is
 upgraded permanently when 3-second order flow stays positive for 500ms across
 two distinct transactions, buy/sell is at least 1.2, there are at least three
 buyers, and price remains above the 3-second VWAP.
 
-- Peak 15-25%: 8% drawdown with a +8% profit floor.
-- Peak 25-50%: 10% drawdown with a +15% profit floor.
-- Peak 50% or more: 15% drawdown with a +30% profit floor.
+- Peak 12-25%: 8% drawdown with a +5% profit floor.
+- Peak 25-50%: 12% drawdown with a +12% profit floor.
+- Peak 50% or more: 18% drawdown with a +25% profit floor.
 
 The effective exit price is the tighter of the peak drawdown stop and the
 profit floor. FDV, EMA, catastrophic, and token-age exits remain independent.
 
 ~~~text
 Entry: EARLY_FLOW (...) with risk score disabled
-Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +9% / drawdown 5%; LIVE runner tiers; tail stop disabled; slow bleed disabled; trusted single-swap catastrophe at -50%; FDV <$10000 (plus token-age exit)
+Exit only: fixed stop disabled; take profit disabled; RSI exit disabled; EMA9/EMA20 down-cross; trailing +9% / drawdown 5%; LIVE runner from +12%; confirmed weak-tail stop at -30% (3s net<0, sell/buy>=1.5, buyers<=2, 2 signatures/500ms, only before trailing arms); slow bleed disabled; trusted single-swap catastrophe at -45%; FDV <$10000 (plus token-age exit)
 Early invalidation: shadow (3-15s, peak<3%, VWAP break<=-3%, sell/buy>=1.5, confirm=2/500ms)
 Add-on shadow: research only; first entry and any real add-on exit independently
 Position research telemetry: enabled (window=10s, flush=250ms)
