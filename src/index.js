@@ -73,10 +73,8 @@ async function main() {
         : 'runner disabled; '}` +
       `and FDV <$${config.strategy.fdvExitUsd}; ` +
       `${config.strategy.tailStopEnabled
-        ? `unarmed tail ${config.strategy.tailStopPnlPct}% for ` +
-          `${config.strategy.tailStopConfirmMs}ms/${config.strategy.tailStopConfirmTrades} signatures ` +
-          `(net<0, sell/buy>=${config.strategy.tailStopSellBuyRatio}, ` +
-          `buyers<=${config.strategy.tailStopMaxUniqueBuyers})`
+        ? `unarmed market stop ${config.strategy.tailStopPnlPct}% for ` +
+          `${config.strategy.tailStopConfirmMs}ms/${config.strategy.tailStopConfirmTrades} signatures`
         : 'tail stop disabled'}; ` +
       `${config.strategy.slowBleedExitEnabled
         ? `unarmed slow bleed after ${config.strategy.slowBleedMinHoldMs / 1000}s ` +

@@ -45,14 +45,14 @@ const config = {
     //   trailingDrawdownPct: armed 后，价格从 HWM 回撤此 % 立即 SELL
     //   trailingMinHwmAgeMs: HWM 必须稳定至少此毫秒数（防单 tick 污染）
     //   设 trailingActivatePct=0 或 trailingDrawdownPct=0 可禁用移动止盈
-    trailingActivatePct: parseFloat(process.env.EARLY_FLOW_TRAILING_ACTIVATE_PCT || '9'),
-    trailingDrawdownPct: parseFloat(process.env.EARLY_FLOW_TRAILING_DRAWDOWN_PCT || '5'),
+    // Pinned live strategy: stale server environment values must not change it.
+    trailingActivatePct: 20,
+    trailingDrawdownPct: 5,
     trailingMinHwmAgeMs: 0,
 
-    // Live runner upgrade. A position first arms the normal 9%/5% trailing
-    // stop, then permanently switches to tiered trailing after sustained
-    // post-entry demand confirms that the move can keep running.
-    runnerEnabled: (process.env.EARLY_FLOW_RUNNER_ENABLED ?? 'true').toLowerCase() === 'true',
+    // Hard-disabled so stale server environment values cannot override the
+    // live +20% / 5% trailing strategy with the legacy tiered runner.
+    runnerEnabled: false,
     runnerActivatePct: parseFloat(process.env.EARLY_FLOW_RUNNER_ACTIVATE_PCT || '12'),
     runnerMaxActivationHoldMs: parseInt(
       process.env.EARLY_FLOW_RUNNER_MAX_ACTIVATION_HOLD_MS || '60000',
@@ -199,31 +199,12 @@ const config = {
       process.env.EARLY_WRONG_EXIT_CONFIRM_TRADES || '2',
       10,
     ),
-    // Confirmed weakness exit. It only applies before trailing arms and needs
-    // persistent sell-side flow, so a single volatile print cannot stop a
-    // position that still has broad buyer support.
-    tailStopEnabled:
-      (process.env.EARLY_FLOW_TAIL_STOP_ENABLED ?? 'true').toLowerCase() === 'true',
-    tailStopPnlPct: parseFloat(process.env.EARLY_FLOW_TAIL_STOP_PNL_PCT || '-30'),
-    tailStopFlowWindowMs: parseInt(
-      process.env.EARLY_FLOW_TAIL_STOP_FLOW_WINDOW_MS || '3000',
-      10,
-    ),
-    tailStopSellBuyRatio: parseFloat(
-      process.env.EARLY_FLOW_TAIL_STOP_SELL_BUY_RATIO || '1.5',
-    ),
-    tailStopMaxUniqueBuyers: parseInt(
-      process.env.EARLY_FLOW_TAIL_STOP_MAX_UNIQUE_BUYERS || '2',
-      10,
-    ),
-    tailStopConfirmMs: parseInt(
-      process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_MS || '500',
-      10,
-    ),
-    tailStopConfirmTrades: parseInt(
-      process.env.EARLY_FLOW_TAIL_STOP_CONFIRM_TRADES || '2',
-      10,
-    ),
+    // Confirmed market stop. It only applies before trailing arms and requires
+    // the market PnL to remain below the threshold across distinct swaps.
+    tailStopEnabled: true,
+    tailStopPnlPct: -30,
+    tailStopConfirmMs: 500,
+    tailStopConfirmTrades: 2,
     catastrophicStopEnabled:
       (process.env.EARLY_FLOW_CATASTROPHIC_STOP_ENABLED ?? 'true').toLowerCase() === 'true',
     catastrophicStopPnlPct: parseFloat(

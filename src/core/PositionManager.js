@@ -1154,23 +1154,6 @@ class PositionManager extends EventEmitter {
     if (!signature || signature === pos.buySignature) return false;
 
     const metrics = researchMetrics || this._buildPositionResearchMetrics(pos, event);
-    const flowWindowMs = Number(s.tailStopFlowWindowMs) || 3_000;
-    const windowKey = `${flowWindowMs / 1000}s`;
-    const flow = metrics?.windows?.[windowKey];
-    const netFlowSol = Number(flow?.netFlowSol);
-    const sellBuyRatio = Number(flow?.sellBuyRatio);
-    const uniqueBuyers = Number(flow?.uniqueBuyers);
-    const weakFlow =
-      Number.isFinite(netFlowSol) &&
-      netFlowSol < 0 &&
-      Number.isFinite(sellBuyRatio) &&
-      sellBuyRatio >= s.tailStopSellBuyRatio &&
-      Number.isFinite(uniqueBuyers) &&
-      uniqueBuyers <= s.tailStopMaxUniqueBuyers;
-    if (!weakFlow) {
-      this._resetTailStopCandidate(pos);
-      return false;
-    }
 
     const now = Number(event.receivedAt) || Date.now();
     if (!pos._tailStopFirstSeenAt) {
@@ -1191,10 +1174,6 @@ class PositionManager extends EventEmitter {
             confirmMs: s.tailStopConfirmMs,
             requiredSignatures: s.tailStopConfirmTrades,
             signatureCount: 1,
-            flowWindowMs,
-            netFlowSol,
-            sellBuyRatio,
-            uniqueBuyers,
           },
         },
       );
@@ -1227,8 +1206,6 @@ class PositionManager extends EventEmitter {
     console.warn(
       `[PositionManager] CONFIRMED_TAIL_STOP ${pos.symbol || pos.mint.slice(0, 6)} ` +
         `pnl=${marketPnlPct.toFixed(2)}% <= ${s.tailStopPnlPct}% ` +
-        `net=${netFlowSol.toFixed(3)}SOL sell/buy=${sellBuyRatio.toFixed(2)} ` +
-        `buyers=${uniqueBuyers} ` +
         `confirm=${signatureCount} signatures/${confirmElapsedMs}ms ` +
         `positions=${active.length}`,
     );
@@ -1256,10 +1233,6 @@ class PositionManager extends EventEmitter {
             marketPnlPct: itemPnlPct,
             confirmElapsedMs,
             signatureCount,
-            flowWindowMs,
-            netFlowSol,
-            sellBuyRatio,
-            uniqueBuyers,
             sellScope: 'all_positions_for_mint',
           },
         },
