@@ -840,6 +840,10 @@ class Executor {
     return { confirmed: false, error: 'not_landed' };
   }
 
+  async getCurrentBlockHeight() {
+    return this.rpc.getBlockHeight('confirmed');
+  }
+
   /**
    * 查询钱包对某 mint 的实际持币（uiAmount）。给 reconciliation 用。
    */
@@ -1041,7 +1045,11 @@ class Executor {
 
     const tx = new VersionedTransaction(message);
     tx.sign([this.keypair]);
-    return { serialized: tx.serialize(), feeInfo: fee };
+    return {
+      serialized: tx.serialize(),
+      feeInfo: fee,
+      lastValidBlockHeight: blockhash.lastValidBlockHeight ?? null,
+    };
   }
 
   /**
@@ -1628,7 +1636,11 @@ class Executor {
       const realPrice = sellAmount > 0 ? expectedSolOut / sellAmount : 0;
 
       // 3. 构造、签名、提交
-      const { serialized, feeInfo } = await this._buildAndSignTx(swapIxs, 'SELL', order.mint);
+      const { serialized, feeInfo, lastValidBlockHeight } = await this._buildAndSignTx(
+        swapIxs,
+        'SELL',
+        order.mint,
+      );
 
       // v3.17.14: 从已签名 tx 提取真实链上 signature
       // VersionedTransaction 序列化格式: [0]=num_sigs(compact-u16), [1..65]=signature[0]
@@ -1660,6 +1672,7 @@ class Executor {
         sendLatencyMs,
         priorityFeeLamports: feeInfo.totalLamports,
         priorityFeeSource: feeInfo.source,
+        lastValidBlockHeight,
       };
     } catch (err) {
       monitor.inc('Executor.sellFail', 1, 'Executor');

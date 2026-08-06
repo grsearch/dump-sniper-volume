@@ -112,6 +112,7 @@ class TradeLogger {
         last_retry_at INTEGER,
         last_error TEXT,
         pending_sell_signature TEXT,
+        pending_sell_last_valid_block_height INTEGER,
         stuck_reason TEXT,
         runner_armed INTEGER DEFAULT 0,
         runner_armed_at INTEGER
@@ -212,6 +213,121 @@ class TradeLogger {
         ON position_research_events(mint, received_at);
       CREATE INDEX IF NOT EXISTS idx_position_research_type_ts
         ON position_research_events(event_type, received_at);
+
+      CREATE TABLE IF NOT EXISTS migration_risk_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        migration_signature TEXT NOT NULL UNIQUE,
+        migration_slot INTEGER,
+        migration_time INTEGER NOT NULL,
+        captured_at INTEGER NOT NULL,
+        window_before_ms INTEGER NOT NULL,
+        window_after_ms INTEGER NOT NULL,
+        swap_event_count INTEGER,
+        buy_count INTEGER,
+        sell_count INTEGER,
+        buy_sol REAL,
+        sell_sol REAL,
+        net_flow_sol REAL,
+        unique_buyers INTEGER,
+        unique_sellers INTEGER,
+        largest_buy_share REAL,
+        price_return_pct REAL,
+        peak_return_pct REAL,
+        trough_return_pct REAL,
+        max_drawdown_pct REAL,
+        pool_quote_change_pct REAL,
+        mint_to_count INTEGER,
+        large_transfer_count INTEGER,
+        same_tx_buy_count INTEGER,
+        audit_incomplete INTEGER NOT NULL DEFAULT 0,
+        metrics_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_migration_risk_mint_time
+        ON migration_risk_snapshots(mint, migration_time);
+      CREATE INDEX IF NOT EXISTS idx_migration_risk_time
+        ON migration_risk_snapshots(migration_time);
+
+      CREATE TABLE IF NOT EXISTS token_lifecycle_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_key TEXT NOT NULL UNIQUE,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        event_type TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        source TEXT,
+        reason TEXT,
+        migration_time INTEGER,
+        migration_age_ms INTEGER,
+        added_at INTEGER,
+        watch_age_ms INTEGER,
+        fdv_usd REAL,
+        liquidity_usd REAL,
+        price_usd REAL,
+        price_sol REAL,
+        pool_quote_sol REAL,
+        market_source TEXT,
+        details_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_lifecycle_mint_ts
+        ON token_lifecycle_events(mint, ts);
+      CREATE INDEX IF NOT EXISTS idx_token_lifecycle_type_ts
+        ON token_lifecycle_events(event_type, ts);
+
+      CREATE TABLE IF NOT EXISTS token_market_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        ts INTEGER NOT NULL,
+        trigger TEXT NOT NULL,
+        source TEXT,
+        fdv_usd REAL,
+        liquidity_usd REAL,
+        price_usd REAL,
+        price_sol REAL,
+        supply_ui REAL,
+        pool_quote_sol REAL,
+        pool_address TEXT,
+        market_fetched_at INTEGER,
+        migration_age_ms INTEGER,
+        watch_age_ms INTEGER,
+        details_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_market_mint_ts
+        ON token_market_snapshots(mint, ts);
+      CREATE INDEX IF NOT EXISTS idx_token_market_ts
+        ON token_market_snapshots(ts);
+
+      CREATE TABLE IF NOT EXISTS migration_holder_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mint TEXT NOT NULL,
+        symbol TEXT,
+        migration_signature TEXT NOT NULL UNIQUE,
+        migration_slot INTEGER,
+        migration_time INTEGER NOT NULL,
+        captured_at INTEGER NOT NULL,
+        capture_delay_ms INTEGER,
+        source TEXT,
+        is_complete INTEGER NOT NULL DEFAULT 0,
+        page_count INTEGER,
+        holder_count INTEGER,
+        token_account_count INTEGER,
+        supply_ui REAL,
+        excluded_pool_amount REAL,
+        top1_pct REAL,
+        top5_pct REAL,
+        top10_pct REAL,
+        top20_pct REAL,
+        largest_holder_owner TEXT,
+        largest_holder_pct REAL,
+        holders_json TEXT,
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_migration_holders_mint_time
+        ON migration_holder_snapshots(mint, migration_time);
+      CREATE INDEX IF NOT EXISTS idx_migration_holders_time
+        ON migration_holder_snapshots(migration_time);
 
       CREATE TABLE IF NOT EXISTS quote_asset_movements (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -352,6 +468,7 @@ class TradeLogger {
       'entry_metrics_json TEXT',
       'runner_armed INTEGER DEFAULT 0',
       'runner_armed_at INTEGER',
+      'pending_sell_last_valid_block_height INTEGER',
     ];
     for (const definition of positionResearchColumns) {
       try {
@@ -453,6 +570,139 @@ class TradeLogger {
 
       latestQuoteAssetReconciliation: this.db.prepare(`
         SELECT * FROM quote_asset_reconciliations ORDER BY ts DESC LIMIT 1
+      `),
+
+      insertMigrationRiskSnapshot: this.db.prepare(`
+        INSERT INTO migration_risk_snapshots (
+          mint, symbol, migration_signature, migration_slot, migration_time,
+          captured_at, window_before_ms, window_after_ms, swap_event_count,
+          buy_count, sell_count, buy_sol, sell_sol, net_flow_sol,
+          unique_buyers, unique_sellers, largest_buy_share,
+          price_return_pct, peak_return_pct, trough_return_pct,
+          max_drawdown_pct, pool_quote_change_pct, mint_to_count,
+          large_transfer_count, same_tx_buy_count, audit_incomplete,
+          metrics_json
+        ) VALUES (
+          @mint, @symbol, @migrationSignature, @migrationSlot, @migrationTime,
+          @capturedAt, @windowBeforeMs, @windowAfterMs, @swapEventCount,
+          @buyCount, @sellCount, @buySol, @sellSol, @netFlowSol,
+          @uniqueBuyers, @uniqueSellers, @largestBuyShare,
+          @priceReturnPct, @peakReturnPct, @troughReturnPct,
+          @maxDrawdownPct, @poolQuoteChangePct, @mintToCount,
+          @largeTransferCount, @sameTxBuyCount, @auditIncomplete,
+          @metricsJson
+        )
+        ON CONFLICT(migration_signature) DO UPDATE SET
+          captured_at = excluded.captured_at,
+          swap_event_count = excluded.swap_event_count,
+          buy_count = excluded.buy_count,
+          sell_count = excluded.sell_count,
+          buy_sol = excluded.buy_sol,
+          sell_sol = excluded.sell_sol,
+          net_flow_sol = excluded.net_flow_sol,
+          unique_buyers = excluded.unique_buyers,
+          unique_sellers = excluded.unique_sellers,
+          largest_buy_share = excluded.largest_buy_share,
+          price_return_pct = excluded.price_return_pct,
+          peak_return_pct = excluded.peak_return_pct,
+          trough_return_pct = excluded.trough_return_pct,
+          max_drawdown_pct = excluded.max_drawdown_pct,
+          pool_quote_change_pct = excluded.pool_quote_change_pct,
+          mint_to_count = excluded.mint_to_count,
+          large_transfer_count = excluded.large_transfer_count,
+          same_tx_buy_count = excluded.same_tx_buy_count,
+          audit_incomplete = excluded.audit_incomplete,
+          metrics_json = excluded.metrics_json
+      `),
+
+      insertTokenLifecycleEvent: this.db.prepare(`
+        INSERT OR IGNORE INTO token_lifecycle_events (
+          event_key, mint, symbol, event_type, ts, source, reason,
+          migration_time, migration_age_ms, added_at, watch_age_ms,
+          fdv_usd, liquidity_usd, price_usd, price_sol, pool_quote_sol,
+          market_source, details_json
+        ) VALUES (
+          @eventKey, @mint, @symbol, @eventType, @ts, @source, @reason,
+          @migrationTime, @migrationAgeMs, @addedAt, @watchAgeMs,
+          @fdvUsd, @liquidityUsd, @priceUsd, @priceSol, @poolQuoteSol,
+          @marketSource, @detailsJson
+        )
+      `),
+
+      selectOpenTokenLifecycleSession: this.db.prepare(`
+        SELECT a.added_at, a.ts
+        FROM token_lifecycle_events a
+        WHERE a.mint = ?
+          AND a.event_type = 'TOKEN_ADDED'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM token_lifecycle_events r
+            WHERE r.mint = a.mint
+              AND r.event_type = 'TOKEN_REMOVED'
+              AND r.added_at = a.added_at
+          )
+        ORDER BY a.ts DESC, a.id DESC
+        LIMIT 1
+      `),
+
+      insertTokenMarketSnapshot: this.db.prepare(`
+        INSERT INTO token_market_snapshots (
+          mint, symbol, ts, trigger, source, fdv_usd, liquidity_usd,
+          price_usd, price_sol, supply_ui, pool_quote_sol, pool_address,
+          market_fetched_at, migration_age_ms, watch_age_ms, details_json
+        ) VALUES (
+          @mint, @symbol, @ts, @trigger, @source, @fdvUsd, @liquidityUsd,
+          @priceUsd, @priceSol, @supplyUi, @poolQuoteSol, @poolAddress,
+          @marketFetchedAt, @migrationAgeMs, @watchAgeMs, @detailsJson
+        )
+      `),
+
+      insertMigrationHolderSnapshot: this.db.prepare(`
+        INSERT INTO migration_holder_snapshots (
+          mint, symbol, migration_signature, migration_slot, migration_time,
+          captured_at, capture_delay_ms, source, is_complete, page_count,
+          holder_count, token_account_count, supply_ui, excluded_pool_amount,
+          top1_pct, top5_pct, top10_pct, top20_pct, largest_holder_owner,
+          largest_holder_pct, holders_json, error
+        ) VALUES (
+          @mint, @symbol, @migrationSignature, @migrationSlot, @migrationTime,
+          @capturedAt, @captureDelayMs, @source, @isComplete, @pageCount,
+          @holderCount, @tokenAccountCount, @supplyUi, @excludedPoolAmount,
+          @top1Pct, @top5Pct, @top10Pct, @top20Pct, @largestHolderOwner,
+          @largestHolderPct, @holdersJson, @error
+        )
+        ON CONFLICT(migration_signature) DO UPDATE SET
+          symbol = COALESCE(excluded.symbol, migration_holder_snapshots.symbol),
+          captured_at = excluded.captured_at,
+          capture_delay_ms = excluded.capture_delay_ms,
+          source = excluded.source,
+          is_complete = excluded.is_complete,
+          page_count = excluded.page_count,
+          holder_count = excluded.holder_count,
+          token_account_count = excluded.token_account_count,
+          supply_ui = excluded.supply_ui,
+          excluded_pool_amount = excluded.excluded_pool_amount,
+          top1_pct = excluded.top1_pct,
+          top5_pct = excluded.top5_pct,
+          top10_pct = excluded.top10_pct,
+          top20_pct = excluded.top20_pct,
+          largest_holder_owner = excluded.largest_holder_owner,
+          largest_holder_pct = excluded.largest_holder_pct,
+          holders_json = excluded.holders_json,
+          error = excluded.error
+      `),
+
+      selectMigrationHolderSnapshotStatus: this.db.prepare(`
+        SELECT is_complete, captured_at, source
+        FROM migration_holder_snapshots
+        WHERE migration_signature = ?
+        LIMIT 1
+      `),
+
+      updateMigrationHolderSnapshotSymbol: this.db.prepare(`
+        UPDATE migration_holder_snapshots
+        SET symbol = COALESCE(?, symbol)
+        WHERE migration_signature = ?
       `),
 
       // ============ swap_events ============
@@ -585,9 +835,15 @@ class TradeLogger {
         UPDATE positions SET
           status = 'sell_confirming',
           pending_sell_signature = ?,
+          pending_sell_last_valid_block_height = ?,
           exit_intent = ?,
-          last_retry_at = ?
+          last_retry_at = ?,
+          next_retry_at = ?
         WHERE position_id = ?
+      `),
+
+      deferSellConfirmation: this.db.prepare(`
+        UPDATE positions SET next_retry_at = ? WHERE position_id = ?
       `),
 
       markSellFailedPendingRetry: this.db.prepare(`
@@ -626,7 +882,8 @@ class TradeLogger {
       getDuePendingRetries: this.db.prepare(`
         SELECT * FROM positions
         WHERE status IN ('sell_pending', 'sell_confirming')
-          AND (next_retry_at IS NULL OR next_retry_at <= ?)
+          AND next_retry_at IS NOT NULL
+          AND next_retry_at <= ?
       `),
 
       positionsInRange: this.db.prepare(`
@@ -767,6 +1024,47 @@ class TradeLogger {
     return this.stmts.latestQuoteAssetReconciliation.get() || null;
   }
 
+  logMigrationRiskSnapshot(row) {
+    if (!row?.mint || !row?.migrationSignature) return;
+    let metricsJson = null;
+    try {
+      metricsJson = typeof row.metrics === 'string'
+        ? row.metrics
+        : JSON.stringify(row.metrics || {});
+    } catch (_) {
+      metricsJson = JSON.stringify({ serializationError: true });
+    }
+    this.stmts.insertMigrationRiskSnapshot.run({
+      mint: row.mint,
+      symbol: row.symbol || null,
+      migrationSignature: row.migrationSignature,
+      migrationSlot: row.migrationSlot ?? null,
+      migrationTime: row.migrationTime,
+      capturedAt: row.capturedAt || Date.now(),
+      windowBeforeMs: row.windowBeforeMs ?? 0,
+      windowAfterMs: row.windowAfterMs ?? 0,
+      swapEventCount: row.swapEventCount ?? 0,
+      buyCount: row.buyCount ?? 0,
+      sellCount: row.sellCount ?? 0,
+      buySol: row.buySol ?? 0,
+      sellSol: row.sellSol ?? 0,
+      netFlowSol: row.netFlowSol ?? 0,
+      uniqueBuyers: row.uniqueBuyers ?? 0,
+      uniqueSellers: row.uniqueSellers ?? 0,
+      largestBuyShare: row.largestBuyShare ?? null,
+      priceReturnPct: row.priceReturnPct ?? null,
+      peakReturnPct: row.peakReturnPct ?? null,
+      troughReturnPct: row.troughReturnPct ?? null,
+      maxDrawdownPct: row.maxDrawdownPct ?? null,
+      poolQuoteChangePct: row.poolQuoteChangePct ?? null,
+      mintToCount: row.mintToCount ?? 0,
+      largeTransferCount: row.largeTransferCount ?? 0,
+      sameTxBuyCount: row.sameTxBuyCount ?? 0,
+      auditIncomplete: row.auditIncomplete ? 1 : 0,
+      metricsJson,
+    });
+  }
+
   logSwapEvent(swap) {
     if (!swap || !swap.mint) return;
     const side = String(swap.side || '').toUpperCase();
@@ -805,6 +1103,147 @@ class TradeLogger {
         marketFetchedAt: num(swap.marketFetchedAt),
       });
     } catch (_) { /* best effort; strategy must never block on analytics writes */ }
+  }
+
+  logTokenLifecycleEvent(event) {
+    if (!event?.mint || !event?.eventType) return;
+    const numberOrNull = (value) => {
+      if (value == null || value === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const ts = numberOrNull(event.ts) || Date.now();
+    const eventKey = event.eventKey ||
+      `${event.eventType}:${event.mint}:${numberOrNull(event.addedAt) || ts}`;
+    let detailsJson = null;
+    try {
+      detailsJson = event.details == null ? null : JSON.stringify(event.details);
+    } catch (_) {
+      detailsJson = JSON.stringify({ serializationError: true });
+    }
+    try {
+      this.stmts.insertTokenLifecycleEvent.run({
+        eventKey,
+        mint: event.mint,
+        symbol: event.symbol || null,
+        eventType: event.eventType,
+        ts,
+        source: event.source || null,
+        reason: event.reason || null,
+        migrationTime: numberOrNull(event.migrationTime),
+        migrationAgeMs: numberOrNull(event.migrationAgeMs),
+        addedAt: numberOrNull(event.addedAt),
+        watchAgeMs: numberOrNull(event.watchAgeMs),
+        fdvUsd: numberOrNull(event.fdvUsd),
+        liquidityUsd: numberOrNull(event.liquidityUsd),
+        priceUsd: numberOrNull(event.priceUsd),
+        priceSol: numberOrNull(event.priceSol),
+        poolQuoteSol: numberOrNull(event.poolQuoteSol),
+        marketSource: event.marketSource || null,
+        detailsJson,
+      });
+    } catch (_) { /* research only */ }
+  }
+
+  getOpenTokenLifecycleSession(mint) {
+    if (!mint) return null;
+    try {
+      return this.stmts.selectOpenTokenLifecycleSession.get(mint) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  logTokenMarketSnapshot(snapshot) {
+    if (!snapshot?.mint || !snapshot?.trigger) return;
+    const numberOrNull = (value) => {
+      if (value == null || value === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    let detailsJson = null;
+    try {
+      detailsJson = snapshot.details == null ? null : JSON.stringify(snapshot.details);
+    } catch (_) {
+      detailsJson = JSON.stringify({ serializationError: true });
+    }
+    try {
+      this.stmts.insertTokenMarketSnapshot.run({
+        mint: snapshot.mint,
+        symbol: snapshot.symbol || null,
+        ts: numberOrNull(snapshot.ts) || Date.now(),
+        trigger: snapshot.trigger,
+        source: snapshot.source || null,
+        fdvUsd: numberOrNull(snapshot.fdvUsd),
+        liquidityUsd: numberOrNull(snapshot.liquidityUsd),
+        priceUsd: numberOrNull(snapshot.priceUsd),
+        priceSol: numberOrNull(snapshot.priceSol),
+        supplyUi: numberOrNull(snapshot.supplyUi),
+        poolQuoteSol: numberOrNull(snapshot.poolQuoteSol),
+        poolAddress: snapshot.poolAddress || null,
+        marketFetchedAt: numberOrNull(snapshot.marketFetchedAt),
+        migrationAgeMs: numberOrNull(snapshot.migrationAgeMs),
+        watchAgeMs: numberOrNull(snapshot.watchAgeMs),
+        detailsJson,
+      });
+    } catch (_) { /* research only */ }
+  }
+
+  logMigrationHolderSnapshot(snapshot) {
+    if (!snapshot?.mint || !snapshot?.migrationSignature || !snapshot?.migrationTime) return;
+    const numberOrNull = (value) => {
+      if (value == null || value === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    let holdersJson = null;
+    try {
+      holdersJson = snapshot.holders == null ? null : JSON.stringify(snapshot.holders);
+    } catch (_) {
+      holdersJson = JSON.stringify({ serializationError: true });
+    }
+    try {
+      this.stmts.insertMigrationHolderSnapshot.run({
+        mint: snapshot.mint,
+        symbol: snapshot.symbol || null,
+        migrationSignature: snapshot.migrationSignature,
+        migrationSlot: numberOrNull(snapshot.migrationSlot),
+        migrationTime: numberOrNull(snapshot.migrationTime),
+        capturedAt: numberOrNull(snapshot.capturedAt) || Date.now(),
+        captureDelayMs: numberOrNull(snapshot.captureDelayMs),
+        source: snapshot.source || null,
+        isComplete: snapshot.isComplete ? 1 : 0,
+        pageCount: numberOrNull(snapshot.pageCount),
+        holderCount: numberOrNull(snapshot.holderCount),
+        tokenAccountCount: numberOrNull(snapshot.tokenAccountCount),
+        supplyUi: numberOrNull(snapshot.supplyUi),
+        excludedPoolAmount: numberOrNull(snapshot.excludedPoolAmount),
+        top1Pct: numberOrNull(snapshot.top1Pct),
+        top5Pct: numberOrNull(snapshot.top5Pct),
+        top10Pct: numberOrNull(snapshot.top10Pct),
+        top20Pct: numberOrNull(snapshot.top20Pct),
+        largestHolderOwner: snapshot.largestHolderOwner || null,
+        largestHolderPct: numberOrNull(snapshot.largestHolderPct),
+        holdersJson,
+        error: snapshot.error || null,
+      });
+    } catch (_) { /* research only */ }
+  }
+
+  getMigrationHolderSnapshotStatus(migrationSignature) {
+    if (!migrationSignature) return null;
+    try {
+      return this.stmts.selectMigrationHolderSnapshotStatus.get(migrationSignature) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  updateMigrationHolderSnapshotSymbol(migrationSignature, symbol) {
+    if (!migrationSignature || !symbol) return;
+    try {
+      this.stmts.updateMigrationHolderSnapshotSymbol.run(symbol, migrationSignature);
+    } catch (_) { /* research only */ }
   }
 
   logPositionResearchEvent(event) {
@@ -1015,8 +1454,25 @@ class TradeLogger {
     });
   }
 
-  markSellPending(positionId, signature, exitReason) {
-    this.stmts.markSellPending.run(signature || null, exitReason || null, Date.now(), positionId);
+  markSellPending(
+    positionId,
+    signature,
+    exitReason,
+    nextRetryAt = Date.now() + 30_000,
+    lastValidBlockHeight = null,
+  ) {
+    this.stmts.markSellPending.run(
+      signature || null,
+      lastValidBlockHeight ?? null,
+      exitReason || null,
+      Date.now(),
+      nextRetryAt,
+      positionId,
+    );
+  }
+
+  deferSellConfirmation(positionId, nextRetryAt) {
+    this.stmts.deferSellConfirmation.run(nextRetryAt, positionId);
   }
 
   markSellFailedPendingRetry(positionId, nextRetryAt, errorMsg, exitReason) {

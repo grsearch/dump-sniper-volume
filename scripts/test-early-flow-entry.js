@@ -201,6 +201,24 @@ function feedQualifyingWindow(tracker, finalPrice = 1.02) {
 }
 
 {
+  const tracker = qualifyingTracker({ minPriceChangePct: -10 });
+  const signals = [];
+  tracker.on('earlyFlowSignal', (signal) => signals.push(signal));
+  feedQualifyingWindow(tracker, 0.99);
+  tracker.handleSwap(swap(15_400, {
+    price: 1,
+    side: 'BUY',
+    solVolume: 0.1,
+    signer: 'buyer-d',
+  }));
+  assert.strictEqual(
+    signals.length,
+    0,
+    'a negative 10s price trend must not arm even when an older override requests -10%',
+  );
+}
+
+{
   const tracker = qualifyingTracker();
   const signals = [];
   tracker.on('earlyFlowSignal', (signal) => signals.push(signal));

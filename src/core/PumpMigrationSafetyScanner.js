@@ -203,8 +203,8 @@ class PumpMigrationSafetyScanner {
     this.blockCache = new Map();
   }
 
-  async audit(migration) {
-    if (!this.settings.auditEnabled) {
+  async audit(migration, options = {}) {
+    if (!this.settings.auditEnabled && !options.force) {
       return { allowed: true, skipped: true, reason: 'disabled' };
     }
     if (!this.rpcRequest) throw new Error('PumpMigrationSafetyScanner requires rpcRequest');
@@ -213,7 +213,9 @@ class PumpMigrationSafetyScanner {
     }
 
     const migrationSlot = Math.trunc(Number(migration.slot));
-    let observedDetectionSlot = finiteNumber(migration.detectionSlot);
+    let observedDetectionSlot = options.refreshDetectionSlot
+      ? null
+      : finiteNumber(migration.detectionSlot);
     if (observedDetectionSlot == null) {
       try {
         observedDetectionSlot = finiteNumber(await this._rpcWithRetries('getSlot', [
@@ -226,10 +228,26 @@ class PumpMigrationSafetyScanner {
     if (observedDetectionSlot == null) {
       return this._incomplete('detection slot unavailable', migration);
     }
-    const detectionSlot = Math.max(migrationSlot, Math.trunc(observedDetectionSlot));
-    const preSlots = Math.max(0, Math.trunc(finiteNumber(this.settings.auditPreSlots) || 10));
+    const requestedPostSlots = finiteNumber(options.postSlots);
+    const maxDetectionSlot = requestedPostSlots == null
+      ? Math.trunc(observedDetectionSlot)
+      : migrationSlot + Math.max(0, Math.trunc(requestedPostSlots));
+    const detectionSlot = Math.max(
+      migrationSlot,
+      Math.min(Math.trunc(observedDetectionSlot), maxDetectionSlot),
+    );
+    const preSlots = Math.max(
+      0,
+      Math.trunc(
+        finiteNumber(options.preSlots) ??
+        finiteNumber(this.settings.auditPreSlots) ??
+        10,
+      ),
+    );
     const startSlot = Math.max(0, migrationSlot - preSlots);
-    const range = { startSlot, migrationSlot, detectionSlot };
+    const startTimeMs = finiteNumber(options.startTimeMs);
+    const endTimeMs = finiteNumber(options.endTimeMs);
+    const range = { startSlot, migrationSlot, detectionSlot, startTimeMs, endTimeMs };
 
     try {
       const supply = await this._fetchSupply(migration.mint);
@@ -247,12 +265,23 @@ class PumpMigrationSafetyScanner {
         Math.max(1, Math.trunc(finiteNumber(this.settings.auditRpcConcurrency) || 6)),
         async (slot) => {
           const block = await this._fetchBlock(slot);
+          const blockTimeMs = finiteNumber(block.blockTime) == null
+            ? null
+            : Math.trunc(Number(block.blockTime) * 1000);
+          const beforeWindow = startTimeMs != null && blockTimeMs != null &&
+            blockTimeMs + 999 < startTimeMs;
+          const afterWindow = endTimeMs != null && blockTimeMs != null &&
+            blockTimeMs > endTimeMs;
+          if (beforeWindow || afterWindow) {
+            return { transactionsScanned: 0, matches: [] };
+          }
           const slotMatches = [];
           let transactionsScanned = 0;
           for (const row of block.transactions || []) {
             transactionsScanned++;
             slotMatches.push(...this._inspectTransaction(row, {
               slot,
+              blockTimeMs,
               migration,
               supply,
             }));
@@ -297,7 +326,7 @@ class PumpMigrationSafetyScanner {
         reasonCode: primary.type,
         message: this._messageFor(primary),
         evidence: primary,
-        matches: matches.slice(0, 20),
+        matches: matches.slice(0, Math.max(20, Math.trunc(finiteNumber(options.maxMatches) || 20))),
         summary,
       };
     } catch (err) {
@@ -381,7 +410,7 @@ class PumpMigrationSafetyScanner {
 
   _inspectTransaction(transactionResult, context) {
     if (!transactionResult || transactionResult.meta?.err) return [];
-    const { migration, slot, supply } = context;
+    const { migration, slot, blockTimeMs, supply } = context;
     const accountKeys = resolveAccountKeys(transactionResult);
     const tokenAccounts = tokenAccountMetadata(transactionResult, accountKeys);
     const balanceDeltas = targetMintBalanceDeltas(
@@ -420,6 +449,7 @@ class PumpMigrationSafetyScanner {
           matches.push({
             type: 'mint_to',
             slot,
+            blockTimeMs,
             signature,
             mint: migration.mint,
             destination: info.account || info.destination || null,
@@ -435,6 +465,7 @@ class PumpMigrationSafetyScanner {
           matches.push({
             type: 'mint_to',
             slot,
+            blockTimeMs,
             signature,
             mint: migration.mint,
             destination: accounts[1] || null,
@@ -502,6 +533,7 @@ class PumpMigrationSafetyScanner {
       matches.push({
         type: 'same_tx_buy_migrate',
         slot,
+        blockTimeMs,
         signature,
         mint: migration.mint,
         source: userTransfer?.source || null,
@@ -550,6 +582,7 @@ class PumpMigrationSafetyScanner {
       matches.push({
         type: 'large_transfer',
         slot,
+        blockTimeMs,
         signature,
         mint: migration.mint,
         source: transfer.source,

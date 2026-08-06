@@ -147,6 +147,109 @@ function run() {
     price: 0.5,
     metrics: { pnlPct: -50 },
   });
+  logger.logMigrationRiskSnapshot({
+    mint: 'MigrationMint11111111111111111111111111111',
+    symbol: 'MIGRATION',
+    migrationSignature: 'migration-signature',
+    migrationSlot: 123,
+    migrationTime: since + 500,
+    capturedAt: since + 10_500,
+    windowBeforeMs: 10_000,
+    windowAfterMs: 10_000,
+    swapEventCount: 8,
+    buyCount: 5,
+    sellCount: 3,
+    buySol: 4,
+    sellSol: 2,
+    netFlowSol: 2,
+    uniqueBuyers: 4,
+    uniqueSellers: 2,
+    largestBuyShare: 0.4,
+    priceReturnPct: -12,
+    peakReturnPct: 8,
+    troughReturnPct: -20,
+    maxDrawdownPct: -25,
+    poolQuoteChangePct: -10,
+    mintToCount: 1,
+    largeTransferCount: 2,
+    sameTxBuyCount: 1,
+    metrics: {
+      observeOnly: true,
+      windows: { post10s: { maxSingleTradeDropPct: -15 } },
+    },
+  });
+  const monitoredMint = 'MonitoredOnly11111111111111111111111111111';
+  const monitoredAddedAt = since + 5_000;
+  logger.logTokenLifecycleEvent({
+    eventKey: `TOKEN_ADDED:${monitoredMint}:${monitoredAddedAt}`,
+    mint: monitoredMint,
+    symbol: 'WATCHED',
+    eventType: 'TOKEN_ADDED',
+    ts: monitoredAddedAt,
+    addedAt: monitoredAddedAt,
+    migrationTime: since + 4_000,
+    source: 'pump_graduation',
+  });
+  logger.logTokenMarketSnapshot({
+    mint: monitoredMint,
+    symbol: 'WATCHED',
+    ts: since + 6_000,
+    trigger: 'realtime',
+    source: 'chain_pool_realtime',
+    fdvUsd: 30_000,
+    liquidityUsd: 6_000,
+    priceSol: 0.000001,
+    addedAt: monitoredAddedAt,
+  });
+  logger.logSwapEvent({
+    mint: monitoredMint,
+    symbol: 'WATCHED',
+    ts: since + 7_000,
+    receivedAt: since + 7_010,
+    signature: 'monitored-swap-signature',
+    slot: 456,
+    side: 'BUY',
+    signer: 'buyer-wallet',
+    solVolume: 1,
+    price: 0.0000011,
+  });
+  logger.logMigrationHolderSnapshot({
+    mint: monitoredMint,
+    symbol: 'WATCHED',
+    migrationSignature: 'monitored-migration-signature',
+    migrationSlot: 455,
+    migrationTime: since + 4_000,
+    capturedAt: since + 4_500,
+    captureDelayMs: 500,
+    source: 'helius_das_getTokenAccounts',
+    isComplete: true,
+    holderCount: 4,
+    tokenAccountCount: 5,
+    supplyUi: 1_000_000_000,
+    top1Pct: 4,
+    holders: { top: [{ owner: 'holder-a', pctSupply: 4 }] },
+  });
+  logger.logTokenLifecycleEvent({
+    eventKey: `TOKEN_REMOVED:${monitoredMint}:${monitoredAddedAt}`,
+    mint: monitoredMint,
+    symbol: 'WATCHED',
+    eventType: 'TOKEN_REMOVED',
+    ts: since + 8_000,
+    addedAt: monitoredAddedAt,
+    reason: 'fdv_below_min',
+  });
+  logger.logSwapEvent({
+    mint: monitoredMint,
+    symbol: 'WATCHED',
+    ts: since + 9_000,
+    receivedAt: since + 9_010,
+    signature: 'post-removal-swap-signature',
+    slot: 457,
+    side: 'SELL',
+    signer: 'seller-wallet',
+    solVolume: 1,
+    price: 0.0000008,
+  });
   logger.shutdown();
   db.close();
 
@@ -165,6 +268,12 @@ function run() {
   assert.strictEqual(manifest.counts.closedPositions, 1);
   assert.strictEqual(manifest.counts.openAtCutoff, 1);
   assert.strictEqual(manifest.counts.researchEvents, 1);
+  assert.strictEqual(manifest.counts.migrationRiskSnapshots, 1);
+  assert.strictEqual(manifest.counts.monitoredSessions, 1);
+  assert.strictEqual(manifest.counts.lifecycleEvents, 2);
+  assert.strictEqual(manifest.counts.monitoredMarketSnapshots, 1);
+  assert.strictEqual(manifest.counts.monitoredSwaps, 1);
+  assert.strictEqual(manifest.counts.migrationHolderSnapshots, 1);
 
   const positions = parseCsv(path.join(outDir, 'positions.csv'));
   const censored = positions.find((row) => row.position_id === 'closed-after-cutoff');
@@ -179,6 +288,28 @@ function run() {
   assert.strictEqual(research.length, 1);
   assert.strictEqual(research[0].event_type, 'SWAP_METRICS');
   assert.strictEqual(research[0].trade_count_3s, '3');
+
+  const migrationRisk = parseCsv(path.join(outDir, 'migration-risk-snapshots.csv'));
+  assert.strictEqual(migrationRisk.length, 1);
+  assert.strictEqual(migrationRisk[0].mint, 'MigrationMint11111111111111111111111111111');
+  assert.strictEqual(migrationRisk[0].large_transfer_count, '2');
+  assert.strictEqual(migrationRisk[0].metric_observe_only, 'true');
+
+  const sessions = parseCsv(path.join(outDir, 'monitored-sessions.csv'));
+  assert.strictEqual(sessions.length, 1);
+  assert.strictEqual(sessions[0].mint, monitoredMint);
+  assert.strictEqual(sessions[0].removal_reason, 'fdv_below_min');
+
+  const monitoredSwaps = parseCsv(path.join(outDir, 'monitored-swaps.csv'));
+  assert.strictEqual(monitoredSwaps.length, 1);
+  assert.strictEqual(monitoredSwaps[0].signature, 'monitored-swap-signature');
+
+  const holderSnapshots = parseCsv(
+    path.join(outDir, 'migration-holder-snapshots.csv'),
+  );
+  assert.strictEqual(holderSnapshots.length, 1);
+  assert.strictEqual(holderSnapshots[0].top1_pct, '4');
+  assert.strictEqual(holderSnapshots[0].holder_top_1_owner, 'holder-a');
 
   fs.rmSync(resolvedRoot, { recursive: true, force: true });
   console.log('position research export tests passed');

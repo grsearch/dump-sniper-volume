@@ -376,7 +376,12 @@ const config = {
     maxFdvUsd: parseFloat(process.env.EARLY_FLOW_MAX_FDV_USD || '100000'),
     solPriceUsd: parseFloat(process.env.EARLY_FLOW_SOL_PRICE_USD || '75.5'),
     priceWindowMs: parseInt(process.env.EARLY_FLOW_PRICE_WINDOW_MS || '10000', 10),
-    minPriceChangePct: parseFloat(process.env.EARLY_FLOW_MIN_PRICE_CHANGE_PCT || '-10'),
+    // Keep the 10s trend non-negative even when an older deployment still
+    // carries the former -10 environment value.
+    minPriceChangePct: Math.max(
+      0,
+      parseFloat(process.env.EARLY_FLOW_MIN_PRICE_CHANGE_PCT || '0'),
+    ),
     maxPriceChangePct: parseFloat(process.env.EARLY_FLOW_MAX_PRICE_CHANGE_PCT || '8'),
     netFlowWindowMs: parseInt(process.env.EARLY_FLOW_NET_FLOW_WINDOW_MS || '1000', 10),
     activityWindowMs: parseInt(process.env.EARLY_FLOW_ACTIVITY_WINDOW_MS || '5000', 10),
@@ -659,6 +664,26 @@ const config = {
     ),
     auditFailClosed:
       (process.env.PUMP_DISCOVERY_AUDIT_FAIL_CLOSED ?? 'true').toLowerCase() === 'true',
+    // Observation only: collect migration +/-10s launch-risk features without
+    // changing discovery admission or live trading decisions.
+    rugTelemetryEnabled:
+      (process.env.PUMP_DISCOVERY_RUG_TELEMETRY_ENABLED ?? 'true').toLowerCase() === 'true',
+    rugTelemetryWindowMs: parseInt(
+      process.env.PUMP_DISCOVERY_RUG_TELEMETRY_WINDOW_MS || '10000',
+      10,
+    ),
+    rugTelemetryPreSlots: parseInt(
+      process.env.PUMP_DISCOVERY_RUG_TELEMETRY_PRE_SLOTS || '32',
+      10,
+    ),
+    rugTelemetryMaxEvents: parseInt(
+      process.env.PUMP_DISCOVERY_RUG_TELEMETRY_MAX_EVENTS || '2000',
+      10,
+    ),
+    rugTelemetryMaxConcurrentScans: parseInt(
+      process.env.PUMP_DISCOVERY_RUG_TELEMETRY_MAX_CONCURRENT_SCANS || '1',
+      10,
+    ),
     minFdvUsd: parseFloat(process.env.MIN_FDV_USD || '15000'),
     maxFdvUsd: parseFloat(process.env.MAX_FDV_USD || '1000000'),
     minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '3000'),

@@ -173,6 +173,31 @@ function flattenResearchRow(row) {
   return flat;
 }
 
+function flattenMigrationRiskRow(row) {
+  const flat = { ...row };
+  flattenObject(flat, 'metric', parseJson(row.metrics_json));
+  return flat;
+}
+
+function flattenHolderSnapshotRow(row) {
+  const flat = { ...row };
+  const details = parseJson(row.holders_json);
+  const top = Array.isArray(details.top) ? details.top : [];
+  const summary = { ...details };
+  delete summary.top;
+  flattenObject(flat, 'holder', summary);
+  top.forEach((holder, index) => {
+    const prefix = `holder_top_${index + 1}`;
+    flat[`${prefix}_owner`] = holder?.owner || null;
+    flat[`${prefix}_amount_ui`] = holder?.amountUi ?? null;
+    flat[`${prefix}_pct_supply`] = holder?.pctSupply ?? null;
+    flat[`${prefix}_token_accounts`] = Array.isArray(holder?.tokenAccounts)
+      ? holder.tokenAccounts.join('|')
+      : null;
+  });
+  return flat;
+}
+
 function censorPositionAtCutoff(row, cutoffMs) {
   const closedAt = Number(row.closed_at);
   if (Number.isFinite(closedAt) && closedAt < cutoffMs) return row;
@@ -293,7 +318,167 @@ function main(argv = process.argv.slice(2)) {
         `).all(since, until)
       : [];
 
-    return { positions, researchEvents, trades, signals, swaps, postExitStats, tokens };
+    const migrationRiskSnapshots = hasTable('migration_risk_snapshots')
+      ? db.prepare(`
+          SELECT * FROM migration_risk_snapshots
+          WHERE migration_time >= ? AND migration_time < ?
+            AND captured_at < ?
+          ORDER BY migration_time, id
+        `).all(since - 10_000, until, until)
+      : [];
+
+    const monitoredSessions = hasTable('token_lifecycle_events')
+      ? db.prepare(`
+          SELECT a.*,
+            (
+              SELECT MIN(r.ts)
+              FROM token_lifecycle_events r
+              WHERE r.mint = a.mint
+                AND r.event_type = 'TOKEN_REMOVED'
+                AND r.added_at = a.added_at
+            ) AS removed_at,
+            (
+              SELECT r.reason
+              FROM token_lifecycle_events r
+              WHERE r.mint = a.mint
+                AND r.event_type = 'TOKEN_REMOVED'
+                AND r.added_at = a.added_at
+              ORDER BY r.ts ASC
+              LIMIT 1
+            ) AS removal_reason
+          FROM token_lifecycle_events a
+          WHERE a.event_type = 'TOKEN_ADDED'
+            AND a.ts < ?
+            AND COALESCE((
+              SELECT MIN(r.ts)
+              FROM token_lifecycle_events r
+              WHERE r.mint = a.mint
+                AND r.event_type = 'TOKEN_REMOVED'
+                AND r.added_at = a.added_at
+            ), ?) >= ?
+          ORDER BY a.ts, a.id
+        `).all(until, until, since)
+      : [];
+
+    const lifecycleEvents = hasTable('token_lifecycle_events')
+      ? db.prepare(`
+          SELECT e.*
+          FROM token_lifecycle_events e
+          WHERE EXISTS (
+            SELECT 1
+            FROM token_lifecycle_events a
+            WHERE a.event_type = 'TOKEN_ADDED'
+              AND a.mint = e.mint
+              AND a.added_at = e.added_at
+              AND a.ts < ?
+              AND COALESCE((
+                SELECT MIN(r.ts)
+                FROM token_lifecycle_events r
+                WHERE r.mint = a.mint
+                  AND r.event_type = 'TOKEN_REMOVED'
+                  AND r.added_at = a.added_at
+              ), ?) >= ?
+          )
+          ORDER BY e.ts, e.id
+        `).all(until, until, since)
+      : [];
+
+    const monitoredMarketSnapshots = hasTable('token_market_snapshots') &&
+      hasTable('token_lifecycle_events')
+      ? db.prepare(`
+          SELECT m.*
+          FROM token_market_snapshots m
+          WHERE m.ts >= ? AND m.ts < ?
+            AND EXISTS (
+              SELECT 1
+              FROM token_lifecycle_events a
+              WHERE a.event_type = 'TOKEN_ADDED'
+                AND a.mint = m.mint
+                AND a.ts <= m.ts
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM token_lifecycle_events r
+                  WHERE r.mint = a.mint
+                    AND r.event_type = 'TOKEN_REMOVED'
+                    AND r.added_at = a.added_at
+                    AND r.ts < m.ts
+                )
+            )
+          ORDER BY m.ts, m.id
+        `).all(since, until)
+      : [];
+
+    const monitoredSwaps = hasTable('token_lifecycle_events')
+      ? db.prepare(`
+          SELECT s.*
+          FROM swap_events s
+          WHERE s.ts >= ? AND s.ts < ?
+            AND EXISTS (
+              SELECT 1
+              FROM token_lifecycle_events a
+              WHERE a.event_type = 'TOKEN_ADDED'
+                AND a.mint = s.mint
+                AND a.ts <= s.ts
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM token_lifecycle_events r
+                  WHERE r.mint = a.mint
+                    AND r.event_type = 'TOKEN_REMOVED'
+                    AND r.added_at = a.added_at
+                    AND r.ts < s.ts
+                )
+            )
+          ORDER BY s.ts, s.id
+        `).all(since, until)
+      : [];
+
+    const migrationHolderSnapshots = hasTable('migration_holder_snapshots')
+      ? db.prepare(`
+          SELECT * FROM migration_holder_snapshots
+          WHERE migration_time >= ? AND migration_time < ?
+            AND captured_at < ?
+          ORDER BY migration_time, id
+        `).all(since - 10_000, until, until)
+      : [];
+
+    const monitoredTokens = hasTable('tokens') && hasTable('token_lifecycle_events')
+      ? db.prepare(`
+          SELECT t.*
+          FROM tokens t
+          WHERE EXISTS (
+            SELECT 1
+            FROM token_lifecycle_events a
+            WHERE a.event_type = 'TOKEN_ADDED'
+              AND a.mint = t.mint
+              AND a.ts < ?
+              AND COALESCE((
+                SELECT MIN(r.ts)
+                FROM token_lifecycle_events r
+                WHERE r.mint = a.mint
+                  AND r.event_type = 'TOKEN_REMOVED'
+                  AND r.added_at = a.added_at
+              ), ?) >= ?
+          )
+          ORDER BY t.mint
+        `).all(until, until, since)
+      : [];
+
+    return {
+      positions,
+      researchEvents,
+      trades,
+      signals,
+      swaps,
+      postExitStats,
+      tokens,
+      migrationRiskSnapshots,
+      monitoredSessions,
+      lifecycleEvents,
+      monitoredMarketSnapshots,
+      monitoredSwaps,
+      migrationHolderSnapshots,
+      monitoredTokens,
+    };
   });
 
   const data = readSnapshot();
@@ -310,13 +495,26 @@ function main(argv = process.argv.slice(2)) {
   writeCsv(path.join(outDir, 'swaps.csv'), data.swaps);
   writeCsv(path.join(outDir, 'post-exit-stats.csv'), data.postExitStats);
   writeCsv(path.join(outDir, 'tokens.csv'), data.tokens);
+  writeCsv(
+    path.join(outDir, 'migration-risk-snapshots.csv'),
+    data.migrationRiskSnapshots.map(flattenMigrationRiskRow),
+  );
+  writeCsv(path.join(outDir, 'monitored-sessions.csv'), data.monitoredSessions);
+  writeCsv(path.join(outDir, 'token-lifecycle-events.csv'), data.lifecycleEvents);
+  writeCsv(path.join(outDir, 'token-market-snapshots.csv'), data.monitoredMarketSnapshots);
+  writeCsv(path.join(outDir, 'monitored-swaps.csv'), data.monitoredSwaps);
+  writeCsv(
+    path.join(outDir, 'migration-holder-snapshots.csv'),
+    data.migrationHolderSnapshots.map(flattenHolderSnapshotRow),
+  );
+  writeCsv(path.join(outDir, 'monitored-tokens.csv'), data.monitoredTokens);
 
   const countsByType = {};
   for (const event of data.researchEvents) {
     countsByType[event.event_type] = (countsByType[event.event_type] || 0) + 1;
   }
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: Date.now(),
     generatedAtIso: new Date().toISOString(),
     dbPath,
@@ -338,6 +536,13 @@ function main(argv = process.argv.slice(2)) {
       signals: data.signals.length,
       tokens: data.tokens.length,
       postExitStats: data.postExitStats.length,
+      migrationRiskSnapshots: data.migrationRiskSnapshots.length,
+      monitoredSessions: data.monitoredSessions.length,
+      lifecycleEvents: data.lifecycleEvents.length,
+      monitoredMarketSnapshots: data.monitoredMarketSnapshots.length,
+      monitoredSwaps: data.monitoredSwaps.length,
+      migrationHolderSnapshots: data.migrationHolderSnapshots.length,
+      monitoredTokens: data.monitoredTokens.length,
     },
     files: [
       'positions.csv',
@@ -347,11 +552,18 @@ function main(argv = process.argv.slice(2)) {
       'swaps.csv',
       'post-exit-stats.csv',
       'tokens.csv',
+      'migration-risk-snapshots.csv',
+      'monitored-sessions.csv',
+      'token-lifecycle-events.csv',
+      'token-market-snapshots.csv',
+      'monitored-swaps.csv',
+      'migration-holder-snapshots.csv',
+      'monitored-tokens.csv',
       'data-dictionary.json',
     ],
   };
   const dataDictionary = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     cutoffRule:
       'Rows and outcomes at or after manifest.analysisCutoffMs are excluded or censored.',
     files: {
@@ -365,6 +577,20 @@ function main(argv = process.argv.slice(2)) {
       'signals.csv': 'Accepted and rejected signals near the analysis interval.',
       'post-exit-stats.csv': 'Completed post-exit follow-up summaries known before the cutoff.',
       'tokens.csv': 'Token registry metadata for exported mints.',
+      'migration-risk-snapshots.csv':
+        'Observe-only migration +/-10s launch-risk snapshots. metric_windows_* contains flow, wallet, price, FDV and pool changes; metric_chain_* contains MintTo, large-transfer and same-transaction-buy evidence. These rows never block trading.',
+      'monitored-sessions.csv':
+        'One row per token watch session overlapping the export window, including structured removal time and reason.',
+      'token-lifecycle-events.csv':
+        'Structured TOKEN_ADDED and TOKEN_REMOVED events for monitored sessions.',
+      'token-market-snapshots.csv':
+        'Throttled FDV, LP, price, supply and pool snapshots while the token remained actively monitored.',
+      'monitored-swaps.csv':
+        'All successfully parsed swaps received while each token remained actively monitored, including tokens never bought.',
+      'migration-holder-snapshots.csv':
+        'Holder distribution captured immediately when a migration is detected, before admission screening completes. Pool vaults are excluded from concentration metrics; capture_delay_ms measures index/detection delay.',
+      'monitored-tokens.csv':
+        'Latest registry metadata for every token with a monitoring session overlapping the export window.',
     },
     researchEventTypes: {
       POSITION_OPENED: 'A submitted BUY was registered as a position.',
@@ -429,5 +655,7 @@ module.exports = {
   censorPositionAtCutoff,
   flattenPositionRow,
   flattenResearchRow,
+  flattenMigrationRiskRow,
+  flattenHolderSnapshotRow,
   main,
 };

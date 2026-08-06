@@ -69,6 +69,7 @@ class PositionManager extends EventEmitter {
     this._tickCount = 0;  // v3.26: tick counter for PoolStateCache price check
     this._flowExitEvents = new Map(); // mint -> recent BUY/SELL swaps while holding
     this._rsiExitSkipLogAt = new Map(); // mint -> { ts, reason }; throttle diagnostic logs
+    this._sellAttemptsInFlight = new Set(); // positionId -> unresolved sell submission
     this._lastRsi5sByMint = new Map(); // mint -> previous valid live RSI(7, 5s)
     this._pendingRsi5sExit = new Map(); // mint -> condition seen before BUY reconciliation
     this._addonShadowsByMint = new Map(); // mint -> Map<sourcePositionId, virtual add-on>
@@ -2236,6 +2237,7 @@ class PositionManager extends EventEmitter {
         exitReason: row.exit_intent || row.exit_reason || null,
         nextRetryAt: row.next_retry_at || null,
         _lastSellSignature: row.pending_sell_signature || null,
+        _lastSellValidBlockHeight: row.pending_sell_last_valid_block_height || null,
         // v3.17: trailing 字段
         // v3.17.21: 从 DB 恢复 peak_price，避免重启丢失高点
         highWaterMark: row.peak_price > 0 ? row.peak_price : row.entry_price,
@@ -4405,6 +4407,25 @@ class PositionManager extends EventEmitter {
   }
 
   async _attemptSell(pos, triggerPrice) {
+    if (!pos || !this.positions.has(pos.positionId)) return false;
+    if (this._sellAttemptsInFlight.has(pos.positionId)) {
+      monitor.inc('PositionManager.sellAttemptDeduped', 1, 'PositionManager');
+      console.warn(
+        `[PositionManager] SELL attempt suppressed while previous transaction is unresolved: ` +
+          `${pos.symbol || pos.mint.slice(0, 6)} position=${pos.positionId}`,
+      );
+      return false;
+    }
+
+    this._sellAttemptsInFlight.add(pos.positionId);
+    try {
+      return await this._attemptSellUnlocked(pos, triggerPrice);
+    } finally {
+      this._sellAttemptsInFlight.delete(pos.positionId);
+    }
+  }
+
+  async _attemptSellUnlocked(pos, triggerPrice) {
     const attemptStartedAt = Date.now();
     const tokenInfo = this.tokenRegistry.getToken(pos.mint);
 
@@ -4552,8 +4573,16 @@ class PositionManager extends EventEmitter {
 
     // 此时 ⚠️ 不能立即 closePosition！tx 可能在 mempool 被丢、滑点超限被 reject
     // 标记 sell_confirming 状态，启动后台确认
-    this.tradeLogger.markSellPending(pos.positionId, sellResult.signature, pos.exitReason);
+    const confirmationDeadlineAt = (pos._lastSellSubmittedAt || Date.now()) + 30_000;
+    this.tradeLogger.markSellPending(
+      pos.positionId,
+      sellResult.signature,
+      pos.exitReason,
+      confirmationDeadlineAt,
+      sellResult.lastValidBlockHeight,
+    );
     pos._lastSellSignature = sellResult.signature;
+    pos._lastSellValidBlockHeight = sellResult.lastValidBlockHeight ?? null;
 
     if (pos.dryRun) {
       // DRY_RUN 直接当成功
@@ -4561,16 +4590,24 @@ class PositionManager extends EventEmitter {
       return;
     }
 
-    // 异步确认（不 await，避免阻塞下一笔操作；失败会自己触发 retry）
-    this._confirmSellAsync(pos, sellResult.signature, realExitPrice, realSolOut, triggerPrice, actualSellAmount).catch(
-      (err) => {
-        monitor.recordError('PositionManager', err, {
-          phase: 'confirm_async_crash',
-          mint: pos.mint,
-          signature: sellResult.signature,
-        });
-      },
-    );
+    // Hold the sell locks through the first confirmation pass. RPC failures
+    // are ambiguous and remain sell_confirming until the reconciler deadline.
+    try {
+      await this._confirmSellAsync(
+        pos,
+        sellResult.signature,
+        realExitPrice,
+        realSolOut,
+        triggerPrice,
+        actualSellAmount,
+      );
+    } catch (err) {
+      monitor.recordError('PositionManager', err, {
+        phase: 'confirm_sell_crash',
+        mint: pos.mint,
+        signature: sellResult.signature,
+      });
+    }
   }
 
   /**
@@ -4677,6 +4714,16 @@ class PositionManager extends EventEmitter {
         mint: pos.mint,
         signature,
       });
+    }
+
+    if ((result.error || 'not_landed') === 'not_landed') {
+      monitor.inc('PositionManager.sellAwaitingLateConfirmation', 1, 'PositionManager');
+      console.warn(
+        `[PositionManager] SELL remains in confirmation grace period: ` +
+          `${pos.symbol || pos.mint.slice(0, 6)} sig=${signature.slice(0, 8)}..; ` +
+          `reconciler will recheck before any replacement transaction`,
+      );
+      return;
     }
 
     this._scheduleRetryOrStuck(pos, triggerPrice, errMsg);
@@ -5138,6 +5185,40 @@ class PositionManager extends EventEmitter {
 
             this._finalizeSuccess(pos, exitPrice, solOut, sig, null);  // v3.17.40c: reconciler path, no actualSellAmount
             continue;
+          }
+
+          if (!result.error || result.error === 'not_landed') {
+            const lastValidBlockHeight = Number(
+              row.pending_sell_last_valid_block_height || pos._lastSellValidBlockHeight,
+            );
+            if (lastValidBlockHeight > 0) {
+              let currentBlockHeight = null;
+              try {
+                currentBlockHeight = await this.executor.getCurrentBlockHeight();
+              } catch (err) {
+                monitor.recordError('PositionManager', err, {
+                  phase: 'sell_expiry_block_height',
+                  mint: pos.mint,
+                  signature: sig,
+                });
+              }
+              if (!(Number(currentBlockHeight) > lastValidBlockHeight)) {
+                const nextCheckAt = Date.now() + 5_000;
+                this.tradeLogger.deferSellConfirmation(pos.positionId, nextCheckAt);
+                monitor.inc('PositionManager.sellReplacementDeferred', 1, 'PositionManager');
+                console.warn(
+                  `[PositionManager] SELL replacement deferred: ` +
+                    `${pos.symbol || pos.mint.slice(0, 6)} sig=${sig.slice(0, 8)}.. ` +
+                    `block=${currentBlockHeight ?? 'unknown'} <= lastValid=${lastValidBlockHeight}`,
+                );
+                continue;
+              }
+              console.warn(
+                `[PositionManager] SELL transaction expired; replacement is now allowed: ` +
+                  `${pos.symbol || pos.mint.slice(0, 6)} sig=${sig.slice(0, 8)}.. ` +
+                  `block=${currentBlockHeight} > lastValid=${lastValidBlockHeight}`,
+              );
+            }
           }
         }
         // 没确认，触发重试

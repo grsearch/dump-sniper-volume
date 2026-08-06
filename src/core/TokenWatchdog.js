@@ -90,6 +90,10 @@ class TokenWatchdog {
       250,
       parseInt(process.env.WATCHDOG_REALTIME_MARKET_PERSIST_MS || '1000', 10),
     );
+    this.researchMarketSnapshotMs = Math.max(
+      1000,
+      parseInt(process.env.TOKEN_MARKET_SNAPSHOT_INTERVAL_MS || '5000', 10),
+    );
     this.solPriceUsd = Number(config.earlyFlow.solPriceUsd) || 0;
 
     this._pendingExitMints = new Set();
@@ -99,6 +103,7 @@ class TokenWatchdog {
     this._lastMarketAttemptAt = new Map();
     this._lastProviderMarketAt = new Map();
     this._lastRealtimePersistAt = new Map();
+    this._lastResearchMarketSnapshotAt = new Map();
     this._lastRealtimeKeepLogAt = new Map();
     this._latestRealtimeMarkets = new Map();
 
@@ -190,18 +195,84 @@ class TokenWatchdog {
     return now - migrationTime;
   }
 
-  _removeToken(token, reasonStr) {
+  _timingForToken(token, now = Date.now()) {
+    const migrationTime = Number(token?.migration_time);
+    const openSession = this.tradeLogger?.getOpenTokenLifecycleSession?.(token?.mint);
+    const sessionAddedAt = Number(openSession?.added_at);
+    const registryAddedAt = Number(token?.added_at);
+    const addedAt = Number.isFinite(sessionAddedAt) && sessionAddedAt > 0
+      ? sessionAddedAt
+      : registryAddedAt;
+    return {
+      migrationTime: Number.isFinite(migrationTime) && migrationTime > 0 ? migrationTime : null,
+      migrationAgeMs: Number.isFinite(migrationTime) && migrationTime > 0
+        ? Math.max(0, now - migrationTime)
+        : null,
+      addedAt: Number.isFinite(addedAt) && addedAt > 0 ? addedAt : null,
+      watchAgeMs: Number.isFinite(addedAt) && addedAt > 0
+        ? Math.max(0, now - addedAt)
+        : null,
+    };
+  }
+
+  _recordMarketSnapshot(token, market = {}, trigger = 'periodic', force = false) {
+    if (!this.tradeLogger?.logTokenMarketSnapshot || !token?.mint) return;
+    const now = Date.now();
+    const lastAt = this._lastResearchMarketSnapshotAt.get(token.mint) || 0;
+    if (!force && now - lastAt < this.researchMarketSnapshotMs) return;
+    const timing = this._timingForToken(token, now);
+    this.tradeLogger.logTokenMarketSnapshot({
+      mint: token.mint,
+      symbol: token.symbol,
+      ts: now,
+      trigger,
+      source: market.marketSource || market.source || token.market_source,
+      fdvUsd: market.fdvUsd ?? market.fdv ?? token.fdv,
+      liquidityUsd: market.liquidityUsd ?? market.liquidity ?? token.liquidity,
+      priceUsd: market.priceUsd ?? market.price ?? token.price,
+      priceSol: market.priceSol,
+      supplyUi: market.supplyUi ?? market.supply,
+      poolQuoteSol: market.poolQuoteSol,
+      poolAddress: market.poolAddress || token.pool_address,
+      marketFetchedAt: market.fetchedAt ?? token.market_updated_at,
+      ...timing,
+    });
+    this._lastResearchMarketSnapshotAt.set(token.mint, now);
+  }
+
+  _removeToken(token, reasonStr, market = null) {
     if (!token?.mint) return false;
     const symbol = token.symbol || token.mint.slice(0, 8);
+    const removedAt = Date.now();
+    const effectiveMarket = market || this._latestRealtimeMarkets.get(token.mint) || {};
+    const timing = this._timingForToken(token, removedAt);
+    this._recordMarketSnapshot(token, effectiveMarket, 'final_before_remove', true);
+    this.tradeLogger?.logTokenLifecycleEvent?.({
+      eventKey: `TOKEN_REMOVED:${token.mint}:${timing.addedAt || removedAt}`,
+      mint: token.mint,
+      symbol,
+      eventType: 'TOKEN_REMOVED',
+      ts: removedAt,
+      source: token.source || null,
+      reason: reasonStr,
+      ...timing,
+      fdvUsd: effectiveMarket.fdvUsd ?? effectiveMarket.fdv ?? token.fdv,
+      liquidityUsd: effectiveMarket.liquidityUsd ?? effectiveMarket.liquidity ?? token.liquidity,
+      priceUsd: effectiveMarket.priceUsd ?? effectiveMarket.price ?? token.price,
+      priceSol: effectiveMarket.priceSol,
+      poolQuoteSol: effectiveMarket.poolQuoteSol,
+      marketSource: effectiveMarket.marketSource || effectiveMarket.source || token.market_source,
+    });
     console.log(`[TokenWatchdog] REMOVE ${symbol}: ${reasonStr}`);
     this.tokenRegistry.removeToken(token.mint);
     this._pendingExitMints.delete(token.mint);
     this._lastMarketAttemptAt.delete(token.mint);
     this._lastProviderMarketAt.delete(token.mint);
     this._lastRealtimePersistAt.delete(token.mint);
+    this._lastResearchMarketSnapshotAt.delete(token.mint);
     this._lastRealtimeKeepLogAt.delete(token.mint);
     this._latestRealtimeMarkets.delete(token.mint);
-    if (this.onTokenRemoved) this.onTokenRemoved();
+    if (this.onTokenRemoved) this.onTokenRemoved({ token, reason: reasonStr, removedAt });
     monitor.inc('TokenWatchdog.tokensRemoved', 1, 'TokenWatchdog');
     return true;
   }
@@ -393,6 +464,12 @@ class TokenWatchdog {
       poolAddress: resolvedPoolAddress,
       fetchedAt: now,
     };
+    this._recordMarketSnapshot(
+      currentToken,
+      { ...marketResult, marketSource: 'chain_pool_realtime' },
+      reasons.length > 0 ? 'realtime_threshold' : 'realtime',
+      reasons.length > 0,
+    );
     if (reasons.length === 0) {
       return { removed: false, ...marketResult };
     }
@@ -411,7 +488,10 @@ class TokenWatchdog {
       return { removed: false, retainedForPosition: true, ...marketResult };
     }
 
-    const removed = this._removeToken(currentToken, reasonStr);
+    const removed = this._removeToken(currentToken, reasonStr, {
+      ...marketResult,
+      marketSource: 'chain_pool_realtime',
+    });
     if (removed) monitor.inc('TokenWatchdog.realtimeRemoved', 1, 'TokenWatchdog');
     return { removed, ...marketResult };
   }
@@ -557,6 +637,10 @@ class TokenWatchdog {
     const marketStats = await this._refreshMarkets(this.tokenRegistry.listActive(), now);
     const activeTokens = this.tokenRegistry.listActive();
     let removed = 0;
+
+    for (const token of activeTokens) {
+      this._recordMarketSnapshot(token, {}, 'provider_checkpoint', true);
+    }
 
     for (const token of activeTokens) {
       const reasons = [];

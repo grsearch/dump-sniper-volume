@@ -22,8 +22,10 @@ class EarlyFlowEntryTracker extends EventEmitter {
     this.minFdvUsd = opts.minFdvUsd ?? strategy.minFdvUsd ?? 15_000;
     this.maxFdvUsd = opts.maxFdvUsd ?? strategy.maxFdvUsd ?? 100_000;
     this.priceWindowMs = opts.priceWindowMs ?? strategy.priceWindowMs ?? 10_000;
-    this.minPriceChangePct = opts.minPriceChangePct ??
-      strategy.minPriceChangePct ?? -10;
+    this.minPriceChangePct = Math.max(
+      0,
+      opts.minPriceChangePct ?? strategy.minPriceChangePct ?? 0,
+    );
     this.maxPriceChangePct = opts.maxPriceChangePct ??
       strategy.maxPriceChangePct ?? 8;
     this.netFlowWindowMs = opts.netFlowWindowMs ??

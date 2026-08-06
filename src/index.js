@@ -22,6 +22,8 @@ const CompetitorTracker = require('./core/CompetitorTracker');
 const EarlyFlowEntryTracker = require('./core/EarlyFlowEntryTracker');
 const Ema15sTracker = require('./core/Ema15sTracker');
 const PumpGraduationDiscovery = require('./core/PumpGraduationDiscovery');
+const MigrationRugTelemetry = require('./core/MigrationRugTelemetry');
+const MigrationHolderSnapshotCollector = require('./core/MigrationHolderSnapshotCollector');
 const { isLikelyVaultAddress } = require('./utils/pumpMigrationParser');
 const { warmupRsiFromDb } = require('./utils/rsiWarmup');
 
@@ -142,8 +144,118 @@ async function main() {
   // ============ 数据层 ============
   const tokenRegistry = new TokenRegistry();
   const tradeLogger = new TradeLogger(tokenRegistry.db);
+  const migrationHolderCollector = new MigrationHolderSnapshotCollector({ tradeLogger });
+
+  const tokenTiming = (token, now = Date.now()) => {
+    const migrationTime = Number(token?.migration_time);
+    const openSession = tradeLogger.getOpenTokenLifecycleSession?.(token?.mint);
+    const sessionAddedAt = Number(openSession?.added_at);
+    const registryAddedAt = Number(token?.added_at);
+    const addedAt = Number.isFinite(sessionAddedAt) && sessionAddedAt > 0
+      ? sessionAddedAt
+      : registryAddedAt;
+    return {
+      migrationTime: Number.isFinite(migrationTime) && migrationTime > 0 ? migrationTime : null,
+      migrationAgeMs: Number.isFinite(migrationTime) && migrationTime > 0
+        ? Math.max(0, now - migrationTime)
+        : null,
+      addedAt: Number.isFinite(addedAt) && addedAt > 0 ? addedAt : null,
+      watchAgeMs: Number.isFinite(addedAt) && addedAt > 0
+        ? Math.max(0, now - addedAt)
+        : null,
+    };
+  };
+  const recordTokenAdded = (token, details = null, market = null) => {
+    if (!token?.mint) return;
+    const now = Date.now();
+    const currentTiming = tokenTiming(token, now);
+    const openSession = tradeLogger.getOpenTokenLifecycleSession?.(token.mint);
+    const openSessionAddedAt = Number(openSession?.added_at);
+    const registryAddedAt = Number(token.added_at);
+    const sessionAddedAt = Number.isFinite(openSessionAddedAt) && openSessionAddedAt > 0
+      ? openSessionAddedAt
+      : details?.backfilledAtStartup && Number.isFinite(registryAddedAt) && registryAddedAt > 0
+        ? registryAddedAt
+        : now;
+    const timing = {
+      ...currentTiming,
+      addedAt: sessionAddedAt,
+      watchAgeMs: Math.max(0, now - sessionAddedAt),
+    };
+    let meta = {};
+    try { meta = token.meta_json ? JSON.parse(token.meta_json) : {}; } catch (_) {}
+    const effectiveMarket = market || {};
+    tradeLogger.logTokenLifecycleEvent({
+      eventKey: `TOKEN_ADDED:${token.mint}:${timing.addedAt || now}`,
+      mint: token.mint,
+      symbol: token.symbol,
+      eventType: 'TOKEN_ADDED',
+      ts: timing.addedAt || now,
+      source: token.source,
+      ...timing,
+      fdvUsd: effectiveMarket.fdv ?? effectiveMarket.fdvUsd ?? token.fdv,
+      liquidityUsd: effectiveMarket.liquidity ?? effectiveMarket.liquidityUsd ?? token.liquidity,
+      priceUsd: effectiveMarket.price ?? effectiveMarket.priceUsd ?? token.price,
+      priceSol: effectiveMarket.priceSol ?? meta.priceSol,
+      poolQuoteSol: effectiveMarket.poolQuoteSol ?? meta.poolQuoteSol,
+      marketSource: effectiveMarket.marketSource || token.market_source,
+      details,
+    });
+    tradeLogger.logTokenMarketSnapshot({
+      mint: token.mint,
+      symbol: token.symbol,
+      ts: now,
+      trigger: 'token_added',
+      source: effectiveMarket.marketSource || token.market_source || token.source,
+      fdvUsd: effectiveMarket.fdv ?? effectiveMarket.fdvUsd ?? token.fdv,
+      liquidityUsd: effectiveMarket.liquidity ?? effectiveMarket.liquidityUsd ?? token.liquidity,
+      priceUsd: effectiveMarket.price ?? effectiveMarket.priceUsd ?? token.price,
+      priceSol: effectiveMarket.priceSol ?? meta.priceSol,
+      supplyUi: effectiveMarket.supplyUi ?? meta.supplyUi,
+      poolQuoteSol: effectiveMarket.poolQuoteSol ?? meta.poolQuoteSol,
+      poolAddress: token.pool_address,
+      marketFetchedAt: token.market_updated_at,
+      ...timing,
+      details,
+    });
+  };
+  const recordExternalTokenRemoval = ({ token, reason, removedAt = Date.now() } = {}) => {
+    if (!token?.mint) return;
+    const timing = tokenTiming(token, removedAt);
+    tradeLogger.logTokenMarketSnapshot({
+      mint: token.mint,
+      symbol: token.symbol,
+      ts: removedAt,
+      trigger: 'final_before_remove',
+      source: token.market_source,
+      fdvUsd: token.fdv,
+      liquidityUsd: token.liquidity,
+      priceUsd: token.price,
+      poolAddress: token.pool_address,
+      marketFetchedAt: token.market_updated_at,
+      ...timing,
+    });
+    tradeLogger.logTokenLifecycleEvent({
+      eventKey: `TOKEN_REMOVED:${token.mint}:${timing.addedAt || removedAt}`,
+      mint: token.mint,
+      symbol: token.symbol,
+      eventType: 'TOKEN_REMOVED',
+      ts: removedAt,
+      source: token.source,
+      reason,
+      ...timing,
+      fdvUsd: token.fdv,
+      liquidityUsd: token.liquidity,
+      priceUsd: token.price,
+      marketSource: token.market_source,
+    });
+  };
 
   // ============ 核心引擎 ============
+  for (const token of tokenRegistry.listActive()) {
+    recordTokenAdded(token, { backfilledAtStartup: true });
+  }
+
   const priceTracker = new PriceTracker();
   const dumpDetector = new DumpDetector(tokenRegistry);
   const executor = new Executor();
@@ -278,6 +390,7 @@ async function main() {
   });
   const earlyFlowTracker = new EarlyFlowEntryTracker({ tokenRegistry });
   const ema15sTracker = new Ema15sTracker();
+  let migrationRugTelemetry = null;
   ema15sTracker.on('downCross', (cross) => {
     positionManager.handleEmaDownCross(cross);
   });
@@ -314,6 +427,7 @@ async function main() {
     if (config.capture.swapEventsEnabled) {
       try { tradeLogger.logSwapEvent(enrichedSwap); } catch (_) { /* analytics only */ }
     }
+    try { migrationRugTelemetry?.handleSwap(enrichedSwap); } catch (_) { /* research only */ }
     try { competitorTracker.handleSwap(enrichedSwap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
     try { earlyFlowTracker.handleSwap(enrichedSwap); } catch (err) {
       console.warn(`[EarlyFlowEntry] handleSwap failed: ${err.message}`);
@@ -361,6 +475,21 @@ async function main() {
       ema15sTracker.cleanup(mints);
     },
     onTokenAdded: async (token) => {
+      recordTokenAdded(token, { addedVia: token.source || 'server' });
+      if (token?.migration_signature && token?.migration_time) {
+        migrationHolderCollector.capture({
+          token,
+          migration: {
+            mint: token.mint,
+            signature: token.migration_signature,
+            slot: token.migration_slot,
+            migrationTime: token.migration_time,
+            poolAddress: token.pool_address,
+            poolBaseVault: token.pool_base_vault,
+            poolQuoteVault: token.pool_quote_vault,
+          },
+        });
+      }
       // 新增代币 → 后台异步补 pool 信息
       if (config.autoFillPoolsOnStart) {
         fillPoolForToken(tokenRegistry, token.mint).catch((err) => {
@@ -368,20 +497,37 @@ async function main() {
         });
       }
     },
+    onTokenRemoved: recordExternalTokenRemoval,
   });
 
   const pumpDiscovery = new PumpGraduationDiscovery({
     tokenRegistry,
     onBeforeAdd: (mint) => server._evictIfNeeded(mint),
     onMigrationDetected: (migration) => {
+      migrationRugTelemetry?.observeMigration(migration);
+      migrationHolderCollector.capture({
+        token: { mint: migration.mint },
+        migration,
+      });
       if (rsiCalculator) rsiCalculator.reset(migration.mint, 'pump_migration');
       earlyFlowTracker.reset(migration.mint);
       ema15sTracker.reset(migration.mint);
       positionManager.resetRsi5sForExit(migration.mint);
     },
     onTokenAdded: async ({ token, migration, screening, evicted }) => {
+      migrationRugTelemetry?.markAccepted({ token, migration, screening });
+      migrationHolderCollector.capture({ token, migration, screening })
+        .finally(() => {
+          tradeLogger.updateMigrationHolderSnapshotSymbol?.(migration.signature, token.symbol);
+        });
       const mints = tokenRegistry.listActive().map((t) => t.mint);
       tickStream.updateSubscription(mints);
+      recordTokenAdded(token, {
+        addedVia: 'pump_graduation',
+        migrationDetectionPath: migration.detectionPath,
+        migrationDetectionSlot: migration.detectionSlot,
+        evictedCount: evicted?.length || 0,
+      }, screening.market);
       if (migration.poolAddress && executor.poolStateCache) {
         executor.poolStateCache.refreshOne(migration.poolAddress).catch(() => {});
       }
@@ -401,6 +547,15 @@ async function main() {
       });
     },
   });
+  migrationRugTelemetry = new MigrationRugTelemetry({
+    tradeLogger,
+    scanner: pumpDiscovery.migrationSafetyScanner,
+    settings: config.pumpDiscovery,
+  });
+  console.log(
+    `[main] Migration RUG telemetry ${migrationRugTelemetry.enabled ? 'enabled' : 'disabled'} ` +
+      `(observe-only, +/-${migrationRugTelemetry.windowMs / 1000}s)`,
+  );
 
   // ============ 启动恢复未平仓持仓 ============
   const restored = positionManager.restoreFromDb();
@@ -632,6 +787,7 @@ async function main() {
           });
         }
         const freshToken = tokenRegistry.getToken(info.mint);
+        recordTokenAdded(freshToken, { addedVia: 'shredstream' });
         console.log(
           `[main] 🆕 SS auto-added ${freshToken?.symbol || info.mint.slice(0, 8)}.. to tokenRegistry ` +
           `(pool=${freshToken?.pool_address?.slice(0, 6)}..)`,
@@ -1062,6 +1218,7 @@ async function main() {
     console.log(`\n[main] ${signal} received, shutting down gracefully...`);
     try {
       pumpDiscovery.stop();
+      migrationRugTelemetry?.stop();
       quoteAssetReconciler.stop();
       await tickStream.stop();
       postExitTracker.shutdown();

@@ -20,6 +20,7 @@ class Server {
     quoteAssetReconciler,
     onTokenListChanged,
     onTokenAdded,
+    onTokenRemoved,
   }) {
     this.tokenRegistry = tokenRegistry;
     this.tradeLogger = tradeLogger;
@@ -30,6 +31,7 @@ class Server {
     this.quoteAssetReconciler = quoteAssetReconciler || null;
     this.onTokenListChanged = onTokenListChanged;
     this.onTokenAdded = onTokenAdded;
+    this.onTokenRemoved = onTokenRemoved || null;
 
     this.app = express();
     this.app.use(express.json({ limit: '64kb' }));
@@ -228,7 +230,11 @@ class Server {
 
     app.delete('/api/tokens/:mint', (req, res) => {
       try {
+        const token = this.tokenRegistry.getToken(req.params.mint);
         this.tokenRegistry.removeToken(req.params.mint);
+        if (this.onTokenRemoved && token) {
+          this.onTokenRemoved({ token, reason: 'manual_remove', removedAt: Date.now() });
+        }
         if (this.onTokenListChanged) this.onTokenListChanged();
         this.broadcast({ type: 'tokenRemoved', mint: req.params.mint });
         res.json({ ok: true });
@@ -604,12 +610,21 @@ class Server {
 
     const evicted = [];
     for (const t of toEvict) {
+      const token = this.tokenRegistry.getToken(t.mint);
       this.tokenRegistry.removeToken(t.mint);
-      evicted.push({
+      const evictedToken = {
         mint: t.mint,
         symbol: t.symbol,
         reason: t.hasOpenPosition ? 'has_position(CHECK_BUG)' : (t.hasTrades24h ? `low_vol(${t.vol24h.toFixed(0)})` : 'no_trades_24h'),
-      });
+      };
+      evicted.push(evictedToken);
+      if (this.onTokenRemoved && token) {
+        this.onTokenRemoved({
+          token,
+          reason: `capacity_evict:${evictedToken.reason}`,
+          removedAt: Date.now(),
+        });
+      }
     }
 
     return evicted;

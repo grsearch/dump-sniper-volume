@@ -80,6 +80,16 @@ Solana / Pump.fun 实时交易机器人。当前唯一自动策略是
 `SWAP_EVENT_LOG_ENABLED=true` 时，每笔已解析的监控代币swap写入SQLite
 `swap_events`，用于离线重放和阈值回测。
 
+监控研究数据严格限制在代币的有效监控生命周期内：从收录开始，到 FDV/LP
+不合格、手动移除、容量驱逐或30分钟到龄为止。移除后立即取消数据流订阅，
+不再继续记录 swap、FDV、LP 或影子行情。若移除时仍有持仓，仅保留退出所需
+的数据流，卖出确认后立即移除。
+
+检测到 Pump.fun 迁移时，程序会异步抓取一次 holder 快照，并记录抓取延迟、
+完整性、供应量、holder 数以及 Top 1/5/10/20 集中度。池子 vault 会从 holder
+集中度中排除，同一钱包控制的多个 token account 会合并统计。该抓取不参与
+准入判断，也不会阻塞新币订阅或买入。
+
 `POSITION_RESEARCH_LOG_ENABLED=true` 时，持仓期间每笔可信成交还会写入
 `position_research_events`。每行保留：
 
@@ -97,7 +107,9 @@ npm run export:research -- --since=2026-07-29T00:00:00+08:00 --until=2026-07-30T
 ~~~
 
 导出目录包含 `manifest.json`、仓位、逐笔研究指标、原始swap、信号、交易、
-平仓后走势和代币元数据。`manifest.json.analysisCutoffMs` 是唯一分析截止点；
+平仓后走势和代币元数据，还包含所有收录币的 `monitored-sessions.csv`、
+`token-lifecycle-events.csv`、`token-market-snapshots.csv`、`monitored-swaps.csv`
+和 `migration-holder-snapshots.csv`。`manifest.json.analysisCutoffMs` 是唯一分析截止点；
 截止点之后才发生的平仓、PnL和高点会被遮蔽，避免回测看到未来数据。
 
 ## 关键配置
@@ -132,7 +144,7 @@ EARLY_FLOW_MIN_FDV_USD=15000
 EARLY_FLOW_MAX_FDV_USD=100000
 EARLY_FLOW_SOL_PRICE_USD=75.5
 EARLY_FLOW_PRICE_WINDOW_MS=10000
-EARLY_FLOW_MIN_PRICE_CHANGE_PCT=-10
+EARLY_FLOW_MIN_PRICE_CHANGE_PCT=0
 EARLY_FLOW_MAX_PRICE_CHANGE_PCT=8
 EARLY_FLOW_NET_FLOW_WINDOW_MS=1000
 EARLY_FLOW_ACTIVITY_WINDOW_MS=5000
@@ -202,6 +214,12 @@ MIN_FDV_USD=15000
 MAX_FDV_USD=1000000
 MIN_LIQUIDITY_USD=3000
 
+# Observe-only RUG research around migration; does not block token admission.
+PUMP_DISCOVERY_RUG_TELEMETRY_ENABLED=true
+PUMP_DISCOVERY_RUG_TELEMETRY_WINDOW_MS=10000
+PUMP_DISCOVERY_RUG_TELEMETRY_PRE_SLOTS=32
+PUMP_DISCOVERY_RUG_TELEMETRY_MAX_CONCURRENT_SCANS=1
+
 ADDON_ENABLED=0
 ADDON_SHADOW_ENABLED=true
 ADDON_SHADOW_WINDOW_MS=60000
@@ -226,6 +244,10 @@ POSITION_RESEARCH_LOG_ENABLED=true
 POSITION_RESEARCH_WINDOW_MS=10000
 POSITION_RESEARCH_FLUSH_MS=250
 POSITION_RESEARCH_FLUSH_MAX=1000
+TOKEN_MARKET_SNAPSHOT_INTERVAL_MS=5000
+MIGRATION_HOLDER_SNAPSHOT_ENABLED=true
+MIGRATION_HOLDER_PAGE_SIZE=1000
+MIGRATION_HOLDER_MAX_PAGES=5
 ~~~
 
 启动日志应显示：
