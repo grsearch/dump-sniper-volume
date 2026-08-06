@@ -1,11 +1,15 @@
 'use strict';
 
-const axios = require('axios');
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
+const {
+  PUMP_PROGRAM_ID,
+  PUMP_AMM_PROGRAM_ID,
+} = require('../utils/pumpMigrationParser');
 
 const monitor = getMonitor();
 const MODULE = 'MigrationHolderSnapshot';
+const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -65,9 +69,9 @@ class MigrationHolderSnapshotCollector {
 
   capture(context = {}) {
     const migration = context.migration || {};
-    const key = migration.signature || `${migration.mint || context.token?.mint}:${migration.slot || 0}`;
+    const key = migration.mint || context.token?.mint;
     if (!this.enabled || !this.tradeLogger || !migration.mint || !key) return Promise.resolve(null);
-    const persisted = this.tradeLogger.getMigrationHolderSnapshotStatus?.(key);
+    const persisted = this.tradeLogger.getMigrationHolderSnapshotStatusByMint?.(key);
     if (this.completed.has(key) || Number(persisted?.is_complete) === 1) {
       return Promise.resolve(null);
     }
@@ -92,7 +96,7 @@ class MigrationHolderSnapshotCollector {
       try {
         const snapshot = await this._fetchSnapshot(context);
         this.tradeLogger.logMigrationHolderSnapshot(snapshot);
-        if (snapshot.isComplete) this.completed.add(snapshot.migrationSignature);
+        if (snapshot.isComplete) this.completed.add(snapshot.mint);
         monitor.beat(MODULE, `captured:${snapshot.holderCount ?? 0}`);
         monitor.inc(`${MODULE}.captured`, 1, MODULE);
         console.log(
@@ -175,6 +179,14 @@ class MigrationHolderSnapshotCollector {
         ...holder,
         pctSupply: supplyUi > 0 ? (holder.amountUi / supplyUi) * 100 : null,
       }));
+    const ownerClassifications = await this._classifyOwners(holders.slice(0, 20), migration);
+    for (const holder of holders) {
+      const classification = ownerClassifications.get(holder.owner);
+      holder.ownerType = classification?.ownerType || 'not_classified';
+      holder.ownerProgram = classification?.ownerProgram || null;
+      holder.ownerExecutable = classification?.ownerExecutable ?? null;
+      holder.exclusionReason = null;
+    }
     const sumPct = (count) => holders.slice(0, count)
       .reduce((sum, holder) => sum + (Number(holder.pctSupply) || 0), 0);
     const capturedAt = Date.now();
@@ -207,6 +219,9 @@ class MigrationHolderSnapshotCollector {
         excludedOwners: [...excludedOwners],
         rawAccountTotal: accountResult.total,
         lastIndexedSlot,
+        ownerClassificationComplete: holders.slice(0, 20).every(
+          (holder) => holder.ownerType !== 'not_classified',
+        ),
         migrationToIndexSlotDelta:
           migrationSlot != null && lastIndexedSlot != null
             ? lastIndexedSlot - migrationSlot
@@ -279,8 +294,47 @@ class MigrationHolderSnapshotCollector {
     };
   }
 
+  async _classifyOwners(holders, migration) {
+    const owners = [...new Set(holders.map((holder) => holder.owner).filter(Boolean))];
+    const result = new Map();
+    if (owners.length === 0) return result;
+    let accounts = [];
+    try {
+      const response = await this.rpcRequest('getMultipleAccounts', [owners, {
+        encoding: 'jsonParsed',
+        commitment: 'confirmed',
+      }]);
+      accounts = response?.value || [];
+    } catch (_) {
+      return result;
+    }
+    const migrationOwners = new Set([
+      migration.migrationUser,
+      migration.developer,
+      migration.devAddress,
+    ].filter(Boolean));
+    const pumpPrograms = new Set([PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID]);
+    owners.forEach((owner, index) => {
+      const account = accounts[index] || null;
+      const ownerProgram = account?.owner || null;
+      let ownerType = 'unresolved_or_pda';
+      if (migrationOwners.has(owner)) ownerType = 'migration_user';
+      else if (account?.executable) ownerType = 'executable_program';
+      else if (ownerProgram === SYSTEM_PROGRAM_ID) ownerType = 'wallet';
+      else if (pumpPrograms.has(ownerProgram)) ownerType = 'pump_program_account';
+      else if (ownerProgram) ownerType = 'program_owned_account';
+      result.set(owner, {
+        ownerType,
+        ownerProgram,
+        ownerExecutable: account == null ? null : !!account.executable,
+      });
+    });
+    return result;
+  }
+
   async _rpcRequest(method, params) {
     if (!this.rpcUrl) throw new Error('HELIUS_RPC_URL unavailable');
+    const axios = require('axios');
     const { data } = await axios.post(this.rpcUrl, {
       jsonrpc: '2.0',
       id: `${MODULE}-${Date.now()}`,

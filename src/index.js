@@ -145,6 +145,7 @@ async function main() {
   const tokenRegistry = new TokenRegistry();
   const tradeLogger = new TradeLogger(tokenRegistry.db);
   const migrationHolderCollector = new MigrationHolderSnapshotCollector({ tradeLogger });
+  const serviceInstanceId = `${process.pid}-${Date.now()}`;
 
   const tokenTiming = (token, now = Date.now()) => {
     const migrationTime = Number(token?.migration_time);
@@ -185,6 +186,7 @@ async function main() {
     let meta = {};
     try { meta = token.meta_json ? JSON.parse(token.meta_json) : {}; } catch (_) {}
     const effectiveMarket = market || {};
+    const researchDetails = { ...(details || {}), serviceInstanceId };
     tradeLogger.logTokenLifecycleEvent({
       eventKey: `TOKEN_ADDED:${token.mint}:${timing.addedAt || now}`,
       mint: token.mint,
@@ -199,13 +201,13 @@ async function main() {
       priceSol: effectiveMarket.priceSol ?? meta.priceSol,
       poolQuoteSol: effectiveMarket.poolQuoteSol ?? meta.poolQuoteSol,
       marketSource: effectiveMarket.marketSource || token.market_source,
-      details,
+      details: researchDetails,
     });
     tradeLogger.logTokenMarketSnapshot({
       mint: token.mint,
       symbol: token.symbol,
       ts: now,
-      trigger: 'token_added',
+      trigger: details?.backfilledAtStartup ? 'startup_resume' : 'token_added',
       source: effectiveMarket.marketSource || token.market_source || token.source,
       fdvUsd: effectiveMarket.fdv ?? effectiveMarket.fdvUsd ?? token.fdv,
       liquidityUsd: effectiveMarket.liquidity ?? effectiveMarket.liquidityUsd ?? token.liquidity,
@@ -216,7 +218,7 @@ async function main() {
       poolAddress: token.pool_address,
       marketFetchedAt: token.market_updated_at,
       ...timing,
-      details,
+      details: researchDetails,
     });
   };
   const recordExternalTokenRemoval = ({ token, reason, removedAt = Date.now() } = {}) => {
@@ -248,6 +250,7 @@ async function main() {
       liquidityUsd: token.liquidity,
       priceUsd: token.price,
       marketSource: token.market_source,
+      details: { serviceInstanceId },
     });
   };
 
@@ -504,6 +507,17 @@ async function main() {
     tokenRegistry,
     onBeforeAdd: (mint) => server._evictIfNeeded(mint),
     onMigrationDetected: (migration) => {
+      tradeLogger.logMigrationDetection?.({
+        mint: migration.mint,
+        migrationSignature: migration.signature,
+        migrationSlot: migration.slot,
+        migrationTime: migration.migrationTime,
+        detectedAt: Date.now(),
+        detectionPath: migration.detectionPath,
+        detectionSlot: migration.detectionSlot,
+        poolAddress: migration.poolAddress,
+        details: { serviceInstanceId },
+      });
       migrationRugTelemetry?.observeMigration(migration);
       migrationHolderCollector.capture({
         token: { mint: migration.mint },
@@ -518,7 +532,7 @@ async function main() {
       migrationRugTelemetry?.markAccepted({ token, migration, screening });
       migrationHolderCollector.capture({ token, migration, screening })
         .finally(() => {
-          tradeLogger.updateMigrationHolderSnapshotSymbol?.(migration.signature, token.symbol);
+          tradeLogger.updateMigrationHolderSnapshotSymbolByMint?.(migration.mint, token.symbol);
         });
       const mints = tokenRegistry.listActive().map((t) => t.mint);
       tickStream.updateSubscription(mints);

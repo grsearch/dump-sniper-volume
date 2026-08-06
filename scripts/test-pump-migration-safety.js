@@ -100,6 +100,9 @@ function transaction(signature, instructions, opts = {}) {
       innerInstructions: opts.innerInstructions || [],
       preTokenBalances: opts.preTokenBalances || balances,
       postTokenBalances: opts.postTokenBalances || balances,
+      preBalances: opts.preBalances,
+      postBalances: opts.postBalances,
+      fee: opts.fee,
       logMessages: opts.logMessages || [],
     },
     transaction: {
@@ -348,6 +351,43 @@ function makeScanner(blocks, overrides = {}) {
       true,
       'ordinary window balance deltas below 100M and 5% must remain allowed',
     );
+  }
+
+  {
+    const accountKeys = [
+      USER,
+      MINT,
+      SOURCE,
+      DESTINATION,
+      BASE_VAULT,
+      POOL_AUTHORITY_ATA,
+      POOL,
+      PUMP_AMM_PROGRAM_ID,
+      TOKEN_PROGRAM_ID,
+    ];
+    const buyInstruction = {
+      programId: PUMP_AMM_PROGRAM_ID,
+      accounts: [POOL, MINT, USER],
+      data: anchorDiscriminator('buy_exact_quote_in'),
+    };
+    const buyTx = transaction('replayable-buy', [buyInstruction], {
+      accountKeys,
+      preTokenBalances: [balanceRow(accountKeys, DESTINATION, USER, '0')],
+      postTokenBalances: [balanceRow(accountKeys, DESTINATION, USER, '2000000')],
+      preBalances: accountKeys.map((_, index) => index === 0 ? 10_000_000_000 : 0),
+      postBalances: accountKeys.map((_, index) => index === 0 ? 8_000_000_000 : 0),
+      fee: 5_000,
+    });
+    const { scanner } = makeScanner({
+      99: { blockTime: 1_785_280_000, transactions: [buyTx] },
+    });
+    const result = await scanner.audit(migration());
+    assert.strictEqual(result.allowed, true);
+    assert.strictEqual(result.activityEvents.length, 1);
+    assert.strictEqual(result.activityEvents[0].side, 'BUY');
+    assert.strictEqual(result.activityEvents[0].signature, 'replayable-buy');
+    assert(result.activityEvents[0].solVolume > 1.99);
+    assert.strictEqual(result.summary.firstScannedBlockTimeMs, 1_785_280_000_000);
   }
 
   {

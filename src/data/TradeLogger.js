@@ -249,6 +249,21 @@ class TradeLogger {
       CREATE INDEX IF NOT EXISTS idx_migration_risk_time
         ON migration_risk_snapshots(migration_time);
 
+      CREATE TABLE IF NOT EXISTS migration_detection_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mint TEXT NOT NULL UNIQUE,
+        migration_signature TEXT,
+        migration_slot INTEGER,
+        migration_time INTEGER NOT NULL,
+        detected_at INTEGER NOT NULL,
+        detection_path TEXT,
+        detection_slot INTEGER,
+        pool_address TEXT,
+        details_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_migration_detection_time
+        ON migration_detection_events(migration_time);
+
       CREATE TABLE IF NOT EXISTS token_lifecycle_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_key TEXT NOT NULL UNIQUE,
@@ -615,6 +630,49 @@ class TradeLogger {
           metrics_json = excluded.metrics_json
       `),
 
+      insertMigrationDetection: this.db.prepare(`
+        INSERT INTO migration_detection_events (
+          mint, migration_signature, migration_slot, migration_time,
+          detected_at, detection_path, detection_slot, pool_address, details_json
+        ) VALUES (
+          @mint, @migrationSignature, @migrationSlot, @migrationTime,
+          @detectedAt, @detectionPath, @detectionSlot, @poolAddress, @detailsJson
+        )
+        ON CONFLICT(mint) DO UPDATE SET
+          migration_signature = COALESCE(
+            migration_detection_events.migration_signature,
+            excluded.migration_signature
+          ),
+          migration_slot = COALESCE(
+            migration_detection_events.migration_slot,
+            excluded.migration_slot
+          ),
+          migration_time = MIN(
+            migration_detection_events.migration_time,
+            excluded.migration_time
+          ),
+          detected_at = MIN(
+            migration_detection_events.detected_at,
+            excluded.detected_at
+          ),
+          detection_path = COALESCE(
+            migration_detection_events.detection_path,
+            excluded.detection_path
+          ),
+          detection_slot = COALESCE(
+            migration_detection_events.detection_slot,
+            excluded.detection_slot
+          ),
+          pool_address = COALESCE(
+            migration_detection_events.pool_address,
+            excluded.pool_address
+          ),
+          details_json = COALESCE(
+            migration_detection_events.details_json,
+            excluded.details_json
+          )
+      `),
+
       insertTokenLifecycleEvent: this.db.prepare(`
         INSERT OR IGNORE INTO token_lifecycle_events (
           event_key, mint, symbol, event_type, ts, source, reason,
@@ -699,10 +757,24 @@ class TradeLogger {
         LIMIT 1
       `),
 
+      selectMigrationHolderSnapshotStatusByMint: this.db.prepare(`
+        SELECT is_complete, captured_at, source, migration_signature
+        FROM migration_holder_snapshots
+        WHERE mint = ?
+        ORDER BY is_complete DESC, captured_at DESC
+        LIMIT 1
+      `),
+
       updateMigrationHolderSnapshotSymbol: this.db.prepare(`
         UPDATE migration_holder_snapshots
         SET symbol = COALESCE(?, symbol)
         WHERE migration_signature = ?
+      `),
+
+      updateMigrationHolderSnapshotSymbolByMint: this.db.prepare(`
+        UPDATE migration_holder_snapshots
+        SET symbol = COALESCE(?, symbol)
+        WHERE mint = ?
       `),
 
       // ============ swap_events ============
@@ -723,6 +795,12 @@ class TradeLogger {
 
       swapEventsInRange: this.db.prepare(`
         SELECT * FROM swap_events WHERE ts >= ? AND ts < ? ORDER BY mint, ts ASC
+      `),
+
+      swapEventsForMintInRange: this.db.prepare(`
+        SELECT * FROM swap_events
+        WHERE mint = ? AND ts >= ? AND ts <= ?
+        ORDER BY ts ASC, id ASC
       `),
 
       // ============ positions ============
@@ -1065,6 +1143,29 @@ class TradeLogger {
     });
   }
 
+  logMigrationDetection(row) {
+    if (!row?.mint || !row?.migrationTime) return;
+    let detailsJson = null;
+    try {
+      detailsJson = row.details == null ? null : JSON.stringify(row.details);
+    } catch (_) {
+      detailsJson = JSON.stringify({ serializationError: true });
+    }
+    try {
+      this.stmts.insertMigrationDetection.run({
+        mint: row.mint,
+        migrationSignature: row.migrationSignature || null,
+        migrationSlot: row.migrationSlot ?? null,
+        migrationTime: row.migrationTime,
+        detectedAt: row.detectedAt || Date.now(),
+        detectionPath: row.detectionPath || null,
+        detectionSlot: row.detectionSlot ?? null,
+        poolAddress: row.poolAddress || null,
+        detailsJson,
+      });
+    } catch (_) { /* research only */ }
+  }
+
   logSwapEvent(swap) {
     if (!swap || !swap.mint) return;
     const side = String(swap.side || '').toUpperCase();
@@ -1239,10 +1340,25 @@ class TradeLogger {
     }
   }
 
+  getMigrationHolderSnapshotStatusByMint(mint) {
+    try {
+      return this.stmts.selectMigrationHolderSnapshotStatusByMint.get(mint) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   updateMigrationHolderSnapshotSymbol(migrationSignature, symbol) {
     if (!migrationSignature || !symbol) return;
     try {
       this.stmts.updateMigrationHolderSnapshotSymbol.run(symbol, migrationSignature);
+    } catch (_) { /* research only */ }
+  }
+
+  updateMigrationHolderSnapshotSymbolByMint(mint, symbol) {
+    if (!mint || !symbol) return;
+    try {
+      this.stmts.updateMigrationHolderSnapshotSymbolByMint.run(symbol, mint);
     } catch (_) { /* research only */ }
   }
 
@@ -1515,6 +1631,10 @@ class TradeLogger {
 
   getSwapEventsInRange(startMs, endMs) {
     return this.stmts.swapEventsInRange.all(startMs, endMs);
+  }
+
+  getSwapEventsForMintInRange(mint, startMs, endMs) {
+    return this.stmts.swapEventsForMintInRange.all(mint, startMs, endMs);
   }
 
   getPositionsInRange(startMs, endMs) {

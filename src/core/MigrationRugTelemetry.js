@@ -115,40 +115,48 @@ class MigrationRugTelemetry {
     if (!this.enabled || !migration?.mint) return;
     const migrationTime = unixMs(migration.migrationTime);
     const previous = this.states.get(migration.mint);
-    if (previous?.cleanupTimer) clearTimeout(previous.cleanupTimer);
-    if (previous?.finalizeTimer) clearTimeout(previous.finalizeTimer);
+    if (previous) {
+      if (migrationTime < previous.migrationTime) {
+        previous.migration = { ...migration, migrationTime };
+        previous.migrationTime = migrationTime;
+      }
+      return previous;
+    }
     const state = {
       migration: { ...migration, migrationTime },
       migrationTime,
       token: null,
       screening: null,
       accepted: false,
-      events: previous?.events || [],
+      events: [],
       cleanupTimer: null,
       finalizeTimer: null,
     };
+    const finalizeDelay = Math.max(
+      0,
+      state.migrationTime + this.windowMs - Date.now(),
+      3_000,
+    );
+    state.finalizeTimer = setTimeout(() => {
+      this._enqueueFinalize(migration.mint);
+    }, finalizeDelay);
+    if (state.finalizeTimer.unref) state.finalizeTimer.unref();
     state.cleanupTimer = setTimeout(() => {
       const current = this.states.get(migration.mint);
-      if (current === state && !state.accepted) this.states.delete(migration.mint);
+      if (current === state) this.states.delete(migration.mint);
     }, 60_000);
     if (state.cleanupTimer.unref) state.cleanupTimer.unref();
     this.states.set(migration.mint, state);
+    return state;
   }
 
   markAccepted({ token, migration, screening } = {}) {
     if (!this.enabled || !migration?.mint) return;
-    if (!this.states.has(migration.mint)) this.observeMigration(migration);
     const state = this.states.get(migration.mint);
     if (!state) return;
     state.accepted = true;
     state.token = token || null;
     state.screening = screening || null;
-    if (state.cleanupTimer) clearTimeout(state.cleanupTimer);
-    const delay = Math.max(0, state.migrationTime + this.windowMs - Date.now());
-    state.finalizeTimer = setTimeout(() => {
-      this._enqueueFinalize(migration.mint);
-    }, delay);
-    if (state.finalizeTimer.unref) state.finalizeTimer.unref();
   }
 
   _enqueueFinalize(mint) {
@@ -178,7 +186,7 @@ class MigrationRugTelemetry {
   handleSwap(swap) {
     if (!this.enabled || !swap?.mint) return;
     const state = this.states.get(swap.mint);
-    if (!state?.accepted) return;
+    if (!state) return;
     const ts = unixMs(swap.ts || swap.receivedAt);
     if (ts < state.migrationTime - this.windowMs || ts > state.migrationTime + this.windowMs) return;
     if (state.events.length >= this.maxEvents) return;
@@ -198,11 +206,77 @@ class MigrationRugTelemetry {
 
   async finalizeNow(mint) {
     const state = this.states.get(mint);
-    if (!state?.accepted) return null;
+    if (!state) return null;
     if (state.finalizeTimer) clearTimeout(state.finalizeTimer);
     const startTimeMs = state.migrationTime - this.windowMs;
     const endTimeMs = state.migrationTime + this.windowMs;
-    const inRange = state.events.filter((event) => event.ts >= startTimeMs && event.ts <= endTimeMs);
+    const persisted = this.tradeLogger.getSwapEventsForMintInRange?.(
+      mint,
+      startTimeMs,
+      endTimeMs,
+    ) || [];
+    const normalizePersisted = (event) => ({
+      ts: unixMs(event.ts),
+      side: String(event.side || '').toUpperCase(),
+      signer: event.signer || null,
+      signature: event.signature || null,
+      solVolume: Math.max(0, finiteNumber(event.sol_volume ?? event.solVolume) || 0),
+      price: finiteNumber(event.price),
+      poolQuoteAfter: finiteNumber(event.pool_quote_after ?? event.poolQuoteAfter),
+      fdvUsd: finiteNumber(event.fdv_usd ?? event.fdvUsd),
+      source: event.source || 'swap_events',
+    });
+
+    let audit = {
+      allowed: true,
+      skipped: true,
+      reason: 'scanner_unavailable',
+      matches: [],
+      activityEvents: [],
+    };
+    if (this.scanner) {
+      const scan = (slotRadius) => this.scanner.audit(state.migration, {
+        force: true,
+        refreshDetectionSlot: true,
+        preSlots: slotRadius,
+        postSlots: slotRadius,
+        maxMatches: 500,
+        startTimeMs,
+        endTimeMs,
+      });
+      audit = await scan(this.preSlots);
+      const firstScanned = finiteNumber(audit.summary?.firstScannedBlockTimeMs);
+      const lastScanned = finiteNumber(audit.summary?.lastScannedBlockTimeMs);
+      const needsWiderScan = audit.reasonCode !== 'audit_incomplete' && (
+        firstScanned == null || firstScanned > startTimeMs + 1_000 ||
+        lastScanned == null || lastScanned < endTimeMs - 1_000
+      );
+      if (needsWiderScan) {
+        const expandedSlots = Math.max(
+          this.preSlots + 1,
+          this.preSlots * 2,
+          Math.ceil(this.windowMs / 250) + 4,
+        );
+        audit = await scan(expandedSlots);
+      }
+    }
+    const replayed = Array.isArray(audit.activityEvents) ? audit.activityEvents : [];
+    const merged = [
+      ...state.events.map((event) => ({ ...event, source: event.source || 'live' })),
+      ...persisted.map(normalizePersisted),
+      ...replayed,
+    ];
+    const deduped = new Map();
+    for (const event of merged) {
+      const ts = finiteNumber(event.ts);
+      if (ts == null || ts < startTimeMs || ts > endTimeMs) continue;
+      const key = event.signature
+        ? `${event.signature}:${event.side}`
+        : `no-signature:${event.side}:${event.signer || ''}:${ts}:${event.solVolume || 0}`;
+      const existing = deduped.get(key);
+      if (!existing || existing.source === 'chain_replay') deduped.set(key, { ...event, ts });
+    }
+    const inRange = [...deduped.values()].sort((a, b) => a.ts - b.ts);
     const windows = {
       pre10s: summarizeEvents(inRange.filter((event) => event.ts < state.migrationTime)),
       post1s: summarizeEvents(inRange.filter(
@@ -216,19 +290,6 @@ class MigrationRugTelemetry {
       )),
       post10s: summarizeEvents(inRange.filter((event) => event.ts >= state.migrationTime)),
     };
-
-    let audit = { allowed: true, skipped: true, reason: 'scanner_unavailable', matches: [] };
-    if (this.scanner) {
-      audit = await this.scanner.audit(state.migration, {
-        force: true,
-        refreshDetectionSlot: true,
-        preSlots: this.preSlots,
-        postSlots: this.preSlots,
-        maxMatches: 500,
-        startTimeMs,
-        endTimeMs,
-      });
-    }
     const matches = Array.isArray(audit.matches) ? audit.matches : [];
     const phaseFor = (match) => {
       const matchTime = finiteNumber(match.blockTimeMs);
@@ -259,6 +320,17 @@ class MigrationRugTelemetry {
       summary: audit.summary || null,
     };
     const offsets = inRange.map((event) => event.ts - state.migrationTime);
+    const firstScannedBlockTimeMs = finiteNumber(audit.summary?.firstScannedBlockTimeMs);
+    const lastScannedBlockTimeMs = finiteNumber(audit.summary?.lastScannedBlockTimeMs);
+    const preWindowScanned = firstScannedBlockTimeMs != null &&
+      firstScannedBlockTimeMs <= startTimeMs + 1_000;
+    const postWindowScanned = lastScannedBlockTimeMs != null &&
+      lastScannedBlockTimeMs >= endTimeMs - 1_000;
+    const coverageComplete = !chain.auditIncomplete && preWindowScanned && postWindowScanned;
+    const incompleteReasons = [];
+    if (chain.auditIncomplete) incompleteReasons.push('chain_audit_incomplete');
+    if (!preWindowScanned) incompleteReasons.push('pre_window_not_scanned');
+    if (!postWindowScanned) incompleteReasons.push('post_window_not_scanned');
     const metrics = {
       observeOnly: true,
       migration: {
@@ -267,6 +339,7 @@ class MigrationRugTelemetry {
         detectionPath: state.migration.detectionPath || null,
       },
       screening: {
+        accepted: state.accepted,
         fdvUsd: finiteNumber(state.screening?.market?.fdv),
         liquidityUsd: finiteNumber(state.screening?.market?.liquidity),
       },
@@ -276,6 +349,13 @@ class MigrationRugTelemetry {
         firstOffsetMs: offsets.length ? Math.min(...offsets) : null,
         lastOffsetMs: offsets.length ? Math.max(...offsets) : null,
         hasPreMigrationSwapCoverage: offsets.some((offset) => offset < 0),
+        preWindowScanned,
+        postWindowScanned,
+        complete: coverageComplete,
+        incompleteReasons,
+        liveEventCount: inRange.filter((event) => event.source === 'live').length,
+        persistedEventCount: inRange.filter((event) => event.source === 'swap_events').length,
+        replayEventCount: inRange.filter((event) => event.source === 'chain_replay').length,
       },
       windows,
       chain,
@@ -308,11 +388,12 @@ class MigrationRugTelemetry {
       mintToCount: chain.mintToCount,
       largeTransferCount: chain.largeTransferCount,
       sameTxBuyCount: chain.sameTxBuyCount,
-      auditIncomplete: chain.auditIncomplete ? 1 : 0,
+      auditIncomplete: coverageComplete ? 0 : 1,
       metrics,
     };
     this.tradeLogger.logMigrationRiskSnapshot(row);
     monitor.inc('MigrationRugTelemetry.snapshots', 1, 'MigrationRugTelemetry');
+    if (state.cleanupTimer) clearTimeout(state.cleanupTimer);
     this.states.delete(mint);
     return row;
   }

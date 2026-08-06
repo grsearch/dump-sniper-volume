@@ -392,6 +392,8 @@ class PumpGraduationDiscovery extends EventEmitter {
   }
 
   _enqueueCandidate(migration) {
+    if (this.seenMints.has(migration.mint) || this.queuedMints.has(migration.mint)) return;
+    this.queuedMints.add(migration.mint);
     if (this.onMigrationDetected) {
       try {
         this.onMigrationDetected(migration);
@@ -399,8 +401,6 @@ class PumpGraduationDiscovery extends EventEmitter {
         console.warn(`[PumpDiscovery] migration callback failed: ${err.message}`);
       }
     }
-    if (this.seenMints.has(migration.mint) || this.queuedMints.has(migration.mint)) return;
-    this.queuedMints.add(migration.mint);
     this.candidateQueue.push(migration);
     this._drainQueue();
   }

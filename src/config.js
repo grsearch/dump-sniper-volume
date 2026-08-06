@@ -659,7 +659,7 @@ const config = {
       10,
     ),
     auditBlockCacheMaxSlots: parseInt(
-      process.env.PUMP_DISCOVERY_AUDIT_BLOCK_CACHE_MAX_SLOTS || '32',
+      process.env.PUMP_DISCOVERY_AUDIT_BLOCK_CACHE_MAX_SLOTS || '256',
       10,
     ),
     auditFailClosed:

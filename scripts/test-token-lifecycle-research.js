@@ -1,9 +1,16 @@
 'use strict';
 
 const assert = require('assert');
+const Module = require('module');
 const { DatabaseSync } = require('node:sqlite');
 const TradeLogger = require('../src/data/TradeLogger');
+const originalLoad = Module._load;
+Module._load = function loadWithDependencyStubs(request, parent, isMain) {
+  if (request === 'dotenv') return { config() {} };
+  return originalLoad.call(this, request, parent, isMain);
+};
 const MigrationHolderSnapshotCollector = require('../src/core/MigrationHolderSnapshotCollector');
+Module._load = originalLoad;
 
 function compatibleDatabase() {
   const db = new DatabaseSync(':memory:');
@@ -26,6 +33,33 @@ async function run() {
   const logger = new TradeLogger(db);
   const mint = 'MintResearch111111111111111111111111111111';
   const migrationTime = Date.now() - 100;
+
+  logger.logMigrationDetection({
+    mint,
+    migrationSignature: 'migration-holder-signature',
+    migrationSlot: 123,
+    migrationTime,
+    detectedAt: migrationTime + 10,
+  });
+  logger.logMigrationDetection({
+    mint,
+    migrationSignature: 'later-duplicate-signature',
+    migrationSlot: 124,
+    migrationTime,
+    detectedAt: migrationTime + 50,
+    detectionPath: 'poll',
+    detectionSlot: 125,
+    poolAddress: 'pool-owner',
+  });
+  const detection = db.prepare('SELECT * FROM migration_detection_events WHERE mint = ?').get(mint);
+  assert.strictEqual(
+    db.prepare('SELECT COUNT(*) AS count FROM migration_detection_events').get().count,
+    1,
+  );
+  assert.strictEqual(detection.migration_signature, 'migration-holder-signature');
+  assert.strictEqual(detection.detected_at, migrationTime + 10);
+  assert.strictEqual(detection.detection_path, 'poll');
+  assert.strictEqual(detection.pool_address, 'pool-owner');
 
   logger.logTokenLifecycleEvent({
     eventKey: `TOKEN_ADDED:${mint}:1000`,
@@ -94,6 +128,15 @@ async function run() {
           ],
         };
       }
+      if (method === 'getMultipleAccounts') {
+        assert.deepStrictEqual(params[0], ['wallet-a', 'wallet-b', 'wallet-c']);
+        return {
+          value: params[0].map(() => ({
+            owner: '11111111111111111111111111111111',
+            executable: false,
+          })),
+        };
+      }
       throw new Error(`unexpected RPC method ${method}`);
     },
   });
@@ -110,9 +153,15 @@ async function run() {
     },
   };
   await collector.capture(captureContext);
-  assert.strictEqual(rpcCalls, 2);
-  await collector.capture(captureContext);
-  assert.strictEqual(rpcCalls, 2);
+  assert.strictEqual(rpcCalls, 3);
+  await collector.capture({
+    ...captureContext,
+    migration: {
+      ...captureContext.migration,
+      signature: 'duplicate-detection-signature',
+    },
+  });
+  assert.strictEqual(rpcCalls, 3, 'a duplicate mint must not create another Holder snapshot');
 
   const lifecycle = db.prepare(
     'SELECT event_type, reason FROM token_lifecycle_events ORDER BY ts',
@@ -136,8 +185,14 @@ async function run() {
   assert.strictEqual(holders.largest_holder_owner, 'wallet-a');
   const details = JSON.parse(holders.holders_json);
   assert.strictEqual(details.top[0].tokenAccounts.length, 2);
+  assert.strictEqual(details.top[0].ownerType, 'wallet');
+  assert.strictEqual(details.ownerClassificationComplete, true);
   assert.strictEqual(details.lastIndexedSlot, 124);
   assert.strictEqual(details.migrationToIndexSlotDelta, 1);
+  assert.strictEqual(
+    db.prepare('SELECT COUNT(*) AS count FROM migration_holder_snapshots').get().count,
+    1,
+  );
 
   logger.shutdown();
   db.close();

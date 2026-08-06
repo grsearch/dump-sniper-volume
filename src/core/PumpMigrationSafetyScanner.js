@@ -273,9 +273,10 @@ class PumpMigrationSafetyScanner {
           const afterWindow = endTimeMs != null && blockTimeMs != null &&
             blockTimeMs > endTimeMs;
           if (beforeWindow || afterWindow) {
-            return { transactionsScanned: 0, matches: [] };
+            return { blockTimeMs, transactionsScanned: 0, matches: [], activityEvents: [] };
           }
           const slotMatches = [];
+          const activityEvents = [];
           let transactionsScanned = 0;
           for (const row of block.transactions || []) {
             transactionsScanned++;
@@ -285,15 +286,24 @@ class PumpMigrationSafetyScanner {
               migration,
               supply,
             }));
+            const activity = this._extractTargetMintActivity(row, {
+              slot,
+              blockTimeMs,
+              migration,
+            });
+            if (activity) activityEvents.push(activity);
           }
           return {
+            blockTimeMs,
             transactionsScanned,
             matches: slotMatches,
+            activityEvents,
           };
         },
       );
 
       const matches = scannedSlots.flatMap((row) => row.matches);
+      const activityEvents = scannedSlots.flatMap((row) => row.activityEvents || []);
       const transactionsScanned = scannedSlots.reduce(
         (sum, row) => sum + row.transactionsScanned,
         0,
@@ -308,16 +318,26 @@ class PumpMigrationSafetyScanner {
         (priority[left.type] ?? 99) - (priority[right.type] ?? 99) ||
         left.slot - right.slot);
 
+      const scannedBlockTimes = scannedSlots
+        .map((row) => finiteNumber(row.blockTimeMs))
+        .filter((value) => value != null);
+
       const summary = {
         ...range,
         producedSlots: producedSlots.length,
         blocksScanned: scannedSlots.length,
         transactionsScanned,
+        firstScannedBlockTimeMs: scannedBlockTimes.length
+          ? Math.min(...scannedBlockTimes)
+          : null,
+        lastScannedBlockTimeMs: scannedBlockTimes.length
+          ? Math.max(...scannedBlockTimes)
+          : null,
         supplyUi: supply.supplyUi,
         decimals: supply.decimals,
       };
       if (matches.length === 0) {
-        return { allowed: true, summary, matches: [] };
+        return { allowed: true, summary, matches: [], activityEvents };
       }
 
       const primary = matches[0];
@@ -327,6 +347,7 @@ class PumpMigrationSafetyScanner {
         message: this._messageFor(primary),
         evidence: primary,
         matches: matches.slice(0, Math.max(20, Math.trunc(finiteNumber(options.maxMatches) || 20))),
+        activityEvents,
         summary,
       };
     } catch (err) {
@@ -598,6 +619,79 @@ class PumpMigrationSafetyScanner {
     }
 
     return matches;
+  }
+
+  _extractTargetMintActivity(transactionResult, context) {
+    if (!transactionResult || transactionResult.meta?.err) return null;
+    const { migration, slot, blockTimeMs } = context;
+    if (finiteNumber(blockTimeMs) == null) return null;
+    const accountKeys = resolveAccountKeys(transactionResult);
+    const signature = transactionSignature(transactionResult);
+    const migrationTx = signature === migration.signature;
+    let pumpInteraction = false;
+    let explicitBuy = false;
+    for (const instruction of collectInstructions(transactionResult)) {
+      const programId = instructionProgramId(instruction, accountKeys);
+      if (programId !== PUMP_PROGRAM_ID && programId !== PUMP_AMM_PROGRAM_ID) continue;
+      pumpInteraction = true;
+      const accounts = instructionAccounts(instruction, accountKeys);
+      const data = instructionData(instruction);
+      if (
+        accounts.includes(migration.mint) &&
+        BUY_DISCRIMINATORS.some((discriminator) =>
+          data.length >= discriminator.length &&
+          data.subarray(0, discriminator.length).equals(discriminator))
+      ) {
+        explicitBuy = true;
+      }
+    }
+    if (!pumpInteraction || (migrationTx && !explicitBuy)) return null;
+
+    const signer = accountKeys[0] || null;
+    const deltas = targetMintBalanceDeltas(
+      transactionResult,
+      accountKeys,
+      migration.mint,
+    ).filter((delta) =>
+      Math.abs(delta.deltaUi) > 0 &&
+      !this._isMigrationInfrastructureBalance(delta, migrationTx, migration));
+    if (deltas.length === 0) return null;
+    const signerDelta = deltas.find((delta) => delta.owner === signer);
+    const selected = signerDelta || deltas.sort(
+      (left, right) => Math.abs(right.deltaUi) - Math.abs(left.deltaUi),
+    )[0];
+    const side = selected.deltaUi > 0 ? 'BUY' : 'SELL';
+    const owner = selected.owner || signer;
+    const ownerIndex = accountKeys.indexOf(owner);
+    if (ownerIndex < 0) return null;
+    const preLamports = finiteNumber(transactionResult.meta?.preBalances?.[ownerIndex]);
+    const postLamports = finiteNumber(transactionResult.meta?.postBalances?.[ownerIndex]);
+    const feeLamports = ownerIndex === 0
+      ? finiteNumber(transactionResult.meta?.fee) || 0
+      : 0;
+    let solVolume = 0;
+    if (preLamports != null && postLamports != null) {
+      const nativeDelta = (postLamports - preLamports) / 1_000_000_000;
+      solVolume = side === 'BUY'
+        ? Math.max(0, -nativeDelta - (feeLamports / 1_000_000_000))
+        : Math.max(0, nativeDelta + (feeLamports / 1_000_000_000));
+    }
+    if (!(solVolume > 0)) return null;
+    const tokenVolume = Math.abs(selected.deltaUi);
+    return {
+      ts: blockTimeMs,
+      receivedAt: blockTimeMs,
+      side,
+      signer: owner,
+      signature,
+      slot,
+      solVolume,
+      tokenVolume,
+      price: tokenVolume > 0 ? solVolume / tokenVolume : null,
+      poolQuoteAfter: null,
+      fdvUsd: null,
+      source: 'chain_replay',
+    };
   }
 
   _migrationInfrastructure(migration, migrationTx) {

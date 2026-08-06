@@ -77,6 +77,48 @@ function writeCsv(filePath, rows) {
   fs.writeFileSync(filePath, `${lines.join('\n')}\n`, 'utf8');
 }
 
+function sanitizeUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.username) parsed.username = 'REDACTED';
+    if (parsed.password) parsed.password = 'REDACTED';
+    for (const key of parsed.searchParams.keys()) {
+      if (/(key|token|secret|auth|password|signature)/i.test(key)) {
+        parsed.searchParams.set(key, 'REDACTED');
+      }
+    }
+    parsed.pathname = parsed.pathname.replace(
+      /(api[-_]?key|token|secret)\/[^/?#]+/gi,
+      '$1/REDACTED',
+    );
+    return parsed.toString();
+  } catch (_) {
+    return value.replace(
+      /([?&](?:api[-_]?key|key|token|secret|auth|password)=)[^&#\s]+/gi,
+      '$1REDACTED',
+    );
+  }
+}
+
+function sanitizeConfigText(text) {
+  return String(text || '').split(/\r?\n/).map((line) => {
+    const match = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/);
+    if (!match) return sanitizeUrl(line);
+    const [, prefix, key, separator, rawValue] = match;
+    const quote = rawValue.startsWith('"') && rawValue.endsWith('"') ? '"' :
+      (rawValue.startsWith("'") && rawValue.endsWith("'") ? "'" : '');
+    const value = quote ? rawValue.slice(1, -1) : rawValue;
+    let sanitized = sanitizeUrl(value);
+    if (
+      /(PRIVATE|SECRET|API_KEY|ACCESS_TOKEN|AUTH_TOKEN|AUTH_KEY|PASSWORD|MNEMONIC|KEYPAIR|CREDENTIAL|WEBHOOK_URL|_TOKEN$|_KEY$)/i
+        .test(key)
+    ) {
+      sanitized = 'REDACTED';
+    }
+    return `${prefix}${key}${separator}${quote}${sanitized}${quote}`;
+  }).join('\n');
+}
+
 function parseJson(value) {
   try {
     return value ? JSON.parse(value) : {};
@@ -194,6 +236,10 @@ function flattenHolderSnapshotRow(row) {
     flat[`${prefix}_token_accounts`] = Array.isArray(holder?.tokenAccounts)
       ? holder.tokenAccounts.join('|')
       : null;
+    flat[`${prefix}_owner_type`] = holder?.ownerType || null;
+    flat[`${prefix}_owner_program`] = holder?.ownerProgram || null;
+    flat[`${prefix}_owner_executable`] = holder?.ownerExecutable ?? null;
+    flat[`${prefix}_exclusion_reason`] = holder?.exclusionReason || null;
   });
   return flat;
 }
@@ -321,10 +367,9 @@ function main(argv = process.argv.slice(2)) {
     const migrationRiskSnapshots = hasTable('migration_risk_snapshots')
       ? db.prepare(`
           SELECT * FROM migration_risk_snapshots
-          WHERE migration_time >= ? AND migration_time < ?
-            AND captured_at < ?
+          WHERE captured_at >= ? AND captured_at < ?
           ORDER BY migration_time, id
-        `).all(since - 10_000, until, until)
+        `).all(since, until)
       : [];
 
     const monitoredSessions = hasTable('token_lifecycle_events')
@@ -336,6 +381,7 @@ function main(argv = process.argv.slice(2)) {
               WHERE r.mint = a.mint
                 AND r.event_type = 'TOKEN_REMOVED'
                 AND r.added_at = a.added_at
+                AND r.ts < ?1
             ) AS removed_at,
             (
               SELECT r.reason
@@ -343,44 +389,48 @@ function main(argv = process.argv.slice(2)) {
               WHERE r.mint = a.mint
                 AND r.event_type = 'TOKEN_REMOVED'
                 AND r.added_at = a.added_at
+                AND r.ts < ?1
               ORDER BY r.ts ASC
               LIMIT 1
             ) AS removal_reason
           FROM token_lifecycle_events a
           WHERE a.event_type = 'TOKEN_ADDED'
-            AND a.ts < ?
+            AND a.ts < ?1
             AND COALESCE((
               SELECT MIN(r.ts)
               FROM token_lifecycle_events r
               WHERE r.mint = a.mint
                 AND r.event_type = 'TOKEN_REMOVED'
                 AND r.added_at = a.added_at
-            ), ?) >= ?
+                AND r.ts < ?1
+            ), ?1) >= ?2
           ORDER BY a.ts, a.id
-        `).all(until, until, since)
+        `).all(until, since)
       : [];
 
     const lifecycleEvents = hasTable('token_lifecycle_events')
       ? db.prepare(`
           SELECT e.*
           FROM token_lifecycle_events e
-          WHERE EXISTS (
+          WHERE e.ts < ?1
+            AND EXISTS (
             SELECT 1
             FROM token_lifecycle_events a
             WHERE a.event_type = 'TOKEN_ADDED'
               AND a.mint = e.mint
               AND a.added_at = e.added_at
-              AND a.ts < ?
+              AND a.ts < ?1
               AND COALESCE((
                 SELECT MIN(r.ts)
                 FROM token_lifecycle_events r
                 WHERE r.mint = a.mint
                   AND r.event_type = 'TOKEN_REMOVED'
                   AND r.added_at = a.added_at
-              ), ?) >= ?
+                  AND r.ts < ?1
+              ), ?1) >= ?2
           )
           ORDER BY e.ts, e.id
-        `).all(until, until, since)
+        `).all(until, since)
       : [];
 
     const monitoredMarketSnapshots = hasTable('token_market_snapshots') &&
@@ -434,11 +484,26 @@ function main(argv = process.argv.slice(2)) {
 
     const migrationHolderSnapshots = hasTable('migration_holder_snapshots')
       ? db.prepare(`
-          SELECT * FROM migration_holder_snapshots
-          WHERE migration_time >= ? AND migration_time < ?
-            AND captured_at < ?
+          SELECT * FROM (
+            SELECT h.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY h.mint
+                ORDER BY h.is_complete DESC, h.captured_at ASC, h.id ASC
+              ) AS canonical_rank
+            FROM migration_holder_snapshots h
+            WHERE h.captured_at >= ? AND h.captured_at < ?
+          )
+          WHERE canonical_rank = 1
           ORDER BY migration_time, id
-        `).all(since - 10_000, until, until)
+        `).all(since, until)
+      : [];
+
+    const migrationDetections = hasTable('migration_detection_events')
+      ? db.prepare(`
+          SELECT * FROM migration_detection_events
+          WHERE detected_at >= ? AND detected_at < ?
+          ORDER BY migration_time, id
+        `).all(since, until)
       : [];
 
     const monitoredTokens = hasTable('tokens') && hasTable('token_lifecycle_events')
@@ -450,17 +515,18 @@ function main(argv = process.argv.slice(2)) {
             FROM token_lifecycle_events a
             WHERE a.event_type = 'TOKEN_ADDED'
               AND a.mint = t.mint
-              AND a.ts < ?
+              AND a.ts < ?1
               AND COALESCE((
                 SELECT MIN(r.ts)
                 FROM token_lifecycle_events r
                 WHERE r.mint = a.mint
                   AND r.event_type = 'TOKEN_REMOVED'
                   AND r.added_at = a.added_at
-              ), ?) >= ?
+                  AND r.ts < ?1
+              ), ?1) >= ?2
           )
           ORDER BY t.mint
-        `).all(until, until, since)
+        `).all(until, since)
       : [];
 
     return {
@@ -477,6 +543,7 @@ function main(argv = process.argv.slice(2)) {
       monitoredMarketSnapshots,
       monitoredSwaps,
       migrationHolderSnapshots,
+      migrationDetections,
       monitoredTokens,
     };
   });
@@ -507,14 +574,41 @@ function main(argv = process.argv.slice(2)) {
     path.join(outDir, 'migration-holder-snapshots.csv'),
     data.migrationHolderSnapshots.map(flattenHolderSnapshotRow),
   );
+  writeCsv(path.join(outDir, 'migration-detections.csv'), data.migrationDetections);
   writeCsv(path.join(outDir, 'monitored-tokens.csv'), data.monitoredTokens);
+
+  const envPath = path.resolve(args.env || path.join(process.cwd(), '.env'));
+  const effectiveConfigWritten = fs.existsSync(envPath);
+  if (effectiveConfigWritten) {
+    fs.writeFileSync(
+      path.join(outDir, 'effective-config.txt'),
+      `${sanitizeConfigText(fs.readFileSync(envPath, 'utf8')).replace(/\s*$/, '')}\n`,
+      'utf8',
+    );
+  }
 
   const countsByType = {};
   for (const event of data.researchEvents) {
     countsByType[event.event_type] = (countsByType[event.event_type] || 0) + 1;
   }
+  const detectedMints = new Set(data.migrationDetections.map((row) => row.mint));
+  const holderMints = new Set(data.migrationHolderSnapshots.map((row) => row.mint));
+  const riskMints = new Set(data.migrationRiskSnapshots.map((row) => row.mint));
+  const completeRiskMints = new Set(data.migrationRiskSnapshots
+    .filter((row) => parseJson(row.metrics_json)?.coverage?.complete === true)
+    .map((row) => row.mint));
+  const acceptedDetectedMints = new Set(data.monitoredSessions
+    .filter((row) => row.source === 'pump_graduation' && detectedMints.has(row.mint))
+    .map((row) => row.mint));
+  const intersectionSize = (left, right) => [...left].filter((value) => right.has(value)).length;
+  const ratioOrNull = (numerator, denominator) => denominator > 0
+    ? numerator / denominator
+    : null;
+  const holderCoveredDetected = intersectionSize(detectedMints, holderMints);
+  const riskCoveredAccepted = intersectionSize(acceptedDetectedMints, riskMints);
+  const completeRiskCoveredAccepted = intersectionSize(acceptedDetectedMints, completeRiskMints);
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: Date.now(),
     generatedAtIso: new Date().toISOString(),
     dbPath,
@@ -542,7 +636,24 @@ function main(argv = process.argv.slice(2)) {
       monitoredMarketSnapshots: data.monitoredMarketSnapshots.length,
       monitoredSwaps: data.monitoredSwaps.length,
       migrationHolderSnapshots: data.migrationHolderSnapshots.length,
+      migrationDetections: data.migrationDetections.length,
+      migrationRiskComplete: data.migrationRiskSnapshots.filter(
+        (row) => parseJson(row.metrics_json)?.coverage?.complete === true,
+      ).length,
       monitoredTokens: data.monitoredTokens.length,
+    },
+    migrationCoverage: {
+      detectedUniqueMints: detectedMints.size,
+      holderCoveredDetectedMints: holderCoveredDetected,
+      holderCoverageRatio: ratioOrNull(holderCoveredDetected, detectedMints.size),
+      acceptedDetectedMints: acceptedDetectedMints.size,
+      riskCoveredAcceptedMints: riskCoveredAccepted,
+      riskCoverageRatio: ratioOrNull(riskCoveredAccepted, acceptedDetectedMints.size),
+      completeRiskCoveredAcceptedMints: completeRiskCoveredAccepted,
+      completeRiskCoverageRatio: ratioOrNull(
+        completeRiskCoveredAccepted,
+        acceptedDetectedMints.size,
+      ),
     },
     files: [
       'positions.csv',
@@ -558,14 +669,18 @@ function main(argv = process.argv.slice(2)) {
       'token-market-snapshots.csv',
       'monitored-swaps.csv',
       'migration-holder-snapshots.csv',
+      'migration-detections.csv',
       'monitored-tokens.csv',
       'data-dictionary.json',
+      ...(effectiveConfigWritten ? ['effective-config.txt'] : []),
     ],
   };
   const dataDictionary = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     cutoffRule:
       'Rows and outcomes at or after manifest.analysisCutoffMs are excluded or censored.',
+    migrationCoverageRule:
+      'Coverage denominators and numerators use unique mint intersections, never raw snapshot row counts.',
     files: {
       'positions.csv':
         'One row per entry. entry_metric_* columns flatten the exact entry signal snapshot.',
@@ -588,9 +703,11 @@ function main(argv = process.argv.slice(2)) {
       'monitored-swaps.csv':
         'All successfully parsed swaps received while each token remained actively monitored, including tokens never bought.',
       'migration-holder-snapshots.csv':
-        'Holder distribution captured immediately when a migration is detected, before admission screening completes. Pool vaults are excluded from concentration metrics; capture_delay_ms measures index/detection delay.',
+        'Canonical Holder distributions captured during the export window, before admission screening completes. Pool vaults are excluded from concentration metrics; each top owner is classified as wallet/program/Pump/unresolved for audit, and capture_delay_ms measures index/detection delay.',
+      'migration-detections.csv':
+        'One canonical row per migration mint first detected during the export window. Use this file as the denominator for Holder and launch-risk telemetry coverage.',
       'monitored-tokens.csv':
-        'Latest registry metadata for every token with a monitoring session overlapping the export window.',
+        'Current registry metadata at export time for every token with a monitoring session overlapping the window. This is not a point-in-time cutoff snapshot.',
     },
     researchEventTypes: {
       POSITION_OPENED: 'A submitted BUY was registered as a position.',
@@ -657,5 +774,6 @@ module.exports = {
   flattenResearchRow,
   flattenMigrationRiskRow,
   flattenHolderSnapshotRow,
+  sanitizeConfigText,
   main,
 };

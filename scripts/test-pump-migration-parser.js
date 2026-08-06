@@ -228,7 +228,7 @@ discovery._enqueueCandidate({ mint: key('M'), migrationVersion: 'v2' });
 assert.strictEqual(detectedMigration.mint, key('M'));
 assert.strictEqual(detectedMigration.migrationVersion, 'v2');
 discovery._enqueueCandidate({ mint: key('M'), migrationVersion: 'v2' });
-assert.strictEqual(migrationDetectionCount, 2, 'confirmed migrations must reset RSI even when screening is deduplicated');
+assert.strictEqual(migrationDetectionCount, 1, 'one migration mint must produce one canonical callback');
 assert.strictEqual(discovery.candidateQueue.length, 1, 'screening queue must remain deduplicated');
 
 assert.strictEqual(
