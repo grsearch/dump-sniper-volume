@@ -4,6 +4,7 @@ const assert = require('assert');
 const {
   assessWalletWsolClose,
   computeWalletQuoteAssetMovement,
+  summarizeExternalWsolIncreases,
   summarizeOwnedWsolAccounts,
 } = require('../src/utils/quoteAssetAccounting');
 
@@ -93,6 +94,15 @@ closeTo(
   -0.000005,
   'external WSOL is never attributed to the wallet',
 );
+const externalEvidence = summarizeExternalWsolIncreases(tx({
+  preNative: 1_000_000_000,
+  postNative: 999_995_000,
+  postExternal: 200_000_000,
+}), WALLET);
+assert.strictEqual(externalEvidence.length, 1, 'external WSOL increase is retained as audit evidence');
+assert.strictEqual(externalEvidence[0].address, EXTERNAL);
+assert.strictEqual(externalEvidence[0].owner, EXTERNAL_OWNER);
+closeTo(externalEvidence[0].deltaSol, 0.2, 'external audit delta');
 
 function parsedAccount(address, owner, amount, closeAuthority = null) {
   return {

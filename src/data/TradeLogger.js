@@ -80,10 +80,12 @@ class TradeLogger {
         dry_run INTEGER NOT NULL DEFAULT 0,
         reason TEXT,
         latency_ms INTEGER,
-        error TEXT
+        error TEXT,
+        confirmation_status TEXT NOT NULL DEFAULT 'final'
       );
       CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
       CREATE INDEX IF NOT EXISTS idx_trades_pos ON trades(position_id);
+      CREATE INDEX IF NOT EXISTS idx_trades_signature ON trades(signature);
 
       CREATE TABLE IF NOT EXISTS positions (
         position_id TEXT PRIMARY KEY,
@@ -363,6 +365,7 @@ class TradeLogger {
         pre_jupiter_escrow_wsol_sol REAL,
         post_jupiter_escrow_wsol_sol REAL,
         fee_lamports INTEGER,
+        details_json TEXT,
         created_at INTEGER NOT NULL,
         UNIQUE(signature, mint, side)
       );
@@ -389,11 +392,13 @@ class TradeLogger {
     `);
 
     for (const sql of [
+      "ALTER TABLE trades ADD COLUMN confirmation_status TEXT NOT NULL DEFAULT 'final'",
       'ALTER TABLE quote_asset_movements ADD COLUMN jupiter_escrow_wsol_delta REAL',
       'ALTER TABLE quote_asset_movements ADD COLUMN wallet_wsol_reserve_delta REAL',
       'ALTER TABLE quote_asset_movements ADD COLUMN pre_jupiter_escrow_wsol_sol REAL',
       'ALTER TABLE quote_asset_movements ADD COLUMN post_jupiter_escrow_wsol_sol REAL',
       'ALTER TABLE quote_asset_reconciliations ADD COLUMN wallet_wsol_rent_sol REAL',
+      'ALTER TABLE quote_asset_movements ADD COLUMN details_json TEXT',
     ]) {
       try { this.db.exec(sql); } catch (_) { /* column already exists */ }
     }
@@ -540,9 +545,20 @@ class TradeLogger {
       insertTrade: this.db.prepare(`
         INSERT INTO trades
           (position_id, ts, mint, symbol, side, sol_amount, token_amount, price, signature,
-           success, dry_run, reason, latency_ms, error)
+           success, dry_run, reason, latency_ms, error, confirmation_status)
         VALUES (@positionId, @ts, @mint, @symbol, @side, @solAmount, @tokenAmount, @price, @signature,
-                @success, @dryRun, @reason, @latencyMs, @error)
+                @success, @dryRun, @reason, @latencyMs, @error, @confirmationStatus)
+      `),
+
+      updateTradeConfirmation: this.db.prepare(`
+        UPDATE trades SET
+          success = @success,
+          sol_amount = COALESCE(@solAmount, sol_amount),
+          token_amount = COALESCE(@tokenAmount, token_amount),
+          price = COALESCE(@price, price),
+          error = @error,
+          confirmation_status = @confirmationStatus
+        WHERE signature = @signature AND side = @side
       `),
 
       tradesInRange: this.db.prepare(`
@@ -560,14 +576,14 @@ class TradeLogger {
           jupiter_escrow_wsol_delta, quote_asset_delta, pre_native_sol,
           post_native_sol, pre_wallet_wsol_sol, post_wallet_wsol_sol,
           pre_jupiter_escrow_wsol_sol, post_jupiter_escrow_wsol_sol,
-          fee_lamports, created_at
+          fee_lamports, details_json, created_at
         ) VALUES (
           @ts, @signature, @mint, @side, @success, @nativeSolDelta,
           @walletWsolDelta, @walletWsolReserveDelta,
           @jupiterEscrowWsolDelta, @quoteAssetDelta, @preNativeSol,
           @postNativeSol, @preWalletWsolSol, @postWalletWsolSol,
           @preJupiterEscrowWsolSol, @postJupiterEscrowWsolSol,
-          @feeLamports, @createdAt
+          @feeLamports, @detailsJson, @createdAt
         )
       `),
 
@@ -920,6 +936,11 @@ class TradeLogger {
         WHERE position_id = ?
       `),
 
+      updatePositionTokenAmount: this.db.prepare(`
+        UPDATE positions SET token_amount = ?, last_error = ?
+        WHERE position_id = ?
+      `),
+
       deferSellConfirmation: this.db.prepare(`
         UPDATE positions SET next_retry_at = ? WHERE position_id = ?
       `),
@@ -1032,7 +1053,7 @@ class TradeLogger {
   // ============================================================
 
   logTrade({ positionId, ts, mint, symbol, side, solAmount, tokenAmount, price, signature,
-             success, dryRun, reason, latencyMs, error }) {
+             success, dryRun, reason, latencyMs, error, confirmationStatus }) {
     this.stmts.insertTrade.run({
       positionId: positionId || null,
       ts: ts || Date.now(),
@@ -1048,6 +1069,29 @@ class TradeLogger {
       reason: reason || null,
       latencyMs: latencyMs ?? null,
       error: error || null,
+      confirmationStatus: confirmationStatus || (success ? 'confirmed' : 'failed'),
+    });
+  }
+
+  updateTradeConfirmation(signature, {
+    side = 'SELL',
+    success = false,
+    solAmount = null,
+    tokenAmount = null,
+    price = null,
+    error = null,
+    confirmationStatus = success ? 'confirmed' : 'failed',
+  } = {}) {
+    if (!signature) return;
+    this.stmts.updateTradeConfirmation.run({
+      signature,
+      side,
+      success: success ? 1 : 0,
+      solAmount,
+      tokenAmount,
+      price,
+      error: error || null,
+      confirmationStatus,
     });
   }
 
@@ -1072,6 +1116,7 @@ class TradeLogger {
       preJupiterEscrowWsolSol: null,
       postJupiterEscrowWsolSol: null,
       feeLamports: movement.feeLamports ?? null,
+      detailsJson: movement.details ? JSON.stringify(movement.details) : null,
       createdAt: Date.now(),
     });
   }
@@ -1523,6 +1568,14 @@ class TradeLogger {
       runnerArmed: runnerArmed ? 1 : 0,
       runnerArmedAt: runnerArmedAt || null,
     });
+  }
+
+  updatePositionTokenAmount(positionId, tokenAmount, reason = null) {
+    this.stmts.updatePositionTokenAmount.run(
+      tokenAmount ?? null,
+      reason || null,
+      positionId,
+    );
   }
 
   closePosition(positionId, { closedAt, exitPrice, exitSol, pnlSol, pnlPct, exitReason, sellSignature, peakPnlPct, peakPrice, peakTs, timeToPeakMs, priceTickCount }) {

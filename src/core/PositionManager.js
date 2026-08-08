@@ -4451,6 +4451,7 @@ class PositionManager extends EventEmitter {
         poolBaseVault: tokenInfo?.pool_base_vault,
         poolQuoteVault: tokenInfo?.pool_quote_vault,
         tokenAmount: pos.tokenAmount,
+        sellAllAvailable: (this.byMint.get(pos.mint)?.size || 0) <= 1,
         baseDecimals: tokenInfo?.decimals ?? 6,
         currentPrice: latestPrice,
       });
@@ -4505,11 +4506,16 @@ class PositionManager extends EventEmitter {
       tokenAmount: pos.tokenAmount,
       price: realExitPrice,
       signature: sellResult.signature,
-      success: sellResult.success,
+      success: sellResult.success && pos.dryRun,
       dryRun: pos.dryRun,
       reason: pos.exitReason + (pos.sellAttempts > 1 ? `_retry_${pos.sellAttempts}` : ''),
       latencyMs: sellResult.latencyMs,
-      error: sellResult.error,
+      error: sellResult.success && !pos.dryRun ? 'pending_chain_confirmation' : sellResult.error,
+      confirmationStatus: sellResult.success && !pos.dryRun
+        ? 'submitted'
+        : sellResult.success
+          ? 'confirmed'
+          : 'failed',
     });
 
     // ============ 分支 A：提交本身失败（拿不到 signature） ============
@@ -4543,33 +4549,12 @@ class PositionManager extends EventEmitter {
         return;
       }
 
-      this._scheduleRetryOrStuck(pos, triggerPrice, sellResult.error);
+      await this._scheduleRetryOrStuck(pos, triggerPrice, sellResult.error);
       return;
     }
 
-    // ============ 分支 B：提交成功，但还需等链上确认 ============
-    // v3.17.40: 如果卖出 SOL ≈ 0，说明代币已被其他仓位卖光，直接关闭
-    if (realSolOut !== null && realSolOut < 0.0001) {
-      monitor.inc('PositionManager.sellAbandoned_zeroOut', 1, 'PositionManager');
-      console.warn(
-        `[PositionManager] 🚫 SELL zero-out ${pos.symbol || pos.mint.slice(0, 6)}: ` +
-        `solOut=${realSolOut?.toExponential(3)} — token already sold, force closing`,
-      );
-      this.tradeLogger.closePosition(pos.positionId, {
-        closedAt: Date.now(),
-        exitPrice: realExitPrice,
-        exitSol: 0,
-        pnlSol: -pos.entrySol,
-        pnlPct: -100,
-        exitReason: pos.exitReason + '_ZERO_OUT',
-        sellSignature: sellResult.signature,
-      });
-      this.positions.delete(pos.positionId);
-      this._removeByMint(pos.mint, pos.positionId);
-      if (this.executor?.poolStateCache) this.executor.poolStateCache.removeHot(pos.mint);
-      monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
-      return;
-    }
+    // Submission is not settlement. Even a tiny SDK quote must go through
+    // chain confirmation and wallet quote-asset reconciliation.
 
     // 此时 ⚠️ 不能立即 closePosition！tx 可能在 mempool 被丢、滑点超限被 reject
     // 标记 sell_confirming 状态，启动后台确认
@@ -4623,6 +4608,94 @@ class PositionManager extends EventEmitter {
    *   - 实测：DB 记录 -0.012 SOL 亏损，链上真实 +0.091 SOL 盈利
    *   - 修复：落链确认后，调 fetchTxSwapResult 拿真实 realSolDelta，覆盖 SDK 估算
    */
+  async _settleConfirmedSell(
+    pos,
+    signature,
+    swap,
+    fallbackPrice,
+    triggerPrice,
+  ) {
+    if (!swap || !swap.success) return false;
+
+    const soldAmount = Number(swap.realTokenDelta) < 0
+      ? Math.abs(Number(swap.realTokenDelta))
+      : 0;
+    const quoteReceived = Number(swap.realSolDelta);
+
+    if (soldAmount > 0 && Number.isFinite(quoteReceived) && quoteReceived > 0) {
+      const exitPrice = quoteReceived / soldAmount;
+      monitor.inc('PositionManager.sellReconciled', 1, 'PositionManager');
+      this._finalizeSuccess(pos, exitPrice, quoteReceived, signature, soldAmount);
+      return true;
+    }
+
+    let balance = null;
+    try {
+      balance = await this.executor.getWalletTokenBalanceSnapshot(pos.mint, 6, 'confirmed');
+    } catch (err) {
+      monitor.recordError('PositionManager', err, {
+        phase: 'sell_settlement_balance_check',
+        mint: pos.mint,
+        signature,
+      });
+    }
+
+    if (balance && balance.rawAmount > 0n) {
+      pos.tokenAmount = balance.uiAmount;
+      this.tradeLogger.updatePositionTokenAmount(
+        pos.positionId,
+        balance.uiAmount,
+        'confirmed sell did not reduce token balance; retrying exact balance',
+      );
+      this.tradeLogger.updateTradeConfirmation(signature, {
+        success: false,
+        error: 'confirmed_without_token_decrease',
+        confirmationStatus: 'failed',
+      });
+      await this._scheduleRetryOrStuck(
+        pos,
+        triggerPrice || fallbackPrice,
+        'confirmed_without_token_decrease',
+      );
+      return true;
+    }
+
+    const external = Array.isArray(swap.externalWsolIncreases)
+      ? swap.externalWsolIncreases
+      : [];
+    const externalSummary = external
+      .map((row) => `${row.address || 'unknown'}:${Number(row.deltaSol || 0).toFixed(9)}`)
+      .join(',');
+    const reason = soldAmount > 0
+      ? 'confirmed_token_decrease_without_wallet_quote'
+      : 'zero_token_balance_without_confirmed_sale_proceeds';
+    const details = externalSummary ? `${reason}; external_wsol=${externalSummary}` : reason;
+    this._markSellSettlementUnresolved(pos, signature, details);
+    return true;
+  }
+
+  _markSellSettlementUnresolved(pos, signature, reason) {
+    monitor.inc('PositionManager.sellSettlementUnresolved', 1, 'PositionManager');
+    this.tradeLogger.updateTradeConfirmation(signature, {
+      success: false,
+      error: reason,
+      confirmationStatus: 'unresolved',
+    });
+    this.tradeLogger.markStuck(pos.positionId, reason);
+    pos.status = 'stuck';
+    pos.exiting = true;
+    console.error(
+      `[PositionManager] SELL SETTLEMENT UNRESOLVED ${pos.symbol || pos.mint.slice(0, 6)}: ` +
+        `${reason}; position kept for audit, no synthetic -100% close`,
+    );
+    monitor.recordError('PositionManager', new Error(reason), {
+      phase: 'sell_settlement_unresolved',
+      positionId: pos.positionId,
+      mint: pos.mint,
+      signature,
+    });
+  }
+
   async _confirmSellAsync(pos, signature, exitPrice, solOut, triggerPrice, actualSellAmount) {
     const result = await this.executor.confirmTx(signature, { timeoutMs: 15_000 });
 
@@ -4643,41 +4716,17 @@ class PositionManager extends EventEmitter {
           `slot=${result.slot || 'n/a'}`,
       );
 
-      // v3.17.6: 拉链上真实 SOL 增量
-      let realExitPrice = exitPrice;
-      let realSolOut = solOut;
-      try {
-        const swap = await this.executor.fetchTxSwapResult(signature, pos.mint);
-        // SELL 的 realSolDelta 是正数（钱包 SOL 增加）
-        if (swap && swap.realSolDelta > 0 && pos.tokenAmount > 0) {
-          realSolOut = swap.realSolDelta;
-          // v3.17.40c: 用实际卖出的代币数算价格（链上余额可能 < pos.tokenAmount）
-          const sellAmt = actualSellAmount || pos.tokenAmount;
-          realExitPrice = realSolOut / sellAmt;
-          monitor.inc('PositionManager.sellReconciled', 1, 'PositionManager');
-          const drift = solOut ? ((realSolOut - solOut) / solOut) * 100 : 0;
-          console.log(
-            `[PositionManager] 🔧 SELL reconciled ${pos.symbol || pos.mint.slice(0, 6)}: ` +
-              `SDK est ${(solOut ?? 0).toFixed(4)} → real ${realSolOut.toFixed(4)} SOL (${drift.toFixed(2)}%)`,
-          );
-        } else {
-          // fetchTxSwapResult 失败：保留 SDK 估算（旧行为）
-          monitor.inc('PositionManager.sellReconcileFallback', 1, 'PositionManager');
-          console.warn(
-            `[PositionManager] SELL reconcile fallback to SDK estimate: ${pos.symbol || pos.mint.slice(0, 6)} ` +
-              `sig=${signature.slice(0, 8)}.. (fetch returned no realSolDelta)`,
-          );
-        }
-      } catch (err) {
-        monitor.recordError('PositionManager', err, {
-          phase: 'sell_reconcile_fetch',
-          mint: pos.mint,
-          signature,
-        });
-        // 异常时也 fallback 到 SDK 估算
+      const swap = await this.executor.fetchTxSwapResult(signature, pos.mint);
+      if (await this._settleConfirmedSell(pos, signature, swap, exitPrice, triggerPrice)) {
+        return;
       }
-
-      this._finalizeSuccess(pos, realExitPrice, realSolOut, signature, actualSellAmount);
+      this.tradeLogger.updateTradeConfirmation(signature, {
+        success: false,
+        error: 'confirmed_transaction_unavailable_for_reconciliation',
+        confirmationStatus: 'unresolved',
+      });
+      this.tradeLogger.deferSellConfirmation(pos.positionId, Date.now() + 5_000);
+      monitor.inc('PositionManager.sellReconcileDeferred', 1, 'PositionManager');
       return;
     }
 
@@ -4694,18 +4743,9 @@ class PositionManager extends EventEmitter {
     //   不能完全依赖这条路径 — 它可能也失败(tx 真的没落链),所以失败时仍走 retry
     try {
       const swap = await this.executor.fetchTxSwapResult(signature, pos.mint);
-      if (swap && swap.realSolDelta > 0 && pos.tokenAmount > 0) {
-        const realSolOut = swap.realSolDelta;
-        // v3.17.40c: 用 actualSellAmount 算正确的 exitPrice
-        const sellAmt5b = actualSellAmount || pos.tokenAmount;
-        const realExitPrice = realSolOut / sellAmt5b;
+      if (swap && swap.success) {
         monitor.inc('PositionManager.sellRecoveredFromTimeout', 1, 'PositionManager');
-        console.log(
-          `[PositionManager] ✅ SELL actually landed (recovered from confirm timeout) ` +
-            `${pos.symbol || pos.mint.slice(0, 6)}: realSol=${realSolOut.toFixed(4)}`,
-        );
-        this._finalizeSuccess(pos, realExitPrice, realSolOut, signature, actualSellAmount);
-        return;
+        if (await this._settleConfirmedSell(pos, signature, swap, exitPrice, triggerPrice)) return;
       }
     } catch (err) {
       // fetchTxSwapResult 也失败 → 真的没落链或链上 tx 失败,继续 retry 流程
@@ -4726,7 +4766,7 @@ class PositionManager extends EventEmitter {
       return;
     }
 
-    this._scheduleRetryOrStuck(pos, triggerPrice, errMsg);
+    await this._scheduleRetryOrStuck(pos, triggerPrice, errMsg);
   }
 
   _finalizeSuccess(pos, exitPrice, solOut, signature, actualSellAmount) {
@@ -4734,12 +4774,20 @@ class PositionManager extends EventEmitter {
     // 如果链上余额不足（其他仓位先卖了），actualSellAmount < pos.tokenAmount
     const sellAmt = actualSellAmount != null ? actualSellAmount : pos.tokenAmount;
     const exitSol = solOut ?? sellAmt * exitPrice;
+    this.tradeLogger.updateTradeConfirmation(signature, {
+      success: true,
+      solAmount: exitSol,
+      tokenAmount: sellAmt,
+      price: exitPrice,
+      error: null,
+      confirmationStatus: 'confirmed',
+    });
 
     // v3.17.14: PnL 计算修复
     //   - entrySol: BUY reconcile 后的真实 SOL 出账（已含 buy priority fee + base fee）
     //   - exitSol: SELL reconcile 后的真实 SOL 入账（已含 sell priority fee + base fee）
     //   - 两者都是钱包净变化，所以 PnL = exitSol - entrySol，不需要再扣 fee
-    //   - 如果 exitSol 还是 SDK 估算值（reconcile 失败），也直接用，因为 SDK 估算不含 fee
+    //   - 只有链上确认的代币减少量和钱包报价资产增量都有效时才会进入这里
     //     导致 PnL 偏高一点，但比双重扣 fee 准确
     const grossPnl = exitSol - pos.entrySol;
     const pnlSol = grossPnl;
@@ -4870,7 +4918,7 @@ class PositionManager extends EventEmitter {
     // 同币加仓仓位在触发阶段已经统一进入串行卖出队列，这里只完成当前仓位结算。
   }
 
-  _scheduleRetryOrStuck(pos, triggerPrice, errMsg) {
+  async _scheduleRetryOrStuck(pos, triggerPrice, errMsg) {
     monitor.inc('PositionManager.sellRetries', 1, 'PositionManager');
 
     // v3.17.40: 如果错误是 Custom:6053 或 Custom:1 (Insufficient tokens)，说明代币已被其他仓位卖光
@@ -4879,35 +4927,57 @@ class PositionManager extends EventEmitter {
     //   Must match both JSON-quoted "Custom":1 and plain Custom:1
     const hasTokenGone6053 = errMsg && (errMsg.includes('Custom:6053') || errMsg.includes('Custom":6053'));
     const hasTokenGone1 = errMsg && (errMsg.includes('Custom:1}') || errMsg.includes('Custom":1}'));
-    if (hasTokenGone6053 || hasTokenGone1) {
-      monitor.inc('PositionManager.sellAbandoned_tokenGone', 1, 'PositionManager');
-      const errType = hasTokenGone6053 ? 'Custom:6053' : 'Custom:1';
-      console.warn(
-        `[PositionManager] 🚫 SELL abandoned ${pos.symbol || pos.mint.slice(0, 6)}: ` +
-        `${errType} (token balance 0) — likely sold by another position, force closing`,
-      );
-      this.tradeLogger.closePosition(pos.positionId, {
-        closedAt: Date.now(),
-        exitPrice: triggerPrice,
-        exitSol: 0,
-        pnlSol: -pos.entrySol,
-        pnlPct: -100,
-        exitReason: pos.exitReason + '_TOKEN_GONE',
-        sellSignature: pos._lastSellSignature || null,
-      });
-      // v3.26: TOKEN_GONE (rug) 后 24h 冷却，防止继续买入归零币
-      if (this.signalEngine && this.signalEngine._exitCooldowns) {
-        const rugCooldownMs = parseInt(process.env.RUG_REBUY_COOLDOWN_MS || '86400000', 10);
-        this.signalEngine._exitCooldowns.set(pos.mint, Date.now() + rugCooldownMs);
-        console.log(
-          `[PositionManager] 🔒 RUG cooldown ${pos.symbol || pos.mint.slice(0, 6)} for ${Math.round(rugCooldownMs / 3600000)}h (token gone, no rebuy)`,
-        );
+    const hasBalanceError = String(errMsg || '').includes('no on-chain balance to sell');
+    if (hasTokenGone6053 || hasTokenGone1 || hasBalanceError) {
+      let balance = null;
+      try {
+        balance = await this.executor.getWalletTokenBalanceSnapshot(pos.mint, 6, 'confirmed');
+      } catch (err) {
+        monitor.recordError('PositionManager', err, {
+          phase: 'sell_error_balance_check',
+          mint: pos.mint,
+        });
       }
-      this.positions.delete(pos.positionId);
-      this._removeByMint(pos.mint, pos.positionId);
-      if (this.executor?.poolStateCache) this.executor.poolStateCache.removeHot(pos.mint);
-      monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
-      return;
+
+      if (balance && balance.rawAmount > 0n) {
+        pos.tokenAmount = balance.uiAmount;
+        this.tradeLogger.updatePositionTokenAmount(
+          pos.positionId,
+          balance.uiAmount,
+          `sell balance corrected after ${errMsg}`,
+        );
+        console.warn(
+          `[PositionManager] SELL balance corrected ${pos.symbol || pos.mint.slice(0, 6)}: ` +
+            `${balance.uiAmount}; retry will use exact raw balance`,
+        );
+      } else if (balance) {
+        const signature = pos._lastSellSignature || null;
+        let swap = null;
+        if (signature) swap = await this.executor.fetchTxSwapResult(signature, pos.mint);
+        if (signature && await this._settleConfirmedSell(
+          pos,
+          signature,
+          swap,
+          triggerPrice,
+          triggerPrice,
+        )) {
+          return;
+        }
+        this._markSellSettlementUnresolved(
+          pos,
+          signature,
+          `wallet token balance is zero after sell error (${errMsg}); proceeds not proven`,
+        );
+        return;
+      }
+    }
+
+    if (pos._lastSellSignature) {
+      this.tradeLogger.updateTradeConfirmation(pos._lastSellSignature, {
+        success: false,
+        error: errMsg,
+        confirmationStatus: 'failed',
+      });
     }
 
     // 重试上限：默认 12 次（SELL_RETRY_DELAYS_MS × 2）。超过标 stuck
@@ -5147,43 +5217,26 @@ class PositionManager extends EventEmitter {
           if (result.confirmed) {
             monitor.inc('PositionManager.reconcilerConfirmed', 1, 'PositionManager');
 
-            // v3.17 修复 PnL bug：
-            // 之前用 pos.entryPrice 作为 exitPrice 占位 → _finalizeSuccess 里 exitSol
-            // 退化为 tokenAmount * entryPrice = entrySol → 净 PnL ≈ -feeSol（误显示亏损）。
-            // 现在从链上 fetch 真实 SOL 收入，按真实成交价回写。
-            let exitPrice = pos.entryPrice;
-            let solOut = null;
-            try {
-              const swap = await this.executor.fetchTxSwapResult(sig, pos.mint);
-              // SELL 的 realSolDelta 是正数（钱包 SOL 增加），需 > 0 才有效
-              if (swap && swap.realSolDelta > 0 && pos.tokenAmount > 0) {
-                solOut = swap.realSolDelta;
-                exitPrice = solOut / pos.tokenAmount;
-                // 同时累加 SELL tx 的 base fee（priority fee 已包含在 realSolDelta 里）
-                if (swap.fee && !pos._reconcilerSellFeeAccounted) {
-                  // realSolDelta 已经扣过 priority fee + base fee；这里不再叠加
-                  // （避免双重扣减）
-                  pos._reconcilerSellFeeAccounted = true;
-                }
-                console.log(
-                  `[PositionManager] 🔄 reconciler found landed sell: ${pos.symbol || pos.mint.slice(0, 6)}, ` +
-                    `solOut=${solOut.toFixed(4)} SOL, exitPrice=${exitPrice.toExponential(4)}`,
-                );
-              } else {
-                console.warn(
-                  `[PositionManager] 🔄 reconciler found landed sell: ${pos.symbol || pos.mint.slice(0, 6)}, ` +
-                    `但 fetchTxSwapResult 拿不到 realSolDelta — fallback 用 entryPrice 占位（PnL 将不准）`,
-                );
-              }
-            } catch (err) {
-              monitor.recordError('PositionManager', err, {
-                phase: 'reconciler_fetch_swap',
-                mint: pos.mint,
-                signature: sig,
-              });
+            const swap = await this.executor.fetchTxSwapResult(sig, pos.mint);
+            if (await this._settleConfirmedSell(
+              pos,
+              sig,
+              swap,
+              pos.entryPrice,
+              this.priceTracker.getPrice(pos.mint) || pos.entryPrice,
+            )) {
+              continue;
             }
-
-            this._finalizeSuccess(pos, exitPrice, solOut, sig, null);  // v3.17.40c: reconciler path, no actualSellAmount
+            if (now - Number(row.last_retry_at || 0) >= 120_000) {
+              this._markSellSettlementUnresolved(
+                pos,
+                sig,
+                'confirmed sell transaction unavailable for reconciliation after 120s',
+              );
+              continue;
+            }
+            this.tradeLogger.deferSellConfirmation(pos.positionId, Date.now() + 5_000);
+            monitor.inc('PositionManager.sellReconcileDeferred', 1, 'PositionManager');
             continue;
           }
 

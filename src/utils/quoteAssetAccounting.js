@@ -214,6 +214,53 @@ function computeWalletQuoteAssetMovement(
   };
 }
 
+/**
+ * List positive WSOL changes on accounts not controlled by the wallet.
+ * These rows are audit evidence only. They must never be added to wallet
+ * equity unless a later, explicit settlement proves wallet ownership.
+ */
+function summarizeExternalWsolIncreases(
+  tx,
+  wallet,
+  wsolMint = DEFAULT_WSOL_MINT,
+) {
+  const meta = tx?.meta;
+  if (!meta || !wallet) return [];
+
+  const keys = transactionAccountKeys(tx);
+  const preByIndex = new Map();
+  const postByIndex = new Map();
+  for (const row of meta.preTokenBalances || []) {
+    if (row?.mint === wsolMint && Number.isInteger(row.accountIndex)) {
+      preByIndex.set(row.accountIndex, row);
+    }
+  }
+  for (const row of meta.postTokenBalances || []) {
+    if (row?.mint === wsolMint && Number.isInteger(row.accountIndex)) {
+      postByIndex.set(row.accountIndex, row);
+    }
+  }
+
+  const indexes = new Set([...preByIndex.keys(), ...postByIndex.keys()]);
+  const increases = [];
+  for (const accountIndex of indexes) {
+    const pre = preByIndex.get(accountIndex);
+    const post = postByIndex.get(accountIndex);
+    const owner = post?.owner || pre?.owner || null;
+    if (!owner || owner === wallet) continue;
+    const deltaLamports = rawTokenAmount(post) - rawTokenAmount(pre);
+    if (deltaLamports <= 0n) continue;
+    increases.push({
+      accountIndex,
+      address: accountKeyString(keys[accountIndex]),
+      owner,
+      deltaLamports,
+      deltaSol: lamportsToSol(deltaLamports),
+    });
+  }
+  return increases.sort((a, b) => b.deltaSol - a.deltaSol);
+}
+
 module.exports = {
   DEFAULT_WSOL_MINT,
   LAMPORTS_PER_SOL,
@@ -221,6 +268,7 @@ module.exports = {
   computeWalletQuoteAssetMovement,
   lamportsToSol,
   rawTokenAmount,
+  summarizeExternalWsolIncreases,
   summarizeOwnedWsolAccounts,
   sumOwnedWsol,
   sumOwnedWsolAccountLamports,

@@ -52,6 +52,7 @@ const {
 const {
   assessWalletWsolClose,
   computeWalletQuoteAssetMovement,
+  summarizeExternalWsolIncreases,
 } = require('../utils/quoteAssetAccounting');
 
 // AllenHark Slipstream SDK (lazy load)
@@ -850,10 +851,45 @@ class Executor {
   async getWalletTokenBalance(mint) {
     if (!this.keypair) return 0;
     try {
-      return await this._getRealOnchainTokenAmount(mint, 6);
+      return (await this.getWalletTokenBalanceSnapshot(mint)).uiAmount;
     } catch (_) {
       return 0;
     }
+  }
+
+  /**
+   * Return an exact, raw wallet token balance. Unlike getWalletTokenBalance,
+   * this method deliberately throws on RPC failure so sell control flow never
+   * confuses "balance unavailable" with a real zero balance.
+   */
+  async getWalletTokenBalanceSnapshot(mint, fallbackDecimals = 6, commitment = 'processed') {
+    if (!this.keypair) throw new Error('wallet not loaded');
+    const response = await this.rpc.getParsedTokenAccountsByOwner(
+      this.keypair.publicKey,
+      { mint: new PublicKey(mint) },
+      commitment,
+    );
+    let rawAmount = 0n;
+    let decimals = Number.isInteger(fallbackDecimals) ? fallbackDecimals : 6;
+    let accountCount = 0;
+    for (const account of response?.value || []) {
+      const tokenAmount = account?.account?.data?.parsed?.info?.tokenAmount;
+      if (!tokenAmount) continue;
+      try {
+        rawAmount += BigInt(tokenAmount.amount || '0');
+      } catch (_) {
+        throw new Error(`invalid raw token balance for ${mint}`);
+      }
+      if (Number.isInteger(tokenAmount.decimals)) decimals = tokenAmount.decimals;
+      accountCount++;
+    }
+    return {
+      rawAmount,
+      decimals,
+      uiAmount: Number(rawAmount) / Math.pow(10, decimals),
+      accountCount,
+      commitment,
+    };
   }
 
   /**
@@ -893,6 +929,7 @@ class Executor {
         realSolDelta = (post - pre) / 1e9; // SOL
       }
       const quoteMovement = computeWalletQuoteAssetMovement(tx, owner);
+      const externalWsolIncreases = summarizeExternalWsolIncreases(tx, owner);
       realSolDelta = quoteMovement?.quoteDeltaSol ?? realSolDelta;
 
       // Token 净变化（对应 mint）
@@ -926,6 +963,7 @@ class Executor {
         postNativeSol: quoteMovement?.postNativeSol || 0,
         preWalletWsolSol: quoteMovement?.preWalletWsolSol || 0,
         postWalletWsolSol: quoteMovement?.postWalletWsolSol || 0,
+        externalWsolIncreases,
         realTokenDelta,
         fee: tx.meta.fee || 0,
         computeUnitsConsumed: tx.meta.computeUnitsConsumed || 0,
@@ -948,6 +986,14 @@ class Executor {
           preWalletWsolSol: result.preWalletWsolSol,
           postWalletWsolSol: result.postWalletWsolSol,
           feeLamports: result.fee,
+          details: {
+            externalWsolIncreases: externalWsolIncreases.map((row) => ({
+              accountIndex: row.accountIndex,
+              address: row.address,
+              owner: row.owner,
+              deltaSol: row.deltaSol,
+            })),
+          },
         });
       } catch (auditErr) {
         monitor.recordError('Executor', auditErr, {
@@ -1591,10 +1637,20 @@ class Executor {
       if (this.poolStateCache) {
         swapState = this.poolStateCache.get(order.poolAddress);
       }
+      const balancePromise = this.getWalletTokenBalanceSnapshot(
+        order.mint,
+        baseDecimals,
+        'processed',
+      );
+      let walletBalance;
       if (!swapState) {
-        swapState = await this.onlineSdk.swapSolanaState(poolKey, this.keypair.publicKey);
+        [swapState, walletBalance] = await Promise.all([
+          this.onlineSdk.swapSolanaState(poolKey, this.keypair.publicKey),
+          balancePromise,
+        ]);
         monitor.inc('Executor.sellCacheMiss', 1, 'Executor');
       } else {
+        walletBalance = await balancePromise;
         monitor.inc('Executor.sellCacheHit', 1, 'Executor');
       }
       const stateLatencyMs = Date.now() - tS0;
@@ -1604,11 +1660,16 @@ class Executor {
       // 2. v3.35: 卖出数量 = 全部持仓（不再留 0.5% 余量）。
       // 如果有 cachedAmount（链上余额缓存）用缓存值，否则用持仓记录的 tokenAmount。
       // Math.floor 去掉浮点精度误差，raw integer 不会 insufficient funds。
-      const sellAmount = (Number.isFinite(order.cachedAmount) && order.cachedAmount > 0)
-        ? order.cachedAmount
-        : tokenAmount;
-      const sellAmountRaw = Math.floor(sellAmount * Math.pow(10, baseDecimals));
-      if (sellAmountRaw <= 0) {
+      const actualDecimals = walletBalance.decimals;
+      const desiredRaw = BigInt(Math.max(
+        0,
+        Math.floor(tokenAmount * Math.pow(10, actualDecimals)),
+      ));
+      const sellAmountRaw = order.sellAllAvailable || desiredRaw > walletBalance.rawAmount
+        ? walletBalance.rawAmount
+        : desiredRaw;
+      const sellAmount = Number(sellAmountRaw) / Math.pow(10, actualDecimals);
+      if (sellAmountRaw <= 0n) {
         monitor.inc('Executor.sellFail', 1, 'Executor');
         return {
           success: false,
@@ -1617,7 +1678,13 @@ class Executor {
         };
       }
 
-      const sellAmountBN = new BN(sellAmountRaw);
+      if (actualDecimals !== baseDecimals) {
+        console.warn(
+          `[Executor:LIVE] SELL decimals corrected ${order.mint.slice(0, 6)}: ` +
+            `${baseDecimals} -> ${actualDecimals}`,
+        );
+      }
+      const sellAmountBN = new BN(sellAmountRaw.toString());
       const slippagePct = config.strategy.sellSlippageBps / 100;
 
       // 2. 构造 sell 指令（base→quote 方向）
